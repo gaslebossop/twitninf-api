@@ -22,3 +22,10 @@ yarn.lock
 *.tar.gz
 src (2).zip
 src.zip
+
+# Development guides and test scripts
+*.md
+test-*.js
+*test*.js
+*.sql
+
