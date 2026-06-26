@@ -1,0 +1,9 @@
+{
+  "name": "megallm-client",
+  "version": "1.0.0",
+  "description": "Standalone Node.js client for MegaLLM Private API",
+  "main": "index.js",
+  "type": "module",
+  "author": "TokTokStudio",
+  "license": "ISC"
+}

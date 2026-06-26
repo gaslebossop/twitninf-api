@@ -1,0 +1,15 @@
+{
+  "watch": ["src/"],
+  "ext": "js,json,ts",
+  "ignore": [
+    "src/services/policiercongo/memory.json",
+    "*.json",
+    "node_modules/",
+    "logs/",
+    "*.log"
+  ],
+  "env": {
+    "NODE_ENV": "development"
+  },
+  "exec": "node src/server.js"
+}

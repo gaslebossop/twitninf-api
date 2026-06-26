@@ -1,0 +1,61 @@
+{
+  "lastAnalysis": null,
+  "userPreferences": {},
+  "engagementHistory": [],
+  "profileUpdateHistory": [],
+  "tweetHistory": [],
+  "lastActions": [],
+  "communityMood": "neutral",
+  "priorities": [],
+  "personalityProfile": {
+    "traits": [
+      "dedication_request",
+      "demande",
+      "dedicace",
+      "quartier",
+      "wesh",
+      "policiercongo",
+      "fais",
+      "moi",
+      "ado",
+      "chill",
+      "spontane"
+    ],
+    "toneKeywords": [
+      "naturel",
+      "court"
+    ],
+    "updated_at": "2026-04-19T00:29:25.171Z"
+  },
+  "lastUpdated": "2026-04-19T00:29:25.168Z",
+  "automation_stats": {
+    "total_runs": 0,
+    "successful_runs": 0,
+    "failed_runs": 0,
+    "error_runs": 0,
+    "last_success": null,
+    "last_failure": null,
+    "last_error": null
+  },
+  "processedPlatformTweets": [],
+  "significantInteractions": [
+    {
+      "user_id": "88888888-4444-4444-4444-888888888888",
+      "user_username": "gas_test_unif",
+      "content": "Wesh PolicierCongo, fais moi une dédicace pour le quartier !",
+      "type": "dedication_request",
+      "importance": "high",
+      "user_request": "Demande de dédicace quartier",
+      "timestamp": "2026-04-19T00:29:25.171Z",
+      "added_at": "2026-04-19T00:29:25.171Z",
+      "context": "",
+      "response_given": null,
+      "follow_up_needed": false
+    }
+  ],
+  "_metadata": {
+    "version": "1.0.0",
+    "savedAt": "2026-04-19T00:29:26.452Z",
+    "nodeVersion": "v20.5.1"
+  }
+}

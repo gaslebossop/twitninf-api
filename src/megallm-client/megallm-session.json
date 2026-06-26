@@ -1,0 +1,16 @@
+{
+  "updatedAt": "2026-04-13T11:51:00.899Z",
+  "cookieHeader": "__Host-next-auth.csrf-token=bf3f7994d018a6c3fa7c862668855a5de98b4ecce8fab69c867cdc3ca41e021a%7C2219138777153a1d8e726aec258e84c469b8f70164f28368dcaea8c89f4b6317; _ga=GA1.1.431740682.1776081020; __Secure-next-auth.callback-url=https%3A%2F%2Fmegallm.io%2Fdashboard%2Foverview; __Secure-next-auth.session-token=eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..LYeP0e8SgqkwZk-s.FMhJGwDQxk5rrm-cQzyp3FEu08DO_TmHeM7qcQHDTZPVBnEF6Qqc4wAuoF5UWB5fjZfnJ44h39GGeI2hK7hY6miguHn0e_iC56LkCDqT7gV4Ug1PgI7vuiLyL_XC3FWJOLXBxaeW4ZeFJKpivcZan7We9fUyjkh1KkAvhP2qF-XIX_waG7uf_EQi0wXUD-V68ILp6ksf7qrZ6AJNXCQCNBP_exiAb8nxx6FFmA1zJiR6MPUk-K5ohDgWHiWqNeWWSA7_ShBNp5W3M-Vp0X5hl1au-hQNfchcGSXv705p473BLYwPmJpS0hDRqG81FW6ZSQTI31gk4XQZxwQ21SOhlnwsuk42KFM8ynJz__7xfMyqZFROk39NlMqF4Ae7mmuIhnJeLSRAWQuFuEfgPfgQMH-GQZe9wINY_zdCRUi--Kfni8wBmDrRTWL9gO7Kfg7SuuzKALMUYiOqXp2aKvavRxKbQrBALO54P9yL27eI7QCdGFSbvj_cOfM4JsohVugHslLxIObbdvpxFC73EZA8I3cj09wG-spPUUr32-rqL6UtnChFK_WMYF0ZKBN6BlU1jQTCyZ0WM38mhRE1OKpqYwPOE7pJdrvxZ0Ejtz4qzUWo9NIeG_Kilk7jUOhxmGrnSoyjGq8rqQ_SpbCv23FXSNCZ40XY1BYBxBhFbduXBzepsN1kchLdC-DQs9XtQ2I9iCLrCDTHZ7T3YcwnwZWYZT0oF9UTrl9apeT4bQLu-8JYF4cMOost_q0a2c2nvoW38Jg.39CcFtMi2f2meQFRkb7aXA; last-org=org_aa33e6e7f2eecbadf7ede54570a72861; _ga_94H3VHXENL=GS2.1.s1776081019$o1$g1$t1776081060$j19$l0$h0",
+  "extraHeaders": {
+    "x-fingerprint": "a6675da97273e2bca061271286ad205bcca72c9c1254e84ab4127e0da6a54b66",
+    "x-nonce": "69cad98d54871541db3741f23c88aaa75d947b4176a665e690caaf3dba837d0f",
+    "x-pow-challenge": "d2b02717507a48d69003f0855c2504842802f952800d5358bf2e9dd52620dad8",
+    "x-pow-solution": "491",
+    "x-signature": "21d4f0ff4250a2ef3dc1e07a6e11a2cd10ca4a09aa8634669c6dd701449abd0d",
+    "x-timestamp": "1776081058",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+    "sec-ch-ua": "\"Google Chrome\";v=\"147\", \"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"147\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Windows\""
+  }
+}

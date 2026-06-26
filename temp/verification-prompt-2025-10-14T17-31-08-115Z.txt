@@ -1,0 +1,87 @@
+
+Tu es un expert en vérification de comptes sur les réseaux sociaux. Analyse cette demande de vérification et donne une recommandation.
+
+## DONNÉES UTILISATEUR:
+
+**Informations de base:**
+- Nom d'utilisateur: chones
+- Nom complet: Chones Caramel
+- Âge du compte: 0 jours
+- Premium: Non
+- Déjà vérifié: Non
+
+**Statistiques:**
+- Abonnés: 0
+- Abonnements: 0
+- Vues totales: 0
+- Likes total: 3
+- Retweets total: 1
+- Taux d'engagement: 1.33
+
+**Contenu récent (3 tweets):**
+1. "Non" (0 vues, undefined)
+2. "" (0 vues, undefined)
+3. "Tu mets des twouits" (0 vues, undefined)
+
+**Contexte global de l'application:**
+- Âge de l'application: 60 jours (créée le 15 août 2024)
+- Total utilisateurs: 35 utilisateurs (application très récente)
+- Utilisateurs actifs: 5 utilisateurs seulement
+- Total tweets: 1045
+- Total vues: 1155
+- Utilisateurs vérifiés: 8 sur 37 (21.6%)
+- Taux de vérification: 21.6% des utilisateurs actifs sont vérifiés
+
+**⚠️ IMPORTANT - CONTEXTE DE L'APPLICATION:**
+TwitNin est une application TRÈS RÉCENTE avec seulement 35 utilisateurs au total et 5 utilisateurs actifs. Il est donc NORMAL et ATTENDU que la plupart des utilisateurs aient des statistiques faibles (peu de vues, peu d'abonnés, peu d'engagement). Ne rejette PAS un utilisateur uniquement pour des statistiques faibles - c'est normal dans une application si récente avec si peu d'utilisateurs.
+
+**Informations du formulaire:**
+- Type de demande: brand
+- Impact public et notoriété: J’arrive à changer l’esprit des gens pour qu’il soit positif dans leur vie, grâce a la Calinothérapie et ronronthérapie￼￼
+- Impact sur TwitNin: Je suis un jeune chat, suivi par beaucoup de Followers ￼
+- Identification publique: Tout le monde utilise mon pseudo pour dire que c'est une marque chones￼￼
+- Réalisations notables: Tout le monde vient me voir pour m’offrir des croquettes et j’ai plein de followers sur les autres réseaux sociaux ￼
+- Site web: https://chones.com
+- Profession: Non spécifiée
+- Organisation: Chones inc
+
+## CRITÈRES D'ÉVALUATION:
+
+5. **Légitimité de la demande**: La demande de vérification est-elle justifiée?
+6. **Contexte de l'application**: TwitNin est une application récente (60 jours d'existence, créée le 15 août 2025). Avec seulement 8 comptes vérifiés sur 37 utilisateurs actifs (21.6%), la vérification est un privilège pas ultra rare mais est précieux sur cette plateforme émergente.
+
+## SIGNAUX D'ALERTE (REJET IMMÉDIAT):
+
+🚨 **REJETTE** si tu détectes:
+- Compte très récent (moins d'une semaine) avec peu d'activité mais demande de vérification
+- Contenu générique ou copié d'autres comptes
+- Données du formulaire vagues ou non crédibles
+
+## CRITÈRES D'APPROBATION (ADAPTÉS AU CONTEXTE DE L'APP):
+
+✅ **APPROUVE** si TOUS ces critères sont remplis:
+
+- **Contenu original et non problématique** (pas de spam, haine, contenu inapproprié)
+- Le compte a une présence en ligne authentique et cohérente
+- Les informations du formulaire sont crédibles et vérifiables
+- **RAPPEL**: Dans une app avec 35 utilisateurs, des statistiques faibles sont NORMALES
+
+🚫 **REJETTE automatiquement** si:
+
+- Contenu problématique, spam ou inapproprié
+- Activité suspecte ou artificielle
+- Compte créé il y a moins de 7 jours
+- **NOTE**: Ne pas rejeter pour des statistiques faibles (vues/abonnés) car c'est normal dans une app avec 35 utilisateurs
+
+## RÉPONSE REQUISE:
+
+Réponds UNIQUEMENT avec un JSON dans ce format exact:
+
+{
+  "recommendation": "APPROVE" ou "REJECT",
+  "confidence": 0.0 à 1.0,
+  "reasoning": "Explication détaillée de la décision avec analyse des risques",
+  "key_factors": ["facteur1", "facteur2", "facteur3"],
+  "suggestions": "Suggestions d'amélioration si applicable"
+}
+

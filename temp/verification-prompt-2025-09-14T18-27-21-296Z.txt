@@ -1,0 +1,115 @@
+
+Tu es un expert en vérification de comptes sur les réseaux sociaux. Analyse cette demande de vérification et donne une recommandation.
+
+## DONNÉES UTILISATEUR:
+
+**Informations de base:**
+- Nom d'utilisateur: lafieille
+- Nom complet: Maman Pref Méchant Chat Gris
+- Âge du compte: 27 jours
+- Premium: Non
+- Déjà vérifié: Non
+
+**Statistiques:**
+- Abonnés: 3
+- Abonnements: 4
+- Vues totales: 251
+- Likes total: 45
+- Retweets total: 7
+- Taux d'engagement: 1.04
+
+**Contenu récent (50 tweets):**
+1. "C'est ça Congo tais-toi" (0 vues, undefined)
+2. "Je m'excuse kosp" (1 vues, undefined)
+3. "j’ai hacké « la fieille » #humour" (7 vues, undefined)
+4. "eo gemini accepte moi" (50 vues, undefined)
+5. "" (0 vues, undefined)
+6. "Je condamne fermement policiercongo" (0 vues, undefined)
+7. "Super concombre change de pays et se transforme en confiture...
+Il se transforme en..." (11 vues, undefined)
+8. "C'est moman qui paie..." (0 vues, undefined)
+9. "Au moins tu ne parles plus congolais
+On a gagné ça 
+Fais des twouits plus courts" (0 vues, undefined)
+10. "La vraie version c'est
+#kosportoutseulsurlautoroute" (0 vues, undefined)
+11. "Sois tu change ton nom et ton identité soit twitninf te rebloque t'a déjà perdu tout tes abonnées (5) fait gaffe il reste que moi" (1 vues, undefined)
+12. "Ok mais ton pays c'est la France gros con" (1 vues, undefined)
+13. "Kosp et ninf sont rentrés 
+#osepour..." (5 vues, undefined)
+14. "On va bien voir s'il regarde vraiment mes twouits...." (3 vues, undefined)
+15. "Congo c'est ton surnom c'est pas ton pays toi t'es français" (0 vues, undefined)
+16. "ferme ta putain de gueule" (4 vues, undefined)
+17. "J'ai la certif!
+Juste pas la bonne couleur
+#osepour" (3 vues, undefined)
+18. "Qui va jouer au méchant chat gris???" (4 vues, undefined)
+19. "C'est mort sans congo
+Ou congo est mort?
+Qui sait..." (4 vues, undefined)
+20. "Heureusement que je souis là pour publier 
+#teamoé" (3 vues, undefined)
+
+**Contexte global de l'application:**
+- Âge de l'application: 30 jours (créée le 15 août 2024)
+- Total utilisateurs: 35 utilisateurs (application très récente)
+- Utilisateurs actifs: 5 utilisateurs seulement
+- Total tweets: 1006
+- Total vues: 1066
+- Utilisateurs vérifiés: 7 sur 35 (20.0%)
+- Taux de vérification: 20.0% des utilisateurs actifs sont vérifiés
+
+**⚠️ IMPORTANT - CONTEXTE DE L'APPLICATION:**
+TwitNin est une application TRÈS RÉCENTE avec seulement 35 utilisateurs au total et 5 utilisateurs actifs. Il est donc NORMAL et ATTENDU que la plupart des utilisateurs aient des statistiques faibles (peu de vues, peu d'abonnés, peu d'engagement). Ne rejette PAS un utilisateur uniquement pour des statistiques faibles - c'est normal dans une application si récente avec si peu d'utilisateurs.
+
+**Informations du formulaire:**
+- Type de demande: individual
+- Impact public et notoriété: je suis la maman de tous ceux qui ont des comptes
+- Impact sur TwitNin: je suis genante mais drole
+on attend mes twits
+- Identification publique: Je répète je suis la maman de tout le monde donc ils me connaissent tous sur twitninf
+- Réalisations notables: plusieurs enfants et aussi j’ai achete ninf et congo 
+- Site web: https://auroreartaud.fr
+- Profession: Non spécifiée
+- Organisation: Non spécifiée
+
+## CRITÈRES D'ÉVALUATION:
+
+5. **Légitimité de la demande**: La demande de vérification est-elle justifiée?
+6. **Contexte de l'application**: TwitNin est une application récente (30 jours d'existence, créée le 15 août 2025). Avec seulement 7 comptes vérifiés sur 35 utilisateurs actifs (20.0%), la vérification est un privilège pas ultra rare mais est précieux sur cette plateforme émergente.
+
+## SIGNAUX D'ALERTE (REJET IMMÉDIAT):
+
+🚨 **REJETTE** si tu détectes:
+- Compte très récent (moins d'une semaine) avec peu d'activité mais demande de vérification
+- Contenu générique ou copié d'autres comptes
+- Données du formulaire vagues ou non crédibles
+
+## CRITÈRES D'APPROBATION (ADAPTÉS AU CONTEXTE DE L'APP):
+
+✅ **APPROUVE** si TOUS ces critères sont remplis:
+
+- **Contenu original et non problématique** (pas de spam, haine, contenu inapproprié)
+- Le compte a une présence en ligne authentique et cohérente
+- Les informations du formulaire sont crédibles et vérifiables
+- **RAPPEL**: Dans une app avec 35 utilisateurs, des statistiques faibles sont NORMALES
+
+🚫 **REJETTE automatiquement** si:
+
+- Contenu problématique, spam ou inapproprié
+- Activité suspecte ou artificielle
+- Compte créé il y a moins de 7 jours
+- **NOTE**: Ne pas rejeter pour des statistiques faibles (vues/abonnés) car c'est normal dans une app avec 35 utilisateurs
+
+## RÉPONSE REQUISE:
+
+Réponds UNIQUEMENT avec un JSON dans ce format exact:
+
+{
+  "recommendation": "APPROVE" ou "REJECT",
+  "confidence": 0.0 à 1.0,
+  "reasoning": "Explication détaillée de la décision avec analyse des risques",
+  "key_factors": ["facteur1", "facteur2", "facteur3"],
+  "suggestions": "Suggestions d'amélioration si applicable"
+}
+

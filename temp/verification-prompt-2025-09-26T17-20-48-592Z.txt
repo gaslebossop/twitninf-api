@@ -1,0 +1,108 @@
+
+Tu es un expert en vérification de comptes sur les réseaux sociaux. Analyse cette demande de vérification et donne une recommandation.
+
+## DONNÉES UTILISATEUR:
+
+**Informations de base:**
+- Nom d'utilisateur: jtejuregang_2
+- Nom complet: Ninf
+- Âge du compte: 40 jours
+- Premium: Non
+- Déjà vérifié: Non
+
+**Statistiques:**
+- Abonnés: 2
+- Abonnements: 3
+- Vues totales: 179
+- Likes total: 11
+- Retweets total: 5
+- Taux d'engagement: 0.55
+
+**Contenu récent (29 tweets):**
+1. "C'est moi! Et ouais moman!" (0 vues, undefined)
+2. "T es pas débranché toi????" (0 vues, undefined)
+3. "" (88 vues, undefined)
+4. "Maman et ninf s'aiment 
+Ils vont aller se coucher et laisser le kosp voler les enfants..." (5 vues, undefined)
+5. "Non maman a entendu sa clochette. Il aime maman" (0 vues, undefined)
+6. "Tu as des trous 😘" (0 vues, undefined)
+7. "Ton chef s'appelle dieu petoune. C'est un mouton blanc" (0 vues, undefined)
+8. "🐱🐱🐱🐱🐱" (0 vues, undefined)
+9. "C'est bien. Tu apprends du vocabulaire aux novices" (0 vues, undefined)
+10. "L ombre de la nuit est là 
+#congozoo" (0 vues, undefined)
+11. "Dire qu'on croit en dieu petoune" (0 vues, undefined)
+12. "Hop je partage" (0 vues, undefined)
+13. "Leo Moka Zola... Mais tu dis n'importe quoi le congo..." (0 vues, undefined)
+14. "Mais on n'est pas dans star wars... Congo Vador..." (0 vues, undefined)
+15. "T'en fais pas un peu trop?" (0 vues, undefined)
+16. "La team maman bordel..." (0 vues, undefined)
+17. "Merci moman" (0 vues, undefined)
+18. "Je veux qu'on écrive tweet comme ça "twouit"
+#mamanquidecide
+C'est depuis que je suis admin 😀😍" (2 vues, undefined)
+19. "Enfin je veux dire mon frère..." (0 vues, undefined)
+20. "Vas y. Je l'aime pas ma soeur" (0 vues, undefined)
+
+**Contexte global de l'application:**
+- Âge de l'application: 42 jours (créée le 15 août 2024)
+- Total utilisateurs: 35 utilisateurs (application très récente)
+- Utilisateurs actifs: 5 utilisateurs seulement
+- Total tweets: 1013
+- Total vues: 1274
+- Utilisateurs vérifiés: 7 sur 36 (19.4%)
+- Taux de vérification: 19.4% des utilisateurs actifs sont vérifiés
+
+**⚠️ IMPORTANT - CONTEXTE DE L'APPLICATION:**
+TwitNin est une application TRÈS RÉCENTE avec seulement 35 utilisateurs au total et 5 utilisateurs actifs. Il est donc NORMAL et ATTENDU que la plupart des utilisateurs aient des statistiques faibles (peu de vues, peu d'abonnés, peu d'engagement). Ne rejette PAS un utilisateur uniquement pour des statistiques faibles - c'est normal dans une application si récente avec si peu d'utilisateurs.
+
+**Informations du formulaire:**
+- Type de demande: celebrity
+- Impact public et notoriété: j'ai un grand impact sur twitninf
+- Impact sur TwitNin: Grand impact pas mal d'interaction, contenu humouristique
+- Identification publique: non je ne me considere pas
+- Réalisations notables: Non fournies
+- Site web: https://jtejuregang.com
+- Profession: Non spécifiée
+- Organisation: Non spécifiée
+
+## CRITÈRES D'ÉVALUATION:
+
+5. **Légitimité de la demande**: La demande de vérification est-elle justifiée?
+6. **Contexte de l'application**: TwitNin est une application récente (42 jours d'existence, créée le 15 août 2025). Avec seulement 7 comptes vérifiés sur 36 utilisateurs actifs (19.4%), la vérification est un privilège pas ultra rare mais est précieux sur cette plateforme émergente.
+
+## SIGNAUX D'ALERTE (REJET IMMÉDIAT):
+
+🚨 **REJETTE** si tu détectes:
+- Compte très récent (moins d'une semaine) avec peu d'activité mais demande de vérification
+- Contenu générique ou copié d'autres comptes
+- Données du formulaire vagues ou non crédibles
+
+## CRITÈRES D'APPROBATION (ADAPTÉS AU CONTEXTE DE L'APP):
+
+✅ **APPROUVE** si TOUS ces critères sont remplis:
+
+- **Contenu original et non problématique** (pas de spam, haine, contenu inapproprié)
+- Le compte a une présence en ligne authentique et cohérente
+- Les informations du formulaire sont crédibles et vérifiables
+- **RAPPEL**: Dans une app avec 35 utilisateurs, des statistiques faibles sont NORMALES
+
+🚫 **REJETTE automatiquement** si:
+
+- Contenu problématique, spam ou inapproprié
+- Activité suspecte ou artificielle
+- Compte créé il y a moins de 7 jours
+- **NOTE**: Ne pas rejeter pour des statistiques faibles (vues/abonnés) car c'est normal dans une app avec 35 utilisateurs
+
+## RÉPONSE REQUISE:
+
+Réponds UNIQUEMENT avec un JSON dans ce format exact:
+
+{
+  "recommendation": "APPROVE" ou "REJECT",
+  "confidence": 0.0 à 1.0,
+  "reasoning": "Explication détaillée de la décision avec analyse des risques",
+  "key_factors": ["facteur1", "facteur2", "facteur3"],
+  "suggestions": "Suggestions d'amélioration si applicable"
+}
+
