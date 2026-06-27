@@ -8,10 +8,10 @@ const logger = require('../utils/logger');
 // `urlOnly: true` → la règle ne s'applique qu'à l'URL/params/query (jamais au body),
 // pour éviter les faux positifs sur du texte légitime (tweets, messages…).
 const QUICK_BLOCK = [
-  // SQL injection basique OR/AND
-  { name: 'sql_basic',    re: /\b(or|and)\s+['"]?\d+['"]?\s*=\s*['"]?\d+|\b(or|and)\s+['"][^'"]{0,40}['"]\s*=\s*['"]|\b(or|and)\s+\d+\s*(--|#)/i },
-  // SQL injection avancée
-  { name: 'sql_union',    re: /\bunion\b.{0,40}\bselect\b|\bdrop\s+table|\binsert\s+into|\bdelete\s+from|\bexec\s*\(|\bxp_cmdshell|\bwaitfor\s+delay|\bpg_sleep\s*\(|\bsleep\s*\(\s*\d/i },
+  // SQL injection basique OR/AND + opérateur || (pipe SQL = OR)
+  { name: 'sql_basic',    re: /\b(or|and)\s+['"]?\d+['"]?\s*=\s*['"]?\d+|\b(or|and)\s+['"][^'"]{0,40}['"]\s*=\s*['"]|\b(or|and)\s+\d+\s*(--|#)|['"]\s*\|\||\|\|\s*['"]/i },
+  // SQL injection avancée — suppression de la limite .{0,40} (trop courte, contournable)
+  { name: 'sql_union',    re: /\bunion\b[\s\S]{0,500}\bselect\b|\bdrop\s+table|\binsert\s+into|\bdelete\s+from|\bexec\s*\(|\bxp_cmdshell|\bwaitfor\s+delay|\bpg_sleep\s*\(|\bsleep\s*\(\s*\d/i },
   // Command injection — semicolon before shell command, pipes, subshells, sensitive paths
   { name: 'cmd_inject',   re: /;\s*(cat|ls|id|whoami|wget|curl|bash|sh|nc|python|perl|ruby|php)\b|\|\s*(bash|sh|cmd|powershell)\b|`[^`]{2,}`|\$\([^)]{2,}\)|\/bin\/(ba)?sh|\/etc\/(passwd|shadow)|cmd\.exe|powershell\s+-/i },
   // Path traversal (inclut double/triple encodage)
@@ -22,18 +22,18 @@ const QUICK_BLOCK = [
   { name: 'crlf_inject',  re: /%0d%0a|%0a%0d|\r\n/i, urlOnly: true },
   // SSRF — métadonnées cloud, loopback (IPv4/IPv6), IP décimale/hex, schémas internes
   { name: 'ssrf',         re: /169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200|metadata\.azure|fd00:ec2|127\.\d+\.\d+\.\d+(?:[:/])|0x7f[0-9a-f]{6}|\b2130706433\b|\[?::1\]?[:/]|localhost(?:[:/])|0\.0\.0\.0|file:\/\/|gopher:\/\/|dict:\/\/|ftp:\/\//i },
-  // XSS — balises, handlers d'événements, schémas dangereux
-  { name: 'xss',          re: /<script[\s>]|<\/script>|<iframe[\s>]|<svg[\s>/]|<img[\s>][^>]*\bon\w+\s*=|javascript\s*:|vbscript\s*:|data:text\/html|on(?:load|error|click|mouseover|focus|toggle|animationstart|begin)\s*=/i },
+  // XSS — balises, handlers d'événements (TOUS les on* dans n'importe quel tag), schémas dangereux
+  { name: 'xss',          re: /<script[\s>]|<\/script>|<iframe[\s>]|<svg[\s>/]|<\w[^>]{0,500}\bon\w+\s*=|javascript\s*:|vbscript\s*:|data:text\/html|on(?:load|error)\s*=/i },
   // XXE
   { name: 'xxe',          re: /<!entity\s|<!doctype\s[^>]+system\s|expect:\/\/|php:\/\/|jar:\/\/|netdoc:\/\//i },
   // Template injection (SSTI)
   { name: 'tpl_inject',   re: /\{\{.{1,60}\}\}|\$\{.{1,60}\}|#\{.{1,60}\}|<%.{1,60}%>|\{%.{1,60}%\}/i },
-  // NoSQL / operator injection ($ne, $gt, $where, $regex…)
-  { name: 'nosql_inject', re: /(["'\[]\s*)\$(ne|gt|gte|lt|lte|in|nin|eq|where|regex|expr|exists|elemmatch|function|or|and|nor|not|jsonschema)\b|\bmapreduce\b/i },
+  // NoSQL / operator injection — liste étendue avec opérateurs manquants
+  { name: 'nosql_inject', re: /(["'\[]\s*)\$(ne|gt|gte|lt|lte|in|nin|eq|where|regex|expr|exists|elemmatch|function|or|and|nor|not|jsonschema|mod|size|type|all|comment|slice|set|unset|push|pull|addToSet)\b|\bmapreduce\b/i },
   // Prototype pollution
   { name: 'proto_pollut', re: /__proto__|constructor\s*\[\s*['"]?prototype|prototype\s*\[\s*['"]?__proto__/i },
-  // Log4Shell / JNDI lookup
-  { name: 'jndi_inject',  re: /\$\{jndi:(ldaps?|rmi|dns|iiop|nis|corba):/i },
+  // Log4Shell / JNDI — inclut les bypasses nested ${${lower:j}ndi:...}
+  { name: 'jndi_inject',  re: /\$\{jndi:(ldaps?|rmi|dns|iiop|nis|corba):|\$\{[\s\S]{0,60}jndi:/i },
 ];
 
 // Décode jusqu'à `passes` fois les séquences %xx pour contrer le multi-encodage.
@@ -42,6 +42,19 @@ function multiDecode(str, passes = 2) {
   for (let i = 0; i < passes; i++) {
     if (!/%[0-9a-f]{2}/i.test(out)) break;
     try { out = decodeURIComponent(out); } catch { break; }
+  }
+  return out;
+}
+
+// Déneste les lookups Log4j imbriqués pour détecter les bypasses JNDI.
+// Ex: ${${lower:j}ndi:ldap://x} → après 3 passes → "jndi:ldap://x"
+function stripLog4jLookups(str) {
+  let out = str;
+  for (let i = 0; i < 4; i++) {
+    const prev = out;
+    // Remplace ${lower:X} → X, ${upper:X} → X, ${::-X} → X, etc.
+    out = out.replace(/\$\{(?:[a-z:_-]{0,20}:)?([^{}]{0,40})\}/gi, '$1');
+    if (out === prev) break;
   }
   return out;
 }
@@ -68,9 +81,13 @@ function quickScan(req) {
     try { bodyTarget = JSON.stringify(req.body).slice(0, 8192); } catch {}
   }
 
+  // Surface normalisée pour détecter les bypasses JNDI nested
+  const urlNorm  = stripLog4jLookups(urlTarget);
+  const bodyNorm = bodyTarget ? stripLog4jLookups(bodyTarget) : '';
+
   for (const { name, re, urlOnly } of QUICK_BLOCK) {
-    if (re.test(urlTarget)) return name;
-    if (!urlOnly && bodyTarget && re.test(bodyTarget)) return name;
+    if (re.test(urlTarget) || re.test(urlNorm)) return name;
+    if (!urlOnly && bodyTarget && (re.test(bodyTarget) || re.test(bodyNorm))) return name;
   }
   return null;
 }
