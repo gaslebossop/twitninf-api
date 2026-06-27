@@ -11,6 +11,7 @@ const {
   checkPlatform
 } = require('../middleware/authMiddleware');
 const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
+const { checkLogin, reportLoginOutcome } = require('../middleware/fraudMiddleware');
 
 const router = express.Router();
 
@@ -134,7 +135,7 @@ router.post('/register', registerValidation, (req, res, next) => {
   next();
 }, authController.register);
 
-router.post('/login', loginValidation, async (req, res, next) => {
+router.post('/login', loginValidation, checkLogin(), async (req, res, next) => {
   try {
     // Vérifier les erreurs de validation
     const errors = validationResult(req);
@@ -178,18 +179,23 @@ router.post('/login', loginValidation, async (req, res, next) => {
           // On permet le login mais on indique is_suspended=true dans la réponse
           // Le middleware global bloquera ensuite les autres routes
         }
-        
+
+        // Reporter le succès au service fraude (fire-and-forget)
+        reportLoginOutcome(true)(req, res, () => {});
+
         // Si l'utilisateur n'est pas suspendu, continuer avec le contrôleur normal
         next();
       } else {
-        // Mot de passe incorrect
+        // Mot de passe incorrect — reporter l'échec au service fraude
+        reportLoginOutcome(false)(req, res, () => {});
         return res.status(401).json({
           success: false,
           message: 'Nom d\'utilisateur ou mot de passe incorrect'
         });
       }
     } else {
-      // Utilisateur non trouvé
+      // Utilisateur non trouvé — également un échec
+      reportLoginOutcome(false)(req, res, () => {});
       return res.status(401).json({
         success: false,
         message: 'Nom d\'utilisateur ou mot de passe incorrect'

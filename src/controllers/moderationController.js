@@ -2,6 +2,7 @@ const { validationResult } = require('express-validator');
 const { Op, Sequelize } = require('sequelize');
 const { User, Tweet, Report, ModerationAction, VerificationRequest, UnbanTicket } = require('../models');
 const logger = require('../utils/logger');
+const ctrTracker = require('../services/ctrTracker');
 
 class ModerationController {
   // ===== GESTION DES SIGNALEMENTS =====
@@ -70,6 +71,13 @@ class ModerationController {
        console.log('📝 Données du signalement à créer:', reportData);
        
        const report = await Report.create(reportData);
+
+      // 📊 Track report pour l'algorithme Rust (si c'est un tweet)
+      if (target_type === 'tweet') {
+        ctrTracker.trackReport(reporter_id, target_id).catch(err => {
+          logger.warn(`CTR tracking error: ${err.message}`);
+        });
+      }
 
       logger.info(`Nouveau signalement créé: ${report.id} par ${req.user.username} sur ${target_type} ${target_id}`);
 

@@ -5,10 +5,15 @@ const crypto = require('crypto');
 const logger = require('../utils/logger');
 const authMiddleware = require('../middleware/authMiddleware');
 
+const { checkTransaction } = require('../middleware/fraudMiddleware');
+
 const router = express.Router();
 
 // Appliquer le middleware d'authentification à toutes les routes
 router.use(authMiddleware.authenticateToken);
+
+// Détection des fraudes sur tous les paiements (après auth, avant traitement)
+router.use(checkTransaction);
 
 // Route pour simuler un paiement Apple Pay
 router.post('/apple-pay', [

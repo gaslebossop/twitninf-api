@@ -49,6 +49,7 @@ const moderationRoutes = require('./routes/moderationRoutes');
 const recommendationRoutes = require('./routes/recommendationRoutes');
 const behaviorRoutes = require('./routes/behaviorRoutes');
 const monetizationRoutes = require('./routes/monetizationRoutes');
+const trackingRoutes = require('./routes/trackingRoutes');
 const virtualCurrencyRoutes = require('./routes/virtualCurrencyRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const newEconomyRoutes = require('./routes/newEconomyRoutes');
@@ -99,6 +100,10 @@ const videoRecommendationService = require('./services/videoRecommendationServic
 // Import du middleware global de ban
 const { globalBanCheck } = require('./middleware/globalBanMiddleware');
 
+// Import du service de détection des fraudes (Redis ↔ Rust)
+const fraudService = require('./services/fraudDetectionService');
+const { blockBannedIp, checkApiRequest } = require('./middleware/fraudMiddleware');
+
 // Créer l'application Express
 const app = express();
 
@@ -106,6 +111,11 @@ const app = express();
 const redisClient = redis.createClient(config.redis);
 redisClient.on('error', (err) => logger.error('Erreur Redis:', err));
 redisClient.on('connect', () => logger.info('Connexion Redis établie'));
+
+// Connexion du service de détection des fraudes sur le même Redis
+fraudService.connect(config.redis).catch((e) =>
+  logger.warn('[fraud] Service non disponible au démarrage:', e.message)
+);
 
 // Middleware de sécurité
 app.use(helmet({
@@ -232,6 +242,12 @@ app.get('/static/avatars/:filename', (req, res) => {
 // Middleware global de vérification des bans (appliqué à toutes les routes API)
 app.use('/api', globalBanCheck);
 
+// ── Fraude : blocage instantané des IPs blacklistées (O(1) Redis GET) ────────
+app.use('/api', blockBannedIp);
+
+// ── Fraude : analyse asynchrone de chaque requête API (background, non-bloquant)
+app.use('/api', checkApiRequest);
+
 // Routes API - Version complète avec toutes les fonctionnalités
 app.use('/api/auth', (req, res, next) => {
   console.log('🔵 Route auth appelée:', req.method, req.path);
@@ -329,6 +345,12 @@ app.use('/api/neural-rank', neuralRankRoutes);
 // Wallet et Premium
 app.use('/api/wallet', walletRoutes);
 app.use('/api/premium', premiumRoutes);
+
+// 📊 CTR Tracking pour l'algorithme Rust
+app.use('/api/track', (req, res, next) => {
+  console.log('📊 Route tracking appelée:', req.method, req.path);
+  next();
+}, trackingRoutes);
 
 app.use('/api/user-stats', (req, res, next) => {
   console.log('📈 Route statistiques utilisateur appelée:', req.method, req.path);

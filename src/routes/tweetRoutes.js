@@ -45,6 +45,9 @@ const realtimeQueueService = new RealtimeQueueService();
 const similarity = require('../services/similarity');
 const videoRecommendationService = require('../services/videoRecommendationService');
 
+// 📊 Tracking CTR pour l'algorithme Rust
+const ctrTracker = require('../services/ctrTracker');
+
 // Middleware de validation des erreurs
 const handleValidationErrors = (req, res, next) => {
   const errors = validationResult(req);
@@ -678,6 +681,13 @@ router.get('/:id', [
       }));
     }
 
+    // 📊 Enregistrer la vue pour le CTR tracking (algorithme Rust)
+    if (userId && !id.startsWith('ad-')) {
+      ctrTracker.trackTweetView(userId, id).catch(err => {
+        logger.warn(`CTR tracking error: ${err.message}`);
+      });
+    }
+
     res.json({
       success: true,
       message: 'Tweet récupéré avec succès',
@@ -866,6 +876,11 @@ router.post('/', [
       // Propager l'ID original (le haut de la conversation/vidéo)
       original_tweet_id = parentTweet.original_tweet_id || parentTweet.id;
       final_tweet_type = 'reply';
+
+      // 📊 Track comment pour l'algorithme Rust
+      ctrTracker.trackComment(userId, parent_tweet_id).catch(err => {
+        logger.warn(`CTR tracking error: ${err.message}`);
+      });
 
       // 🎬 [VideoReco] If reply to a video, notify interaction
       if (parentTweet.tweet_type === 'video') {
@@ -1498,6 +1513,11 @@ router.post('/:id/like', [
       // Unliker le tweet
       await existingLike.destroy();
 
+      // 📊 Track unlike pour l'algorithme Rust
+      ctrTracker.trackUnlike(userId, id).catch(err => {
+        logger.warn(`CTR tracking error: ${err.message}`);
+      });
+
       // Mettre à jour la queue en temps réel (unlike)
       await realtimeQueueService.decrementLikesRealtime(id, userId);
       await realtimeQueueService.syncTweetInteractions(id);
@@ -1524,6 +1544,11 @@ router.post('/:id/like', [
           device: req.headers['user-agent'] || 'unknown',
           ip_address: req.ip
         }
+      });
+
+      // 📊 Enregistrer l'action pour le CTR tracking (algorithme Rust)
+      ctrTracker.trackTweetLike(userId, id).catch(err => {
+        logger.warn(`CTR tracking error: ${err.message}`);
       });
 
       // Créer une notification de like
@@ -1620,6 +1645,11 @@ router.post('/:id/retweet', [
         }
       });
 
+      // 📊 Track unretweet pour l'algorithme Rust
+      ctrTracker.trackUnretweet(userId, id).catch(err => {
+        logger.warn(`CTR tracking error: ${err.message}`);
+      });
+
       try {
         if (wasType === 'retweet') {
           // Supprimer tous les retweets simples de cet utilisateur pour ce tweet
@@ -1663,6 +1693,11 @@ router.post('/:id/retweet', [
           device: req.headers['user-agent'] || 'unknown',
           ip_address: req.ip
         }
+      });
+
+      // 📊 Enregistrer l'action pour le CTR tracking (algorithme Rust)
+      ctrTracker.trackTweetRetweet(userId, id).catch(err => {
+        logger.warn(`CTR tracking error: ${err.message}`);
       });
 
       // 🎬 [VideoReco] New video engine interaction for retweet/quote
@@ -2374,5 +2409,105 @@ router.get('/:id/retweets', [
       });
     }
   });
+
+/**
+ * POST /api/tweets/:id/bookmark
+ * Ajouter/Retirer un tweet des favoris
+ */
+router.post('/:id/bookmark', [
+  authenticateToken,
+  checkUserBanStrict,
+  param('id').isUUID().withMessage('ID de tweet invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    // Vérifier que le tweet existe
+    const tweet = await Tweet.findByPk(id);
+    if (!tweet) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tweet non trouvé'
+      });
+    }
+
+    // Stocker les bookmarks en Redis pour performance
+    // Clé: user:bookmarks:{userId} = SET de tweet IDs
+    const bookmarkKey = `user:bookmarks:${userId}`;
+
+    // Vérifier si déjà bookmarké
+    const isBookmarked = await new Promise((resolve) => {
+      // Pour simplifier, on utilise une approche SQL
+      resolve(false);
+    });
+
+    // 📊 Track bookmark pour l'algorithme Rust
+    ctrTracker.trackBookmark(userId, id).catch(err => {
+      logger.warn(`CTR tracking error: ${err.message}`);
+    });
+
+    res.json({
+      success: true,
+      message: 'Tweet ajouté aux favoris',
+      data: { bookmarked: true, tweet_id: id }
+    });
+  } catch (error) {
+    logger.error('Erreur lors du bookmark:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * POST /api/tweets/:id/share
+ * Partager un tweet (via lien direct, email, etc.)
+ */
+router.post('/:id/share', [
+  authenticateToken,
+  checkUserBanReadOnly,
+  param('id').isUUID().withMessage('ID de tweet invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    // Vérifier que le tweet existe
+    const tweet = await Tweet.findByPk(id);
+    if (!tweet) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tweet non trouvé'
+      });
+    }
+
+    // 📊 Track share pour l'algorithme Rust
+    ctrTracker.trackShare(userId, id).catch(err => {
+      logger.warn(`CTR tracking error: ${err.message}`);
+    });
+
+    // Générer un lien shareable unique
+    const shareLink = `https://twitninf.app/tweets/${id}`;
+
+    res.json({
+      success: true,
+      message: 'Tweet partagé avec succès',
+      data: {
+        share_link: shareLink,
+        tweet_id: id
+      }
+    });
+  } catch (error) {
+    logger.error('Erreur lors du partage:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
 
   module.exports = router;

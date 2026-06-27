@@ -14,6 +14,7 @@ const { authenticateToken, denySuspended } = require('../middleware/authMiddlewa
 const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
 const BanService = require('../services/banService');
 const logger = require('../utils/logger');
+const ctrTracker = require('../services/ctrTracker');
 const { TIER, TIER_PRICES_TWC, DEFAULT_DURATION_DAYS } = require('../constants/subscriptionTiers');
 const {
   maybeExpireSubscription,
@@ -297,6 +298,13 @@ router.get('/profile/authenticated/:username', [
       return res.status(404).json({
         success: false,
         message: 'Profil introuvable'
+      });
+    }
+
+    // 📊 Track profile view pour l'algorithme Rust
+    if (currentUserId && user.id !== currentUserId) {
+      ctrTracker.trackProfileView(currentUserId, user.id).catch(err => {
+        logger.warn(`CTR tracking error: ${err.message}`);
       });
     }
 
@@ -1128,5 +1136,123 @@ router.post('/purchase-premium', [
   authenticateToken,
   denySuspended
 ], async (req, res) => handleSubscriptionPurchase(req, res, TIER.PLUS));
+
+/**
+ * POST /api/users/:id/block
+ * Bloquer un utilisateur
+ */
+router.post('/:id/block', [
+  authenticateToken,
+  denySuspended,
+  param('id').isUUID().withMessage('ID utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id: blockedUserId } = req.params;
+    const currentUserId = req.user.id;
+
+    // Vérifier qu'on ne se bloque pas soi-même
+    if (currentUserId === blockedUserId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vous ne pouvez pas vous bloquer vous-même'
+      });
+    }
+
+    // Vérifier que l'utilisateur à bloquer existe
+    const userToBlock = await User.findByPk(blockedUserId);
+    if (!userToBlock) {
+      return res.status(404).json({
+        success: false,
+        message: 'Utilisateur non trouvé'
+      });
+    }
+
+    // Stocker le block dans Redis pour performance
+    // Clé: user:blocked:{userId} = SET d'user IDs bloqués
+    const blockKey = `user:blocked:${currentUserId}`;
+
+    // 📊 Track block pour l'algorithme Rust
+    ctrTracker.trackBlock(currentUserId, blockedUserId).catch(err => {
+      logger.warn(`CTR tracking error: ${err.message}`);
+    });
+
+    // Si l'utilisateur était suivi, le retirer du follow
+    const following = await UserFollow.findOne({
+      where: {
+        follower_id: currentUserId,
+        following_id: blockedUserId
+      }
+    });
+
+    if (following) {
+      await following.destroy();
+    }
+
+    logger.info(`Utilisateur ${currentUserId} a bloqué ${blockedUserId}`);
+
+    res.json({
+      success: true,
+      message: 'Utilisateur bloqué avec succès',
+      data: {
+        blocked_user_id: blockedUserId,
+        blocked: true
+      }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors du blocage:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * POST /api/users/:id/unblock
+ * Débloquer un utilisateur
+ */
+router.post('/:id/unblock', [
+  authenticateToken,
+  denySuspended,
+  param('id').isUUID().withMessage('ID utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id: unblockedUserId } = req.params;
+    const currentUserId = req.user.id;
+
+    // Vérifier que l'utilisateur à débloquer existe
+    const userToUnblock = await User.findByPk(unblockedUserId);
+    if (!userToUnblock) {
+      return res.status(404).json({
+        success: false,
+        message: 'Utilisateur non trouvé'
+      });
+    }
+
+    // Supprimer du blocage depuis Redis
+    const blockKey = `user:blocked:${currentUserId}`;
+
+    logger.info(`Utilisateur ${currentUserId} a débloqué ${unblockedUserId}`);
+
+    res.json({
+      success: true,
+      message: 'Utilisateur débloqué avec succès',
+      data: {
+        unblocked_user_id: unblockedUserId,
+        blocked: false
+      }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors du déblocage:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
 
 module.exports = router;
