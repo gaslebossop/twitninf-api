@@ -758,7 +758,7 @@ class RealtimeQueueService {
       }
 
       // Vérifier le statut shadow ban de l'auteur
-      const smartEngine = new SmartRecommendationEngine();
+      const smartEngine = SmartRecommendationEngine;
       const shadowBanStatus = await smartEngine.checkShadowbanStatus(tweetData.user_id);
       
       return shadowBanStatus.isShadowbanned;
@@ -773,7 +773,7 @@ class RealtimeQueueService {
    */
   async detectAndMarkShadowBan(tweetId, userId) {
     try {
-      const smartEngine = new SmartRecommendationEngine();
+      const smartEngine = SmartRecommendationEngine;
       const shadowBanStatus = await smartEngine.checkShadowbanStatus(userId);
       
       if (shadowBanStatus.isShadowbanned) {
@@ -896,7 +896,7 @@ class RealtimeQueueService {
       }
 
       let recoveredCount = 0;
-      const smartEngine = new SmartRecommendationEngine();
+      const smartEngine = SmartRecommendationEngine;
 
       for (const tweet of shadowBannedTweets) {
         try {

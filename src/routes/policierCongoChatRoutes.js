@@ -10,8 +10,7 @@ const { Tweet, User } = require('../models');
 const instructionManager = require('../services/policiercongo/InstructionManager');
 const { geminiIntelligence, memoryManager } = require('../services/policiercongo');
 const { POLICE_ACCOUNT_ID } = require('../services/policiercongo/config');
-const { TRIGGER_TYPES } = require('../services/policiercongo/policiercongoV2');
-const { runPolicierCongoV2Turn, isPolicierCongoV2Enabled } = require('../services/policiercongo/policiercongoV2Bridge');
+const { TRIGGER_TYPES, runPolicierCongoV2Turn, isPolicierCongoV2Enabled } = require('../services/policiercongo/policiercongov3/compatibilityBridge');
 
 const MAX_CONTEXT_CHARS = 260;
 const MAX_HISTORY_CHARS = 180;
@@ -128,30 +127,6 @@ router.post('/message', authenticateToken, chatLimiter, async (req, res) => {
     const userHistory = allHistory[userId] || [];
     userHistory.push({ role: 'user', text: message.trim(), ts: Date.now() });
 
-    // Contexte utile mais borné: on garde la puissance sans exploser le prompt
-    let lastTweets = [];
-    try {
-      const tweets = await Tweet.findAll({
-        where: { user_id: POLICE_ACCOUNT_ID },
-        order: [['created_at', 'DESC']],
-        limit: 2, // Réduit de 5 à 2 pour alléger le prompt
-        attributes: ['content', 'created_at', 'createdAt']
-      });
-      lastTweets = tweets
-        .map(t => t.get({ plain: true }))
-        .sort((a, b) => {
-          const ad = new Date(a.created_at || a.createdAt || 0).getTime();
-          const bd = new Date(b.created_at || b.createdAt || 0).getTime();
-          return bd - ad;
-        });
-    } catch (dbError) {
-      logger.warn('⚠️ Impossible de récupérer les tweets pour le chat:', dbError.message);
-    }
-
-    const lastTweetsContext = lastTweets.length > 0
-      ? `TES TWEETS RÉCENTS:\n${lastTweets.map((t, i) => `- "${clamp(t.content, 150)}"`).join('\n')}`
-      : 'Aucun tweet récent.';
-
     // Résumé mémoire (minimal)
     let memorySummaryText = '';
     try {
@@ -248,26 +223,15 @@ router.post('/message', authenticateToken, chatLimiter, async (req, res) => {
         .join('\n')
       : '';
 
-    // La conscience (ÉTAT INTERNE) est injectée automatiquement par le bridge V2
-    const systemPrompt = [
-      'Tu es "Policier Congo", utilisateur du réseau social TwitNinf.',
+    // Contexte DM (identité/règles/mémoire viennent du prompt système standard V2,
+    // le même que pour les tweets — on ajoute juste ce qui est spécifique au DM).
+    const contextPack = [
       senderContext,
-      `La personne qui t'écrit MAINTENANT est exactement: @${username}.`,
-      '',
-      'RÈGLES ABSOLUES :',
-      '- JAMAIS dire que tu es une IA ou un bot.',
-      '- "Policier Congo" = juste ton pseudo.',
-      '- Direct, cash, un peu agressif si on te cherche.',
-      '- PAS de hashtags. Court (1-3 phrases).',
-      '- Si on te demande pose des questions, etc → utilise ton ÉTAT INTERNE pour répondre naturellement.',
-      memorySummaryText ? `\nTON ÉTAT: ${memorySummaryText}` : '',
-      '',
-      lastTweetsContext,
+      `La personne qui t'écrit MAINTENANT en DM est exactement: @${username}.`,
+      memorySummaryText ? `TON ÉTAT: ${memorySummaryText}` : '',
       mentionedUserContext,
       hashtagContext,
-      convHistoryStr ? `\nCONVERSATION:\n${convHistoryStr}` : '',
-      '',
-      'Réponds UNIQUEMENT avec un objet JSON valide. Champs : action, content, next_check_in, store_memory.'
+      convHistoryStr ? `CONVERSATION DM RÉCENTE:\n${convHistoryStr}` : ''
     ].filter(Boolean).join('\n');
 
     let botReply = '';
@@ -287,8 +251,8 @@ router.post('/message', authenticateToken, chatLimiter, async (req, res) => {
         const v2 = await runPolicierCongoV2Turn({
           event,
           buildOptions: {
-            systemPrompt,
-            model: 'gemini-3-flash-preview'
+            contextPack,
+            model: 'haiku'
           },
           geminiIntelligence
         });
@@ -296,41 +260,28 @@ router.post('/message', authenticateToken, chatLimiter, async (req, res) => {
           botReply = v2.replyText;
           usedV2 = true;
         }
-      } catch (v2Err) {
-        logger.warn('⚠️ Chat V2 indisponible, fallback legacy:', v2Err);
-      }
-    }
 
-    if (!usedV2) {
-      const prompt = `${systemPrompt}
-${adminInstructions ? `\nINSTRUCTIONS:\n${adminInstructions}` : ''}
-
-Message reçu de @${username}: "${message.trim()}"
-
----
-Tu dois répondre en JSON STRICT, sans texte avant ou après :
-{
-  "reply": "<ta réponse directe en argot, texte brut>",
-  "personality_update": null
-}
-Retourne UNIQUEMENT ce JSON.`;
-
-      const aiResponse = await geminiIntelligence.generateContent(prompt, 'gemini-3-flash-preview', false);
-
-      if (!aiResponse) {
-        return res.status(503).json({ success: false, message: 'PolicierCongo est injoignable. Réessaie.' });
-      }
-
-      botReply = aiResponse.trim();
-
-      try {
-        const cleaned = botReply.replace(/```json\n?|```/g, '').trim();
-        const parsed = JSON.parse(cleaned);
-        if (parsed.reply) {
-          botReply = parsed.reply;
+        // Comme pour les DM : exécuter réellement toute action à effet de bord
+        // décidée pendant la conversation, sinon il "annonce" un truc jamais fait.
+        const sideEffectActions = Array.isArray(v2?.actions)
+          ? v2.actions.filter((a) => {
+            const t = String(a?.type || '').toUpperCase();
+            return t && !['NOOP', 'NO_ACTION', 'REPLY', 'RESPOND_TO_USER', 'CLARIFY', 'SUGGEST'].includes(t);
+          })
+          : [];
+        if (sideEffectActions.length) {
+          const ActionExecutor = require('../services/policiercongo/actionExecutor');
+          const executor = new ActionExecutor();
+          for (const act of sideEffectActions) {
+            try {
+              await executor.executeSingleAction({ action: act.type, reason: act.reason, priority: 'medium', details: act.details || act });
+            } catch (execErr) {
+              logger.warn('⚠️ Exécution action déclenchée par chat échouée:', execErr?.message);
+            }
+          }
         }
-      } catch (_) {
-        logger.warn('⚠️ Chat: réponse IA non-JSON, utilisation brute');
+      } catch (v2Err) {
+        logger.warn('⚠️ Chat PolicierCongo V3 indisponible:', v2Err);
       }
     }
 

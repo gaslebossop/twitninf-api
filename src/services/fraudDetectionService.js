@@ -11,15 +11,23 @@ const QUEUES = {
 
 const BLOCKED_IP_PREFIX = 'fraud:blocked:ip:';
 
-// How long (ms) to wait for Rust response before failing open
-const TIMEOUT_MS = 250;
+// How long (seconds) to wait for Rust response before failing open.
+// Timeout appliqué CÔTÉ REDIS (BLPOP) → la connexion se libère seule, pas de
+// blocage orphelin côté Node. 0.25s = budget de latence sur le login.
+const TIMEOUT_S = 0.25;
+
+// Nombre de connexions de lecture dédiées au BLPOP. Un BLPOP bloque sa connexion ;
+// un petit pool round-robin évite le head-of-line blocking quand plusieurs
+// logins/paiements sont analysés en parallèle, sans ouvrir une connexion par requête.
+const READER_POOL_SIZE = 6;
 
 class FraudDetectionService {
   constructor() {
-    // Publisher — sends requests to Rust
+    // Publisher — sends requests to Rust (LPUSH, GET)
     this._pub = null;
-    // Subscriber/reader — reads results back (uses a dedicated connection for BLPOP)
-    this._sub = null;
+    // Pool de connexions de lecture pour BLPOP (résultats Rust)
+    this._readers = [];
+    this._rr = 0; // index round-robin
     this._ready = false;
     this._connecting = false;
   }
@@ -33,17 +41,21 @@ class FraudDetectionService {
     const url = `redis://${auth}${redisConfig.host || '127.0.0.1'}:${redisConfig.port || 6379}`;
 
     try {
-      // We need TWO connections: one for publishing (LPUSH) and one for blocking reads (BLPOP).
-      // BLPOP blocks the connection, so we can't multiplex it with LPUSH.
+      // 1 connexion d'écriture (LPUSH/GET) + un pool de lecteurs (BLPOP).
+      // BLPOP bloque sa connexion : on ne peut pas le multiplexer avec LPUSH.
       this._pub = createClient({ url });
-      this._sub = createClient({ url });
-
       this._pub.on('error', (e) => logger.warn('[fraud] redis pub error:', e.message));
-      this._sub.on('error', (e) => logger.warn('[fraud] redis sub error:', e.message));
 
-      await Promise.all([this._pub.connect(), this._sub.connect()]);
+      this._readers = [];
+      for (let i = 0; i < READER_POOL_SIZE; i++) {
+        const r = createClient({ url });
+        r.on('error', (e) => logger.warn(`[fraud] redis reader#${i} error:`, e.message));
+        this._readers.push(r);
+      }
+
+      await Promise.all([this._pub.connect(), ...this._readers.map((r) => r.connect())]);
       this._ready = true;
-      logger.info('[fraud] FraudDetectionService connected to Redis');
+      logger.info(`[fraud] FraudDetectionService connected to Redis (${READER_POOL_SIZE} readers)`);
     } catch (e) {
       logger.warn('[fraud] Could not connect to Redis — fraud checks disabled:', e.message);
       this._ready = false;
@@ -63,26 +75,38 @@ class FraudDetectionService {
     }
   }
 
+  // ─── Fire-and-forget: push to queue without waiting for a result ────────────
+  // Utilisé pour l'analyse des requêtes API (volume élevé) où l'on n'a pas besoin
+  // du verdict en synchrone — Rust met à jour la réputation/blocklist IP, qui sera
+  // consultée (O(1)) à la requête suivante. Rust met le résultat en expire 5s.
+  _fireAndForget(queueKey, payload) {
+    if (!this._ready) return;
+    const correlationId = uuidv4();
+    const envelope = JSON.stringify({ correlation_id: correlationId, payload });
+    this._pub.lPush(queueKey, envelope).catch((e) =>
+      logger.debug('[fraud] _fireAndForget lpush error:', e.message)
+    );
+  }
+
   // ─── Core: push to queue, wait for result via BLPOP ─────────────────────────
   async _sendAndWait(queueKey, payload) {
-    if (!this._ready) return null;
+    if (!this._ready || this._readers.length === 0) return null;
 
     const correlationId = uuidv4();
     const resultKey = `fraud:result:${correlationId}`;
-
     const envelope = JSON.stringify({ correlation_id: correlationId, payload });
 
+    // Sélection round-robin d'un lecteur dédié au BLPOP.
+    const reader = this._readers[this._rr % this._readers.length];
+    this._rr = (this._rr + 1) % this._readers.length;
+
     try {
-      // Push the request onto the Rust worker's queue
+      // Empile la requête sur la file du worker Rust
       await this._pub.lPush(queueKey, envelope);
 
-      // Wait for the Rust worker to push the result back (with timeout)
-      const result = await Promise.race([
-        this._sub.blPop(resultKey, 0),              // blocks until result
-        new Promise((resolve) =>
-          setTimeout(() => resolve(null), TIMEOUT_MS) // timeout fallback
-        ),
-      ]);
+      // Attend le résultat avec un timeout CÔTÉ REDIS : la connexion se libère
+      // automatiquement si Rust ne répond pas à temps (fail-open, pas d'orphelin).
+      const result = await this._reader_blpop(reader, resultKey, TIMEOUT_S);
 
       if (!result) {
         logger.debug(`[fraud] timeout waiting for result on ${resultKey}`);
@@ -94,6 +118,11 @@ class FraudDetectionService {
       logger.warn('[fraud] _sendAndWait error:', e.message);
       return null;
     }
+  }
+
+  // BLPOP avec timeout Redis-side. Isolé pour faciliter les tests/mocks.
+  async _reader_blpop(reader, key, timeoutSeconds) {
+    return reader.blPop(key, timeoutSeconds);
   }
 
   // ─── Public API ──────────────────────────────────────────────────────────────
@@ -154,9 +183,11 @@ class FraudDetectionService {
   }
 
   /**
-   * Analyse an API request.
+   * Analyse an API request (fire-and-forget — chemin haute fréquence).
+   * Le verdict n'est pas attendu : Rust met à jour la réputation/blocklist IP,
+   * consultée en O(1) à la requête suivante via isIpBlocked().
    */
-  async analyzeRequest({ userId, ip, endpoint, method = 'GET', userAgent = '',
+  analyzeRequest({ userId, ip, endpoint, method = 'GET', userAgent = '',
     responseCode = 200, payloadSize = 0, queryParams = '', bodySample = '' }) {
     const payload = {
       user_id:       userId,
@@ -169,7 +200,9 @@ class FraudDetectionService {
       query_params:  queryParams,
       body_sample:   bodySample,
     };
-    return this._sendAndWait(QUEUES.request, payload);
+    this._fireAndForget(QUEUES.request, payload);
+    // Compat: certains appelants chaînent .then()/.catch() sur le retour.
+    return Promise.resolve(null);
   }
 
   // ─── Health check ─────────────────────────────────────────────────────────

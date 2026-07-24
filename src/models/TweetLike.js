@@ -155,9 +155,13 @@ const modelOptions = {
     afterCreate: async (like) => {
       try {
         // Mettre à jour le compteur de likes de l'utilisateur
-        await like.sequelize.models.User.increment('stats.likes', {
-          where: { id: like.user_id }
-        });
+        const User = like.sequelize.models.User;
+        const user = await User.findByPk(like.user_id, { attributes: ['id', 'stats'] });
+        if (user) {
+          const currentStats = user.stats || {};
+          const newLikes = (currentStats.likes || 0) + 1;
+          await user.update({ stats: { ...currentStats, likes: newLikes } });
+        }
         
         // Mettre à jour la progression des défis
         const ChallengeProgressService = require('../services/challengeProgressService');
@@ -194,9 +198,13 @@ const modelOptions = {
     afterDestroy: async (like) => {
       try {
         // Décrémenter le compteur de likes de l'utilisateur
-        await like.sequelize.models.User.decrement('stats.likes', {
-          where: { id: like.user_id }
-        });
+        const User = like.sequelize.models.User;
+        const user = await User.findByPk(like.user_id, { attributes: ['id', 'stats'] });
+        if (user) {
+          const currentStats = user.stats || {};
+          const newLikes = Math.max(0, (currentStats.likes || 0) - 1);
+          await user.update({ stats: { ...currentStats, likes: newLikes } });
+        }
         
         // Mettre à jour la progression des défis
         const ChallengeProgressService = require('../services/challengeProgressService');

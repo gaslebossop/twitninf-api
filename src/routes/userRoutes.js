@@ -375,6 +375,63 @@ router.get('/:id', [
  * GET /api/users/:id/tweets
  * Obtenir les tweets d'un utilisateur
  */
+/**
+ * Enrichit une liste de tweets avec compteurs (likes/retweets/replies) et
+ * statut d'interaction de l'utilisateur courant, en batch (une requête par
+ * métrique pour toute la page) au lieu d'une requête par tweet.
+ */
+async function hydrateTweetStats(tweets, currentUserId) {
+  const tweetIds = tweets.map((t) => t.id);
+  if (tweetIds.length === 0) return [];
+
+  const [likeCounts, retweetCounts, replyCounts, likedRows, retweetedRows] = await Promise.all([
+    TweetLike.findAll({
+      where: { tweet_id: tweetIds },
+      attributes: ['tweet_id', [sequelize.fn('COUNT', sequelize.col('id')), 'count']],
+      group: ['tweet_id'],
+      raw: true
+    }),
+    TweetRetweet.findAll({
+      where: { tweet_id: tweetIds },
+      attributes: ['tweet_id', [sequelize.fn('COUNT', sequelize.col('id')), 'count']],
+      group: ['tweet_id'],
+      raw: true
+    }),
+    Tweet.findAll({
+      where: { parent_tweet_id: tweetIds },
+      attributes: ['parent_tweet_id', [sequelize.fn('COUNT', sequelize.col('id')), 'count']],
+      group: ['parent_tweet_id'],
+      raw: true
+    }),
+    currentUserId
+      ? TweetLike.findAll({ where: { tweet_id: tweetIds, user_id: currentUserId }, attributes: ['tweet_id'], raw: true })
+      : [],
+    currentUserId
+      ? TweetRetweet.findAll({ where: { tweet_id: tweetIds, user_id: currentUserId }, attributes: ['tweet_id'], raw: true })
+      : []
+  ]);
+
+  const likeCountMap = new Map(likeCounts.map((r) => [r.tweet_id, parseInt(r.count, 10)]));
+  const retweetCountMap = new Map(retweetCounts.map((r) => [r.tweet_id, parseInt(r.count, 10)]));
+  const replyCountMap = new Map(replyCounts.map((r) => [r.parent_tweet_id, parseInt(r.count, 10)]));
+  const likedSet = new Set(likedRows.map((r) => r.tweet_id));
+  const retweetedSet = new Set(retweetedRows.map((r) => r.tweet_id));
+
+  return tweets.map((tweet) => ({
+    ...tweet.toJSON(),
+    stats: {
+      likes: likeCountMap.get(tweet.id) || 0,
+      retweets: retweetCountMap.get(tweet.id) || 0,
+      replies: replyCountMap.get(tweet.id) || 0,
+      views: tweet.view_count || 0
+    },
+    user_interaction: {
+      is_liked: likedSet.has(tweet.id),
+      is_retweeted: retweetedSet.has(tweet.id)
+    }
+  }));
+}
+
 router.get('/:id/tweets', [
   authenticateToken,
   checkUserBanReadOnly,
@@ -431,34 +488,8 @@ router.get('/:id/tweets', [
 
       totalCount = await TweetRetweet.count({ where: { user_id: id } });
 
-      // Mapper vers les tweets enrichis
-      tweets = await Promise.all(retweets.map(async (rt) => {
-        const tweet = rt.tweet;
-        const likeCount = await TweetLike.count({ where: { tweet_id: tweet.id } });
-        const retweetCount = await TweetRetweet.count({ where: { tweet_id: tweet.id } });
-        const replyCount = await Tweet.count({ where: { parent_tweet_id: tweet.id } });
-
-        let isLiked = false;
-        let isRetweeted = false; // statut pour l'utilisateur connecté, pas le propriétaire du profil
-        if (currentUserId) {
-          isLiked = await TweetLike.hasUserLikedTweet(currentUserId, tweet.id);
-          isRetweeted = await TweetRetweet.hasUserRetweetedTweet(currentUserId, tweet.id);
-        }
-
-        return {
-          ...tweet.toJSON(),
-          stats: {
-            likes: likeCount,
-            retweets: retweetCount,
-            replies: replyCount,
-            views: tweet.view_count || 0
-          },
-          user_interaction: {
-            is_liked: isLiked,
-            is_retweeted: isRetweeted
-          }
-        };
-      }));
+      // Mapper vers les tweets enrichis (stats/interactions en batch, pas de N+1)
+      tweets = await hydrateTweetStats(retweets.map((rt) => rt.tweet), currentUserId);
     } else {
       // Tweets et réponses (et éventuellement all)
       const whereClause = { user_id: id, is_private: false, moderation_status: 'approved' };
@@ -486,30 +517,7 @@ router.get('/:id/tweets', [
 
       totalCount = await Tweet.count({ where: whereClause });
 
-      tweets = await Promise.all(rawTweets.map(async (tweet) => {
-        const likeCount = await TweetLike.count({ where: { tweet_id: tweet.id } });
-        const retweetCount = await TweetRetweet.count({ where: { tweet_id: tweet.id } });
-        const replyCount = await Tweet.count({ where: { parent_tweet_id: tweet.id } });
-        let isLiked = false;
-        let isRetweeted = false;
-        if (currentUserId) {
-          isLiked = await TweetLike.hasUserLikedTweet(currentUserId, tweet.id);
-          isRetweeted = await TweetRetweet.hasUserRetweetedTweet(currentUserId, tweet.id);
-        }
-        return {
-          ...tweet.toJSON(),
-          stats: {
-            likes: likeCount,
-            retweets: retweetCount,
-            replies: replyCount,
-            views: tweet.view_count || 0
-          },
-          user_interaction: {
-            is_liked: isLiked,
-            is_retweeted: isRetweeted
-          }
-        };
-      }));
+      tweets = await hydrateTweetStats(rawTweets, currentUserId);
     }
 
     res.json({

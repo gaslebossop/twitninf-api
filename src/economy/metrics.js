@@ -64,10 +64,26 @@ class EconomyMetrics {
       trend = 'falling';
     }
 
+    // Le multiplicateur n'est modifié que par le minage (dilution) ; refresh()
+    // ne fait que recalculer le prix affiché à partir de ce multiplicateur,
+    // il ne doit pas l'écraser sinon la dilution serait annulée à chaque transfert/achat.
+    //
+    // basePrice vient de LA monnaie elle-même (10 pour NF, 1 pour un
+    // portefeuille EUR interne à parité fixe...), jamais de la constante
+    // globale REFERENCE_PRICE_EUR — refresh() est appelé sur n'importe
+    // quelle monnaie (P2P, casino...), et utiliser un prix de base unique
+    // pour toutes écraserait la parité 1:1 d'une monnaie comme l'EUR interne
+    // dès le premier transfert.
+    const multiplier = toAmount(currency.currentMultiplier) || 1;
+    const basePriceEur = toAmount(currency.basePrice) || REFERENCE_PRICE_EUR;
+    const currentPrice = roundTWC(basePriceEur * multiplier);
+    const previousPrice = toAmount(currency.currentPrice) || basePriceEur;
+    const priceChange24h = previousPrice > 0 ? roundTWC(((currentPrice - previousPrice) / previousPrice) * 100) : 0;
+
     const priceHistory = Array.isArray(currency.priceHistory) ? [...currency.priceHistory] : [];
     priceHistory.push({
       date: new Date().toISOString(),
-      price: REFERENCE_PRICE_EUR,
+      price: currentPrice,
       circulatingSupply: circulating,
       treasuryReserve: treasury,
       volumeEur24h: volumeEur
@@ -80,13 +96,13 @@ class EconomyMetrics {
     await currency.update(
       {
         circulatingSupply: circulating,
-        currentPrice: REFERENCE_PRICE_EUR,
-        basePrice: REFERENCE_PRICE_EUR,
-        currentMultiplier: 1.0,
+        currentPrice,
+        // basePrice n'est plus écrasé : c'est une donnée propre à la
+        // monnaie, pas une constante globale à réappliquer à chaque refresh.
         volume24h: volumeEur,
-        marketCap: roundTWC(circulating * REFERENCE_PRICE_EUR),
+        marketCap: roundTWC(circulating * currentPrice),
         economicTrend: trend,
-        priceChange24h: 0,
+        priceChange24h,
         priceHistory: filteredHistory
       },
       { transaction: dbTransaction }
@@ -108,17 +124,18 @@ class EconomyMetrics {
   }
 
   static buildPublicStats(currency, metricsExtras = {}) {
+    const basePriceEur = toAmount(currency.basePrice) || REFERENCE_PRICE_EUR;
     return {
       currency: {
         symbol: currency.symbol,
         name: currency.name,
         referencePriceEur: REFERENCE_PRICE_EUR,
-        currentPrice: REFERENCE_PRICE_EUR,
-        basePrice: REFERENCE_PRICE_EUR,
-        multiplier: 1.0,
+        currentPrice: toAmount(currency.currentPrice) || basePriceEur,
+        basePrice: basePriceEur,
+        multiplier: toAmount(currency.currentMultiplier) || 1.0,
         trend: currency.economicTrend || 'stable',
         purchaseBonus: roundTWC(toAmount(currency.purchaseBonus) * 100),
-        priceChange24h: 0,
+        priceChange24h: toAmount(currency.priceChange24h) || 0,
         volume24h: toAmount(currency.volume24h),
         marketCap: toAmount(currency.marketCap),
         circulatingSupply: toAmount(currency.circulatingSupply),

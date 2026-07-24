@@ -7,7 +7,12 @@
 
 const logger = require('../../utils/logger');
 const instructionManager = require('./InstructionManager');
-const { runPolicierCongoV2Turn, TRIGGER_TYPES, isPolicierCongoV2Enabled } = require('./policiercongoV2Bridge');
+const {
+  runPolicierCongoV2Turn,
+  runPolicierCongoV3Automation,
+  TRIGGER_TYPES,
+  isPolicierCongoV2Enabled
+} = require('./policiercongov3/compatibilityBridge');
 const schedulerManager = require('./schedulerManager');
 
 class AutomationEngine {
@@ -47,6 +52,22 @@ class AutomationEngine {
 
       logger.info('🚀 Démarrage de l\'automatisation intelligente...');
 
+      if (isPolicierCongoV2Enabled()) {
+        logger.info('🧠 Moteur actif: PolicierCongo V3 agentique');
+        const v3Result = await runPolicierCongoV3Automation({ source: 'automation_engine_full', full: true });
+        if (v3Result.success) this.successCount++; else this.errorCount++;
+        this.lastRun = {
+          timestamp: startTime,
+          duration: Date.now() - startTime.getTime(),
+          success: v3Result.success,
+          engine: 'policiercongo_v3',
+          run_id: v3Result.result?.runId,
+          tool_calls: v3Result.result?.tool_calls || 0,
+          next_wake: v3Result.next_wake || null
+        };
+        return { ...v3Result, statistics: { run_count: this.runCount, success_count: this.successCount, error_count: this.errorCount, last_run: this.lastRun } };
+      }
+
       // Phase 0: Détection et enregistrement des interactions significatives
       const interactionsResult = await this.detectSignificantInteractions();
       if (interactionsResult.success) {
@@ -83,6 +104,7 @@ class AutomationEngine {
 
       if (isPolicierCongoV2Enabled()) {
         logger.info('🧠 Utilisation de PolicierCongoV2 pour la planification...');
+        const { geminiIntelligence } = require('./index');
         const event = {
           id: `run_${Date.now()}`,
           trigger: TRIGGER_TYPES.SCHEDULED,
@@ -218,6 +240,11 @@ class AutomationEngine {
       
 
       logger.info('⚡ Démarrage de l\'automatisation optimisée...');
+
+      if (isPolicierCongoV2Enabled()) {
+        logger.info('🧠 Moteur actif: PolicierCongo V3 agentique');
+        return await runPolicierCongoV3Automation({ source: 'automation_engine_optimized', full: false });
+      }
       
       // Collecter les données récentes
       const collectedData = await this.collectRecentData();

@@ -130,9 +130,8 @@ class ReplyManager {
    */
   async generateContextualResponse(originalTweet, context = {}) {
     try {
-      const { runPolicierCongoV2Turn, isPolicierCongoV2Enabled } = require('./policiercongoV2Bridge');
+      const { runPolicierCongoV2Turn, isPolicierCongoV2Enabled, TRIGGER_TYPES } = require('./policiercongov3/compatibilityBridge');
       const { geminiIntelligence } = require('./index');
-      const { TRIGGER_TYPES } = require('./policiercongoV2');
 
       if (isPolicierCongoV2Enabled() && originalTweet.user_id && originalTweet.content) {
         const username = originalTweet.author?.username || 'user';
@@ -177,7 +176,7 @@ class ReplyManager {
             };
           }
         } catch (e) {
-          logger.warn('⚠️ ReplyManager V2 indisponible, fallback heuristique:', e.message);
+          logger.warn('⚠️ ReplyManager V3 indisponible, fallback heuristique:', e.message);
         }
       }
 

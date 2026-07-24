@@ -1,7 +1,8 @@
 const express = require('express');
-const { body, param } = require('express-validator');
+const { body, param, query } = require('express-validator');
 const NewEconomyController = require('../controllers/newEconomyController');
 const { authenticateToken } = require('../middleware/authMiddleware');
+const { checkTransaction } = require('../middleware/fraudMiddleware');
 const router = express.Router();
 
 /**
@@ -60,6 +61,60 @@ router.post('/spend', [
     .isLength({ min: 1, max: 500 })
     .withMessage('Description requise (max 500 caractères)')
 ], NewEconomyController.spendCoins);
+
+/**
+ * @route GET /api/new-economy/mining/round
+ * @desc Obtenir le round de minage ouvert (app Windows)
+ * @access Private
+ */
+router.get('/mining/round', [
+  query('currencyId').isUUID().withMessage('ID de cryptomonnaie invalide'),
+  query('engine').optional().isIn(['cpu', 'gpu']).withMessage('Moteur de minage invalide')
+], NewEconomyController.getMiningRound);
+
+/**
+ * @route POST /api/new-economy/mining/submit
+ * @desc Soumettre un nonce pour le round de minage en cours
+ * @access Private
+ */
+router.post('/mining/submit', [
+  body('currencyId').isUUID().withMessage('ID de cryptomonnaie invalide'),
+  body('roundId').isUUID().withMessage('ID de round invalide'),
+  body('nonce').isString().isLength({ min: 1, max: 40 }).withMessage('Nonce invalide')
+], NewEconomyController.submitMiningProof);
+
+/**
+ * @route POST /api/new-economy/transfer
+ * @desc Transférer des TwitCoins à un autre utilisateur (frais 20% vers la trésorerie)
+ * @access Private
+ */
+/**
+ * @route GET /api/new-economy/wallets
+ * @desc Portefeuilles de l'utilisateur pour toutes les monnaies actives (NF + EUR interne)
+ * @access Private
+ */
+router.get('/wallets', NewEconomyController.getAllWallets);
+
+/**
+ * @route POST /api/new-economy/exchange
+ * @desc Échanger entre le portefeuille NF et le portefeuille EUR interne (parité fixe), taux réel courant
+ * @access Private
+ */
+router.post('/exchange', [
+  body('direction').isIn(['NF_TO_EUR', 'EUR_TO_NF']).withMessage('Sens d\'échange invalide'),
+  body('amount').isFloat({ min: 0.00000001 }).withMessage('Montant invalide')
+], NewEconomyController.exchangeCurrency);
+
+router.post('/transfer', checkTransaction, [
+  body('toUserId').isUUID().withMessage('ID utilisateur destinataire invalide'),
+  body('currencyId').isUUID().withMessage('ID de cryptomonnaie invalide'),
+  body('amount').isFloat({ min: 0.00000001 }).withMessage('Montant invalide'),
+  // amountCurrency indique l'unité dans laquelle `amount` est exprimé : NF
+  // (défaut, comportement historique) ou EUR — dans ce cas le montant est
+  // converti en NF au taux réel courant avant l'exécution du virement.
+  body('amountCurrency').optional().isIn(['NF', 'EUR']).withMessage('Unité de montant invalide'),
+  body('description').optional().isString().withMessage('Description invalide')
+], NewEconomyController.transferCoins);
 
 /**
  * @route GET /api/new-economy/stats/:currencyId

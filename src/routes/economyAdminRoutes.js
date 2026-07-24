@@ -14,6 +14,13 @@ router.use(requireEconomyRole);
 // Statistiques globales
 router.get('/stats', EconomyAdminController.getGlobalStats);
 
+// Détection de fraude (scan rétrospectif transferts/minage/casino/achats)
+router.get('/fraud-scan', EconomyAdminController.fraudScan);
+// Traçage de la circulation des NF depuis un compte suspect (graphe de transferts)
+router.get('/fraud-trace/:userId', EconomyAdminController.fraudTrace);
+// Retrait de NF frauduleux de l'économie (vers la trésorerie, hors circulation utilisateur)
+router.post('/fraud-burn', EconomyAdminController.fraudBurn);
+
 // Gestion des transactions
 router.get('/transactions', EconomyAdminController.getTransactions);
 router.delete('/transactions/:id', EconomyAdminController.deleteTransaction);

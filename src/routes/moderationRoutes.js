@@ -39,7 +39,7 @@ router.get('/reports',
     query('limit').optional().isInt({ min: 1, max: 1000 }).withMessage('Limit doit être entre 1 et 1000'),
     query('status').optional().isIn(['pending', 'investigating', 'resolved', 'dismissed', 'all']).withMessage('Status invalide'),
     query('severity').optional().isIn(['low', 'medium', 'high', 'critical', 'all']).withMessage('Sévérité invalide'),
-    query('type').optional().isIn(['tweet', 'user', 'all']).withMessage('Type invalide')
+    query('type').optional().isIn(['tweet', 'user', 'comment', 'all']).withMessage('Type invalide')
   ],
   moderationController.getReports
 );
@@ -53,6 +53,16 @@ router.put('/reports/:reportId',
     body('moderator_notes').optional().isString().isLength({ max: 1000 }).withMessage('Notes trop longues'),
     body('resolution_action').optional().isIn(['none', 'warn', 'suspend', 'ban', 'delete']).withMessage('Action de résolution invalide'),
     body('resolution_reason').optional().isString().isLength({ max: 500 }).withMessage('Raison de résolution trop longue')
+  ],
+  moderationController.updateReportStatus
+);
+
+router.post('/reports/:reportId/resolve',
+  requireModeratorRole,
+  [
+    param('reportId').isUUID().withMessage('ID signalement invalide'),
+    body('action').isIn(['resolve', 'dismiss', 'escalate']).withMessage('Action invalide'),
+    body('reason').optional().isString().isLength({ max: 500 }).withMessage('Raison trop longue')
   ],
   moderationController.updateReportStatus
 );
@@ -327,6 +337,17 @@ router.get('/moderators',
 
 // Promouvoir un utilisateur au rang de modérateur
 router.post('/moderators/:userId/promote',
+  requirePermission('can_manage_moderators'),
+  [
+    param('userId').isUUID().withMessage('ID utilisateur invalide'),
+    body('role').isIn(['moderateur', 'moderator', 'admin', 'superadmin', 'supermoderateur', 'classeurdetweets', 'economiegardien']).withMessage('Role invalide'),
+    body('permissions').optional().isObject().withMessage('Permissions invalides'),
+    body('reason').optional().isString().isLength({ max: 500 }).withMessage('Raison trop longue')
+  ],
+  moderationController.promoteModerator
+);
+
+router.post('/moderators/:userId/promote-legacy',
   requirePermission('can_manage_moderators'),
   [
     param('userId').isUUID().withMessage('ID utilisateur invalide'),

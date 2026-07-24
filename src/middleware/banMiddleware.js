@@ -79,23 +79,12 @@ const checkUserBanStrict = async (req, res, next) => {
 
     const user = req.user;
 
-    // DEBUG: Log des informations de l'utilisateur
-    console.log('🔍 DEBUG Middleware Ban - Utilisateur:', {
-      id: user.id,
-      username: user.username,
-      is_suspended: user.is_suspended,
-      suspension_reason: user.suspension_reason
-    });
-
     // Blocage total pour les utilisateurs suspendus/bannis
     if (user.is_suspended) {
-      console.log('🚫 Utilisateur BANNI détecté - Blocage de l\'action');
-      
       const message = 'Action non autorisée - Compte banni';
       const reason = user.suspension_reason || 'Violation des conditions d\'utilisation';
 
-      console.log('📝 Message de blocage:', message);
-      console.log('📝 Raison:', reason);
+      logger.info(`🚫 Action bloquée (compte suspendu) user=${user.id}`);
 
       return res.status(403).json({
         success: false,
@@ -109,10 +98,8 @@ const checkUserBanStrict = async (req, res, next) => {
       });
     }
 
-    console.log('✅ Utilisateur AUTORISÉ - Passage au middleware suivant');
     next();
   } catch (error) {
-    console.error('❌ Erreur dans le middleware strict de vérification des bans:', error);
     logger.error('Erreur dans le middleware strict de vérification des bans:', error);
     next(error);
   }

@@ -5,12 +5,30 @@
  */
 
 const logger = require('../../utils/logger');
-const { Tweet, User, TweetLike, TweetRetweet } = require('../../models');
+const { Tweet, User, TweetLike, TweetRetweet, UserFollow, Notification } = require('../../models');
 const { POLICE_ACCOUNT_ID, LIMITS, DEFAULT_METADATA } = require('./config');
 
 class TweetManager {
   constructor() {
     this.initialized = false;
+  }
+
+  /**
+   * Crée les notifications de mention pour les @handles présents dans un tweet
+   */
+  async _notifyMentions(tweet) {
+    try {
+      if (!tweet.mentions || tweet.mentions.length === 0) return;
+      for (const mention of tweet.mentions) {
+        const username = String(mention).replace(/^@/, '');
+        const mentionedUser = await User.findOne({ where: { username } });
+        if (mentionedUser && mentionedUser.id !== POLICE_ACCOUNT_ID) {
+          await Notification.createMentionNotification(POLICE_ACCOUNT_ID, tweet.id, mentionedUser.id);
+        }
+      }
+    } catch (err) {
+      logger.warn('⚠️ Notification de mention (PolicierCongo) échouée:', err?.message);
+    }
   }
 
   /**
@@ -218,7 +236,9 @@ class TweetManager {
         logger.error(`❌ Erreur lors de l'ajout du tweet au moteur de similarité:`, simError);
       }
 
-      
+      // 🔔 Notifications de mention
+      await this._notifyMentions(tweetWithAuthor);
+
       return {
         success: true,
         tweet: tweetWithAuthor,
@@ -271,7 +291,7 @@ class TweetManager {
       });
 
       logger.info(`✅ Réponse créée avec succès: ${replyTweet.id}`);
-      
+
       // Récupérer la réponse avec l'auteur pour la similarité
       const replyWithAuthor = await Tweet.findByPk(replyTweet.id, {
         include: [{
@@ -280,6 +300,22 @@ class TweetManager {
           attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium']
         }]
       });
+
+      // 🔔 Notification de réponse pour l'auteur du tweet parent + notifications de mention
+      try {
+        const parentTweet = await Tweet.findByPk(replyData.parent_tweet_id, { attributes: ['id', 'user_id'] });
+        if (parentTweet) {
+          await Notification.createReplyNotification(
+            POLICE_ACCOUNT_ID,
+            replyTweet.id,
+            replyData.parent_tweet_id,
+            parentTweet.user_id
+          );
+        }
+      } catch (notifErr) {
+        logger.warn('⚠️ Notification de réponse (PolicierCongo) échouée:', notifErr?.message);
+      }
+      await this._notifyMentions(replyWithAuthor);
 
       // 🧠 AJOUT AU MOTEUR DE RECOMMANDATION / SIMILARITÉ
       try {
@@ -659,6 +695,16 @@ class TweetManager {
         like_type: 'like'
       });
 
+      // 🔔 Notification de like
+      try {
+        const likedTweet = await Tweet.findByPk(tweetId, { attributes: ['id', 'user_id'] });
+        if (likedTweet) {
+          await Notification.createLikeNotification(userId, tweetId, likedTweet.user_id);
+        }
+      } catch (notifErr) {
+        logger.warn('⚠️ Notification de like (PolicierCongo) échouée:', notifErr?.message);
+      }
+
       // Track interaction for recommendation engine
       try {
         const similarity = require('../similarity');
@@ -675,6 +721,59 @@ class TweetManager {
 
     } catch (error) {
       logger.error(`❌ Erreur lors du like du tweet ${tweetId}:`, error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Suit un autre compte
+   */
+  async followUser(targetUserId, userId = POLICE_ACCOUNT_ID) {
+    try {
+      if (!this._isValidUUID(targetUserId)) {
+        return { success: false, error: 'ID utilisateur invalide' };
+      }
+      if (targetUserId === userId) {
+        return { success: false, error: 'Impossible de se suivre soi-même' };
+      }
+
+      const target = await User.findByPk(targetUserId, { attributes: ['id', 'username'] });
+      if (!target) {
+        return { success: false, error: 'Utilisateur à suivre introuvable' };
+      }
+
+      const existing = await UserFollow.findOne({
+        where: { follower_id: userId, following_id: targetUserId }
+      });
+      if (existing) {
+        return { success: true, message: 'Déjà suivi', follow: existing };
+      }
+
+      const follow = await UserFollow.create({
+        follower_id: userId,
+        following_id: targetUserId,
+        status: 'active',
+        metadata: { source: 'policiercongo' }
+      });
+
+      try {
+        await Notification.createFollowNotification(userId, targetUserId);
+      } catch (notifErr) {
+        logger.warn('⚠️ Notification de follow (PolicierCongo) échouée:', notifErr?.message);
+      }
+
+      try {
+        const similarity = require('../similarity');
+        similarity.onFollow(userId, targetUserId);
+      } catch (e) {
+        logger.warn('⚠️ Erreur mise à jour graphe social pour algo:', e.message);
+      }
+
+      logger.info(`✅ ${userId} suit désormais ${target.username} (${targetUserId})`);
+      return { success: true, follow };
+
+    } catch (error) {
+      logger.error(`❌ Erreur lors du follow de ${targetUserId}:`, error);
       return { success: false, error: error.message };
     }
   }
@@ -719,6 +818,13 @@ class TweetManager {
           original_author_id: originalTweet.user_id
         }
       });
+
+      // 🔔 Notification de retweet
+      try {
+        await Notification.createRetweetNotification(userId, tweetId, originalTweet.user_id);
+      } catch (notifErr) {
+        logger.warn('⚠️ Notification de retweet (PolicierCongo) échouée:', notifErr?.message);
+      }
 
       // Track interaction
       try {

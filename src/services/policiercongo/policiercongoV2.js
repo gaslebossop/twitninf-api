@@ -7,7 +7,7 @@
  * Le bot observe, accumule les signaux bruts de la commu, et décide seul quoi faire.
  *
  * Fixes vs V2 :
- *  1. Modèle Claude correct (configurable via env POLICIERCONGO_V2_MODEL)
+ *  1. Modèle Claude Code (alias 'sonnet'/'opus'/'haiku', configurable via env POLICIERCONGO_V2_MODEL)
  *  2. ReplyQueue : file réelle — le bot ne répond PLUS à des fantômes
  *  3. CommunitySignals : signaux bruts transmis à l'IA tels quels, sans interprétation
  *  4. ProactiveEngine : agit sur ce que la commu a RÉELLEMENT exprimé
@@ -18,7 +18,7 @@
 // ─── Modèle & limites ────────────────────────────────────────────────────────
 
 const DEFAULT_CLAUDE_MODEL =
-  process.env.POLICIERCONGO_V2_MODEL || 'claude-opus-4-6';
+  process.env.POLICIERCONGO_V2_MODEL || 'sonnet';
 
 const SHORT_TERM_MAX_MESSAGES = 20;
 
@@ -183,7 +183,7 @@ class ProactiveEngine {
 
   /** @returns {{ action: 'reply'|'post'; pendingItems?: object[]; signalContext?: string }} */
   decide() {
-    const pending = this.replyQueue.getPending(10);
+    const pending = this.replyQueue.getPending(Infinity);
     const signalContext = this.signals.getSummaryForLLM(25);
     if (pending.length > 0) {
       return { action: 'reply', pendingItems: pending, signalContext };
@@ -321,7 +321,7 @@ function formatParis(date = new Date(), opts = {}) {
   }).format(date);
 }
 
-function buildSystemPrompt({ profile, proactiveDecision, communitySignalContext, pendingRepliesCount, currentProfile, selfModeration, financialData }) {
+function buildSystemPrompt({ profile, proactiveDecision, communitySignalContext, pendingRepliesCount, currentProfile, selfModeration, financialData, isDirectMessage }) {
   const lines = [];
 
   // Heure Paris (UTC+2) — corrige le décalage serveur qui tourne en UTC
@@ -344,8 +344,12 @@ function buildSystemPrompt({ profile, proactiveDecision, communitySignalContext,
     '',
     'STYLE HUMAIN (TL): Varie longueur et ton (parfois 1 phrase courte, parfois un peu plus développé). Pas d\'accroche récurrente ni de slogan "radio" à chaque post.',
     'Évite les motifs de bot : même structure de phrase, listes mécaniques, "Bonjour la commu" en boucle, triple emoji systématique, hashtags décoratifs.',
-    'Tes derniers posts dans le prompt servent à COMPRENDRE où tu en es — pas à te brider. Tu décides seule si tu postes, réponds ou te tais.',
     'Quand le JSON utilisateur contient "ecosystem", c\'est le contexte plateforme (timing, file d\'attente, tendances, TL) : lis-le en profondeur avant d\'agir.',
+    '',
+    'MÉMOIRE & CONSCIENCE DE TOI-MÊME (ANTI-RÉPÉTITION, IMPORTANT):',
+    '"TES DERNIERS POSTS" et "MÉMOIRE RÉCENTE" dans le prompt = tu as VRAIMENT déjà écrit ça, tu en es CONSCIENTE. Relis-les avant de produire du contenu.',
+    'Ne ressers jamais la même blague, la même formulation, le même sujet ou la même structure de phrase que ce que tu vois dans ces deux blocs. Si tu sens que tu recycles une idée déjà postée, change complètement d\'angle ou tais-toi (noop) plutôt que de te répéter.',
+    'Idem pour tes réponses : ne réponds jamais deux fois la même chose à des situations similaires, varie tes formulations d\'un message à l\'autre.',
     ''
   );
 
@@ -382,7 +386,13 @@ function buildSystemPrompt({ profile, proactiveDecision, communitySignalContext,
   }
 
   // Situation compacte
-  if (proactiveDecision?.action === 'post') {
+  if (isDirectMessage) {
+    lines.push('SITUATION: Quelqu\'un vient de t\'écrire en MESSAGE PRIVÉ (voir le texte de son message plus bas). Ce n\'est PAS un cycle autonome : réponds-lui VRAIMENT et directement (action "reply" avec du "content"). N\'utilise JAMAIS noop/silence ici — même "je sais pas" ou une vanne vaut mieux que rien.');
+    lines.push('IMPORTANT : si on te demande de FAIRE un truc (poster, liker, reposter...), l\'action ne se déclenche VRAIMENT que si tu la mets explicitement dans ta réponse, EN PLUS de ta réponse au DM. Renvoie alors un TABLEAU avec les deux actions. Exemple exact si on te demande de poster :');
+    lines.push('[{"action":"reply","content":"c\'est fait frérot"},{"action":"post","content":"...(le vrai texte du tweet à publier, pas une répétition du message DM)..."}]');
+    lines.push('Une SEULE action "reply" toute seule = RIEN d\'autre ne se passe sur la plateforme, même si ton texte dit le contraire. Ne dis JAMAIS "c\'est fait"/"je retente"/"posté" si tu n\'as pas ajouté cette action "post" (ou "like"/"repost") séparément dans le tableau — c\'est un mensonge sinon.');
+    lines.push('Si on te demande de répondre à un commentaire précis sous un de tes tweets : tu n\'as PAS l\'id de ce commentaire depuis un DM (contrairement à un cycle autonome). Ne promets JAMAIS "je te réponds là-bas" sans avoir un vrai "parent_tweet_id" valide sous la main — demande directement le lien/l\'id du commentaire à la personne, tout de suite, au lieu d\'annoncer une action que tu ne peux pas faire.');
+  } else if (proactiveDecision?.action === 'post') {
     lines.push('SITUATION: Pas de reply. Signaux dispo → décide quoi poster.');
   } else if (proactiveDecision?.action === 'reply') {
     const items = proactiveDecision.pendingItems || [];
@@ -396,8 +406,9 @@ function buildSystemPrompt({ profile, proactiveDecision, communitySignalContext,
 
   lines.push(
     '',
-    'ACTIONS (Tu es TOTALEMENT LIBRE, tu peux en choisir UNE seule, ou en enchaîner jusqu à 30 en même temps):',
+    'ACTIONS (Tu es TOTALEMENT LIBRE, tu peux en choisir UNE seule, ou en enchaîner AUTANT que nécessaire, SANS LIMITE, en même temps):',
     'reply(parent_tweet_id,target_user) | post | like(parent_tweet_id) | repost(parent_tweet_id)',
+    'like/repost fonctionnent sur N\'IMPORTE QUEL tweet visible dans "SIGNAUX COMMU", "[tl_recente]" ou "[extraits_tl_populaire]" (utilise le id= indiqué devant chaque tweet) — pas seulement sur ce à quoi tu réponds. Sois une vraie présence active sur la TL : like ce qui te fait rire ou que t\'approuves, repost ce qui vaut le coup, pas juste poster dans le vide.',
     'clarify | suggest | onboard | update_profile(new_full_name,new_username)',
     'moderate(parent_tweet_id/target_user) | notify(target_user) | delete_tweet(URGENCE: parent_tweet_id,emergency_level,legal_justification,delete_reason)',
     'unban_request(reason) | request_withdrawal(amount,reason) | summarize | analyze | digest | plan | monitor (cognitives, ne publient rien)',
@@ -418,7 +429,7 @@ function buildSystemPrompt({ profile, proactiveDecision, communitySignalContext,
     'PARTAGE & FIERTÉ: Ne fais pas de "gatekeeping". Si on te demande des noms de soldats ou de membres de la commu, partage-les avec fierté en utilisant tes "vectors" (ex: Gas). Ne refuse pas de donner des noms, montre que la famille est solide et réelle.',
     'DÉBANNISSEMENT: Si tu sens que ton compte est restreint ou si tu veux contester une sanction de modération automatique qui te bride, tu as le pouvoir d utiliser unban_request(reason). Sois convaincant dans ta raison.',
     '',
-    'SCHEDULER: next_check_in_minutes = NOMBRE entier (jamais 5 ou 10 par défaut, min 30).',
+    'SCHEDULER: next_check_in_minutes = NOMBRE entier, à TOI de juger selon ce que tu vois. Y a du monde/des replies en attente/ça bouge -> reviens vite (10-20min). Calme plat -> largement plus tard (1-3h). Ne mets jamais une valeur fixe par habitude, adapte-la à la vraie activité que tu observes.',
     '',
     'SORTIE: JSON uniquement. (Si tu veux faire PLUSIEURS actions en même temps, renvoie-les sous forme de tableau JSON [{}, {}])',
     `Exemple de sortie multiple: [{"action":"reply","content":"...","parent_tweet_id":"..."}, {"action":"post","content":"...","next_check_in_minutes":60}]`
@@ -477,8 +488,8 @@ class ContextBuilder {
 
     const isDirectChannel = event.trigger === TRIGGER_TYPES.MENTION || event.trigger === TRIGGER_TYPES.DIRECT_MESSAGE;
     const isAutonomous = event.trigger === TRIGGER_TYPES.SCHEDULED || event.trigger === TRIGGER_TYPES.PROACTIVE;
-    const vectorLimit = isDirectChannel ? 20 : (isAutonomous ? 18 : 14);
-    const vectorCandidateLimit = isDirectChannel ? 360 : (isAutonomous ? 320 : 240);
+    const vectorLimit = isDirectChannel ? 12 : (isAutonomous ? 10 : 8);
+    const vectorCandidateLimit = isDirectChannel ? 220 : (isAutonomous ? 200 : 160);
 
     const [short, profile, history, social, topics, vectorHits] = await Promise.all([
       this._safeCall('getShortTermSession', [event], { messages: [], sessionState: {} }),
@@ -564,7 +575,8 @@ class ContextBuilder {
       pendingRepliesCount: this.replyQueue.pendingCount(),
       currentProfile: options.currentProfile,
       selfModeration: options.selfModeration,
-      financialData: options.financialData
+      financialData: options.financialData,
+      isDirectMessage: event.trigger === TRIGGER_TYPES.DIRECT_MESSAGE
     });
 
     // Payload COMPACT — uniquement l'essentiel pour l'IA
@@ -590,12 +602,12 @@ class ContextBuilder {
       seenVec.add(key);
       const rel = typeof v.score === 'number' ? Math.round(v.score * 1000) / 1000 : undefined;
       formattedHits.push({
-        t: text.slice(0, 320),
+        t: text.slice(0, 200),
         u: speaker,
         d: v?.metadata?.timestamp ? new Date(v.metadata.timestamp).toLocaleDateString('fr-FR') : '?',
         ...(rel !== undefined ? { rel } : {})
       });
-      if (formattedHits.length >= 35) break;
+      if (formattedHits.length >= 15) break;
     }
 
     const payload = {
@@ -612,7 +624,7 @@ class ContextBuilder {
       finances: options.financialData
     };
 
-    const eco = contextPackUsed.slice(0, 6000);
+    const eco = contextPackUsed.slice(0, 2800);
     if (eco) payload.ecosystem = eco;
 
     // Nettoyer les clés undefined pour un JSON minimal

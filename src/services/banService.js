@@ -1,6 +1,17 @@
 const { User } = require('../models');
 const logger = require('../utils/logger');
 
+// Invalide le cache de statut du gate global de ban (prise d'effet immédiate
+// d'un ban/déban, sans attendre l'expiration du TTL). Lazy-require pour éviter
+// toute dépendance circulaire.
+function invalidateBanCache(userId) {
+  try {
+    require('../middleware/globalBanMiddleware').invalidateUser(String(userId));
+  } catch (e) {
+    logger.debug('[banService] invalidateBanCache indisponible:', e.message);
+  }
+}
+
 class BanService {
   // Suspendre un utilisateur temporairement
   static async suspendUser(userId, reason, durationDays = 7, adminId = null) {
@@ -25,8 +36,9 @@ class BanService {
         }
       });
 
+      invalidateBanCache(userId);
       logger.info(`Utilisateur ${user.username} suspendu pour ${durationDays} jours. Raison: ${reason}`);
-      
+
       return {
         success: true,
         user: user.username,
@@ -59,8 +71,9 @@ class BanService {
         }
       });
 
+      invalidateBanCache(userId);
       logger.info(`Suspension levée pour l'utilisateur ${user.username}`);
-      
+
       return {
         success: true,
         user: user.username,
@@ -110,8 +123,9 @@ class BanService {
         logger.warn(`Utilisateur ${user.username} banni définitivement (5ème violation)`);
       }
 
+      invalidateBanCache(userId);
       logger.info(`Ban ajouté pour ${user.username}. Total: ${newBanCount}. Raison: ${reason}`);
-      
+
       return {
         success: true,
         user: user.username,
@@ -161,8 +175,9 @@ class BanService {
         logger.info(`Suspension permanente levée pour ${user.username} (ban count réduit à ${newBanCount})`);
       }
 
+      invalidateBanCache(userId);
       logger.info(`Ban réduit pour ${user.username}. Nouveau total: ${newBanCount}`);
-      
+
       return {
         success: true,
         user: user.username,
@@ -270,6 +285,7 @@ class BanService {
       // Appliquer les mises à jour si nécessaire
       if (needsUpdate) {
         await user.update(updates);
+        invalidateBanCache(userId);
         logger.info(`Statut de ban de ${user.username} mis à jour automatiquement`);
       }
 

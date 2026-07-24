@@ -164,12 +164,7 @@ const requireAdmin = async (req, res, next) => {
                    req.user.role === 'super_admin';
     
     if (!isAdmin) {
-      console.log('🔍 Debug requireAdmin - User:', {
-        isAdmin: req.user.isAdmin,
-        role: req.user.role,
-        userId: req.user.id,
-        username: req.user.username
-      });
+      logger.warn(`Accès admin refusé pour user=${req.user?.id}`);
       return res.status(403).json({
         success: false,
         message: 'Accès administrateur requis'
@@ -340,6 +335,26 @@ const denySuspended = async (req, res, next) => {
 };
 
 // Middleware pour vérifier les rôles de modération
+const normalizeRole = (role) => {
+  if (role === 'moderator') return 'moderateur';
+  if (role === 'super_admin' || role === 'supermoderateur') return 'superadmin';
+  return role;
+};
+
+const getEffectiveModerationUser = async (req) => {
+  const dbUser = req.user?.id
+    ? await User.findByPk(req.user.id, {
+      attributes: ['id', 'role', 'moderation_permissions']
+    })
+    : null;
+
+  return {
+    ...req.user,
+    role: dbUser?.role || req.user?.role,
+    moderation_permissions: dbUser?.moderation_permissions || req.user?.moderation_permissions || {}
+  };
+};
+
 const requireModeratorRole = async (req, res, next) => {
   try {
     if (!req.user) {
@@ -349,8 +364,11 @@ const requireModeratorRole = async (req, res, next) => {
       });
     }
 
-    const allowedRoles = ['moderator', 'admin', 'superadmin'];
-    if (!allowedRoles.includes(req.user.role)) {
+    const effectiveUser = await getEffectiveModerationUser(req);
+    req.user = effectiveUser;
+
+    const allowedRoles = ['moderateur', 'admin', 'superadmin'];
+    if (!allowedRoles.includes(normalizeRole(effectiveUser.role))) {
       return res.status(403).json({
         success: false,
         message: 'Accès refusé. Rôle de modérateur requis.'
@@ -376,8 +394,11 @@ const requireAdminRole = async (req, res, next) => {
       });
     }
 
+    const effectiveUser = await getEffectiveModerationUser(req);
+    req.user = effectiveUser;
+
     const allowedRoles = ['admin', 'superadmin'];
-    if (!allowedRoles.includes(req.user.role)) {
+    if (!allowedRoles.includes(normalizeRole(effectiveUser.role))) {
       return res.status(403).json({
         success: false,
         message: 'Accès refusé. Rôle d\'administrateur requis.'
@@ -403,7 +424,10 @@ const requireSuperAdminRole = async (req, res, next) => {
       });
     }
 
-    if (req.user.role !== 'superadmin') {
+    const effectiveUser = await getEffectiveModerationUser(req);
+    req.user = effectiveUser;
+
+    if (normalizeRole(effectiveUser.role) !== 'superadmin') {
       return res.status(403).json({
         success: false,
         message: 'Accès refusé. Rôle de super administrateur requis.'
@@ -429,8 +453,11 @@ const requireClasseurRole = async (req, res, next) => {
       });
     }
 
-    const allowedRoles = ['classeurdetweets', 'moderator', 'admin', 'superadmin'];
-    if (!allowedRoles.includes(req.user.role)) {
+    const effectiveUser = await getEffectiveModerationUser(req);
+    req.user = effectiveUser;
+
+    const allowedRoles = ['classeurdetweets', 'moderateur', 'admin', 'superadmin'];
+    if (!allowedRoles.includes(normalizeRole(effectiveUser.role))) {
       return res.status(403).json({
         success: false,
         message: 'Accès refusé. Rôle de classeur de tweets requis.'
@@ -456,8 +483,11 @@ const requireEconomyRole = async (req, res, next) => {
       });
     }
 
+    const effectiveUser = await getEffectiveModerationUser(req);
+    req.user = effectiveUser;
+
     const allowedRoles = ['moderateur', 'economiegardien', 'admin', 'superadmin'];
-    if (!allowedRoles.includes(req.user.role)) {
+    if (!allowedRoles.includes(normalizeRole(effectiveUser.role))) {
       return res.status(403).json({
         success: false,
         message: 'Accès refusé. Rôle de Gardien de l\'Économie requis.'
@@ -486,12 +516,15 @@ const requirePermission = (permission) => {
       }
 
       // Les superadmins ont toutes les permissions
-      if (req.user.role === 'superadmin') {
+      const effectiveUser = await getEffectiveModerationUser(req);
+      req.user = effectiveUser;
+
+      if (normalizeRole(effectiveUser.role) === 'superadmin') {
         return next();
       }
 
       // Vérifier la permission spécifique
-      if (!req.user.moderation_permissions || !req.user.moderation_permissions[permission]) {
+      if (!effectiveUser.moderation_permissions || !effectiveUser.moderation_permissions[permission]) {
         return res.status(403).json({
           success: false,
           message: `Permission '${permission}' requise`

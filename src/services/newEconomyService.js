@@ -1,14 +1,18 @@
-const { VirtualCurrency, UserWallet, Transaction, User } = require('../models');
+const { VirtualCurrency, UserWallet, Transaction, User, MiningRound } = require('../models');
 const { sequelize } = require('../database/index');
 const logger = require('../utils/logger');
 const {
   PURCHASE_PACKAGES,
   REFERENCE_PRICE_EUR,
-  TREASURY_USER_ID
+  TREASURY_USER_ID,
+  MINING_BASE_REWARD_TWC,
+  MINING_GPU_DIFFICULTY_FACTOR,
+  MINING_GPU_REWARD_FACTOR
 } = require('../economy/constants');
 const { roundTWC, toAmount, computePackageCoins } = require('../economy/money');
 const EconomyLedger = require('../economy/ledger');
 const EconomyMetrics = require('../economy/metrics');
+const Pow = require('../economy/pow');
 
 /**
  * API économique TwitCoins — monnaie fermée plateforme.
@@ -21,22 +25,57 @@ class NewEconomyService {
 
   static async ensureWalletsForUser(userId, externalTransaction = null) {
     if (!userId) return { ensured: 0 };
-    const currencies = await VirtualCurrency.findAll({
-      where: { isActive: true },
-      attributes: ['id'],
-      transaction: externalTransaction
-    });
-    for (const c of currencies) {
-      await EconomyLedger.findOrCreateWallet(userId, c.id, externalTransaction);
+
+    // Appelé à chaque lecture de portefeuille : on vérifie d'abord ce qui
+    // existe déjà (cas quasi systématique après la première visite) au lieu
+    // de retenter un findOrCreate à chaque fois — ça évite l'essentiel des
+    // courses concurrentes sur le portefeuille trésorerie partagé, et toute
+    // écriture reste dans une vraie transaction pour ne jamais laisser une
+    // connexion du pool dans un état "transaction avortée" (Postgres 25P02).
+    const dbTransaction = externalTransaction || (await sequelize.transaction());
+    const shouldCommit = !externalTransaction;
+
+    try {
+      const currencies = await VirtualCurrency.findAll({
+        where: { isActive: true },
+        attributes: ['id'],
+        transaction: dbTransaction
+      });
+
+      if (currencies.length === 0) {
+        if (shouldCommit) await dbTransaction.commit();
+        return { ensured: 0 };
+      }
+
+      const currencyIds = currencies.map((c) => c.id);
+      const existing = await UserWallet.findAll({
+        where: {
+          userId: [userId, TREASURY_USER_ID],
+          currencyId: currencyIds
+        },
+        attributes: ['userId', 'currencyId'],
+        transaction: dbTransaction
+      });
+      const existingKeys = new Set(existing.map((w) => `${w.userId}:${w.currencyId}`));
+
+      let ensured = 0;
+      for (const c of currencies) {
+        if (!existingKeys.has(`${userId}:${c.id}`)) {
+          await EconomyLedger.findOrCreateWallet(userId, c.id, dbTransaction);
+          ensured++;
+        }
+      }
+      const treasuryCurrencyId = currencies[0].id;
+      if (!existingKeys.has(`${TREASURY_USER_ID}:${treasuryCurrencyId}`)) {
+        await EconomyLedger.findOrCreateWallet(TREASURY_USER_ID, treasuryCurrencyId, dbTransaction);
+      }
+
+      if (shouldCommit) await dbTransaction.commit();
+      return { ensured };
+    } catch (error) {
+      if (shouldCommit) await dbTransaction.rollback();
+      throw error;
     }
-    if (currencies.length > 0) {
-      await EconomyLedger.findOrCreateWallet(
-        TREASURY_USER_ID,
-        currencies[0].id,
-        externalTransaction
-      );
-    }
-    return { ensured: currencies.length };
   }
 
   static _resolvePackage(pkgDef, promoBonusFraction = 0) {
@@ -135,13 +174,19 @@ class NewEconomyService {
         id: currency.id,
         name: currency.name,
         symbol: currency.symbol,
-        currentPrice: REFERENCE_PRICE_EUR,
-        basePrice: REFERENCE_PRICE_EUR,
-        multiplier: 1.0,
+        // Le prix RÉEL de la monnaie (currentPrice/basePrice/currentMultiplier
+        // sont déjà chargés sur `currency`, via getActiveCurrency ci-dessus) —
+        // avant ce correctif, ces trois champs étaient remplacés par la
+        // constante REFERENCE_PRICE_EUR figée, donc le portefeuille affichait
+        // un prix qui n'avait plus rien à voir avec le taux réel de la
+        // monnaie une fois le minage l'ayant fait diverger de la référence.
+        currentPrice: toAmount(currency.currentPrice),
+        basePrice: toAmount(currency.basePrice),
+        multiplier: toAmount(currency.currentMultiplier),
         trend: currency.economicTrend || 'stable',
         volume24h: toAmount(currency.volume24h),
         marketCap: toAmount(currency.marketCap),
-        priceChange24h: 0,
+        priceChange24h: toAmount(currency.priceChange24h),
         treasuryReserve: treasury
       }
     };
@@ -213,16 +258,46 @@ class NewEconomyService {
         dbTransaction
       );
 
+      if (!result.success) {
+        if (shouldCommit) await dbTransaction.rollback();
+        logger.warn(`Récompense refusée: ${amount} → user=${userId} (${result.reason || 'raison inconnue'})`);
+        return { success: false, reason: result.reason || 'Récompense refusée' };
+      }
+
       if (shouldCommit) {
         await EconomyMetrics.refresh(currencyId, dbTransaction);
         await dbTransaction.commit();
       }
 
-      logger.info(`Récompense: ${amount} TWC → user=${userId}`);
+      logger.info(`Récompense: ${amount} → user=${userId}`);
       return { success: true, reward: amount, transaction: result.tx };
     } catch (error) {
       if (shouldCommit) await dbTransaction.rollback();
       logger.error('Erreur récompense TWC:', error);
+      throw error;
+    }
+  }
+
+  /** Portefeuilles de l'utilisateur pour TOUTES les monnaies actives (NF, EUR interne...), pas une seule. */
+  static async getAllWallets(userId) {
+    const currencies = await VirtualCurrency.findAll({ where: { isActive: true }, order: [['createdAt', 'ASC']] });
+    return Promise.all(currencies.map((c) => this.getUserWallet(c.id, userId)));
+  }
+
+  static async exchangeCurrency(userId, fromCurrencyId, toCurrencyId, amount, rate) {
+    const dbTransaction = await sequelize.transaction();
+    try {
+      const result = await EconomyLedger.exchangeCurrency(userId, fromCurrencyId, toCurrencyId, amount, rate, dbTransaction);
+      // EUR interne : jamais de refresh() ici (voir metrics.js et eurCurrency.js)
+      // sur la monnaie CIBLE si elle n'a pas de circulation à recalculer utile —
+      // en pratique refresh() est maintenant sûr pour n'importe quelle monnaie
+      // (basePrice propre à chaque ligne), donc on rafraîchit bien les deux.
+      await EconomyMetrics.refresh(fromCurrencyId, dbTransaction);
+      await EconomyMetrics.refresh(toCurrencyId, dbTransaction);
+      await dbTransaction.commit();
+      return result;
+    } catch (error) {
+      await dbTransaction.rollback();
       throw error;
     }
   }
@@ -241,6 +316,97 @@ class NewEconomyService {
       await EconomyMetrics.refresh(currencyId, dbTransaction);
       await dbTransaction.commit();
       return result;
+    } catch (error) {
+      await dbTransaction.rollback();
+      throw error;
+    }
+  }
+
+  /**
+   * Renvoie le round de minage ouvert pour ce moteur (le crée s'il n'y en a
+   * pas / s'il a expiré). CPU et GPU ont chacun leur propre pool : sinon le
+   * GPU, bien plus rapide, raflerait systématiquement tous les blocs CPU.
+   */
+  static async getOrCreateMiningRound(currencyId, engineType = 'cpu') {
+    const now = new Date();
+
+    const existing = await MiningRound.findOne({
+      where: { currencyId, engineType, status: 'open' },
+      order: [['createdAt', 'DESC']]
+    });
+
+    if (existing && existing.expiresAt > now) {
+      return existing;
+    }
+
+    if (existing && existing.expiresAt <= now) {
+      await existing.update({ status: 'expired' });
+    }
+
+    const difficulty = Pow.randomDifficulty();
+    const baseTarget = Pow.targetForDifficulty(difficulty);
+    const baseReward = Pow.rewardForDifficulty(difficulty, MINING_BASE_REWARD_TWC);
+    const isGpu = engineType === 'gpu';
+
+    const round = await MiningRound.create({
+      currencyId,
+      challenge: Pow.randomChallenge(),
+      difficulty,
+      target: isGpu ? Pow.scaleTarget(baseTarget, MINING_GPU_DIFFICULTY_FACTOR) : baseTarget,
+      reward: isGpu ? roundTWC(baseReward * MINING_GPU_REWARD_FACTOR) : baseReward,
+      engineType,
+      status: 'open',
+      expiresAt: new Date(now.getTime() + Pow.ROUND_TTL_MS)
+    });
+
+    return round;
+  }
+
+  /**
+   * Un mineur soumet un nonce candidat. Premier valide accepté = gagnant ;
+   * les suivants sur le même round sont rejetés (round déjà résolu).
+   */
+  static async submitMiningProof(userId, currencyId, roundId, nonce) {
+    const dbTransaction = await sequelize.transaction();
+    try {
+      const round = await MiningRound.findOne({
+        where: { id: roundId, currencyId },
+        lock: dbTransaction.LOCK.UPDATE,
+        transaction: dbTransaction
+      });
+
+      if (!round) {
+        const error = new Error('Round de minage introuvable');
+        error.code = 'ROUND_NOT_FOUND';
+        throw error;
+      }
+
+      if (round.status !== 'open' || round.expiresAt <= new Date()) {
+        const error = new Error('Ce round a déjà été résolu par un autre mineur');
+        error.code = 'ROUND_TAKEN';
+        throw error;
+      }
+
+      const hash = Pow.sha256Hex(`${round.challenge}:${nonce}`);
+      if (!Pow.hashMeetsTarget(hash, Number(round.target))) {
+        const error = new Error('Preuve de travail invalide');
+        error.code = 'INVALID_PROOF';
+        throw error;
+      }
+
+      await round.update(
+        { status: 'solved', winnerUserId: userId, winningNonce: String(nonce), solvedAt: new Date() },
+        { transaction: dbTransaction }
+      );
+
+      const user = await User.findByPk(userId, { attributes: ['id', 'verified'], transaction: dbTransaction });
+      const reward = toAmount(round.reward);
+      const result = await EconomyLedger.awardMiningWin(userId, currencyId, reward, round.difficulty, Boolean(user?.verified), dbTransaction);
+      await EconomyMetrics.refresh(currencyId, dbTransaction);
+      await dbTransaction.commit();
+
+      const nextRound = await this.getOrCreateMiningRound(currencyId, round.engineType);
+      return { ...result, difficulty: round.difficulty, engineType: round.engineType, nextRound };
     } catch (error) {
       await dbTransaction.rollback();
       throw error;
@@ -279,7 +445,8 @@ class NewEconomyService {
       include: [
         {
           model: User,
-          attributes: ['username', 'profilePicture', 'isVerified']
+          as: 'user',
+          attributes: ['username', 'avatar', 'verified']
         }
       ],
       order: [['totalPurchased', 'DESC']],
@@ -290,9 +457,9 @@ class NewEconomyService {
       rank: index + 1,
       user: {
         id: wallet.userId,
-        username: wallet.User?.username,
-        profilePicture: wallet.User?.profilePicture,
-        isVerified: wallet.User?.isVerified
+        username: wallet.user?.username,
+        profilePicture: wallet.user?.avatar,
+        isVerified: wallet.user?.verified
       },
       totalPurchased: toAmount(wallet.totalPurchased),
       currentBalance: toAmount(wallet.balance),

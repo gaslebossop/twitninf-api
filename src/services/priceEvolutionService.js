@@ -40,10 +40,13 @@ class PriceEvolutionService {
         where: { currencyId }
       });
 
+      // Pas de colonne "lastMiningDate" (système de mining jamais mis en place
+      // en base) : updatedAt approxime un portefeuille actif, tout changement
+      // de solde (achat, récompense, transfert) le met à jour.
       const activeWallets = await UserWallet.count({
         where: {
           currencyId,
-          lastMiningDate: {
+          updatedAt: {
             [require('sequelize').Op.gte]: yesterday
           }
         }

@@ -12,11 +12,13 @@ const logger = require('../utils/logger');
 const BehaviorDataCollector = require('../services/behaviorDataCollector');
 const { UserBehaviorData, UserPreferences } = require('../models');
 const { ultraSafeClean } = require('../utils/circularRefCleaner');
-const botDetectionService = require('../services/BotDetectionService');
 const { denySuspended } = require('../middleware/authMiddleware');
 
 // Initialiser le collecteur de données
 const behaviorCollector = new BehaviorDataCollector();
+const botDetectionService = {
+  analyzeAndSanction: async () => ({ isBot: false, skipped: 'behavior_monitor_only' })
+};
 
 /**
  * 📝 POST /api/behavior/action

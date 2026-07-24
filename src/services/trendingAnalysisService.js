@@ -841,4 +841,4 @@ class TrendingAnalysisService {
   }
 }
 
-module.exports = TrendingAnalysisService;
+module.exports = new TrendingAnalysisService();

@@ -8,22 +8,45 @@
 const logger = require('../../utils/logger');
 
 let _pipeline = null;
+let _pipelinePromise = null;
 
 /**
  * Charge le modèle de façon "lazy" pour économiser la RAM si non utilisé.
+ *
+ * IMPORTANT : mémoïse aussi la PROMESSE en cours de chargement, pas seulement le
+ * résultat final. Sans ça, plusieurs appels concurrents (recherche + sauvegarde
+ * mémoire lancées en parallèle) démarrent chacun leur propre chargement du modèle
+ * (~1.3 Go chacun) avant que le premier ait fini → pic mémoire multiplié et OOM
+ * (constaté en prod le 21/07/2026 : +2.5 Go en ~1s sous charge concurrente).
  */
 async function getPipeline() {
   if (_pipeline) return _pipeline;
-  try {
-    const { pipeline } = await import('@xenova/transformers');
-    // Passage au modèle E5-Base (768-dim, beaucoup plus puissant)
-    _pipeline = await pipeline('feature-extraction', 'Xenova/multilingual-e5-base');
-    logger.info('[pc2.embed] Modèle d\'embeddings ELITE chargé (multilingual-e5-base).');
-    return _pipeline;
-  } catch (e) {
-    logger.error(`[pc2.embed] Erreur chargement Transformers.js: ${e.message}`);
-    return null;
-  }
+  if (_pipelinePromise) return _pipelinePromise;
+
+  _pipelinePromise = (async () => {
+    try {
+      const { pipeline } = await import('@xenova/transformers');
+      // Passage au modèle E5-Base (768-dim, beaucoup plus puissant)
+      _pipeline = await pipeline('feature-extraction', 'Xenova/multilingual-e5-base');
+      logger.info('[pc2.embed] Modèle d\'embeddings ELITE chargé (multilingual-e5-base).');
+      return _pipeline;
+    } catch (e) {
+      logger.error(`[pc2.embed] Erreur chargement Transformers.js: ${e.message}`);
+      _pipelinePromise = null; // permettre une nouvelle tentative plus tard
+      return null;
+    }
+  })();
+
+  return _pipelinePromise;
+}
+
+// Sérialise aussi les inférences elles-mêmes : deux appels concurrents à l'extracteur
+// peuvent dupliquer les buffers internes du runtime WASM. Une seule inférence à la fois.
+let _inferenceChain = Promise.resolve();
+function runSerialized(fn) {
+  const result = _inferenceChain.then(fn, fn);
+  _inferenceChain = result.then(() => {}, () => {});
+  return result;
 }
 
 /**
@@ -36,13 +59,15 @@ function createLocalEmbedQuery(opts = {}) {
    * @param {string} [inputType] 'search_query' ou 'search_document' (format Cohere/E5)
    */
   return async function embedQuery(text, inputType) {
+    if (process.env.POLICIERCONGO_DISABLE_LOCAL_EMBED === 'true') return [];
+
     let t = String(text || '').trim().slice(0, 1024);
     if (!t) return [];
 
     // Mapping des types pour le modèle E5
     const isSearchQuery = inputType === 'search_query' || inputType === 'query' || opts.isQuery;
     const prefix = isSearchQuery ? 'query: ' : 'passage: ';
-    
+
     if (!t.startsWith(prefix)) {
       t = prefix + t;
     }
@@ -51,7 +76,7 @@ function createLocalEmbedQuery(opts = {}) {
       const extractor = await getPipeline();
       if (!extractor) return [];
 
-      const output = await extractor(t, { pooling: 'mean', normalize: true });
+      const output = await runSerialized(() => extractor(t, { pooling: 'mean', normalize: true }));
       return Array.from(output.data);
     } catch (e) {
       logger.warn(`[pc2.embed] Erreur embedding local (E5): ${e.message}`);

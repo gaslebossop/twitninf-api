@@ -55,7 +55,7 @@ class TweetQueueService {
       let isShadowBanned = false;
       let shadowBanReason = null;
       try {
-        const smartEngine = new SmartRecommendationEngine();
+        const smartEngine = SmartRecommendationEngine;
         const shadowBanStatus = await smartEngine.checkShadowbanStatus(userId);
         
         if (shadowBanStatus.isShadowbanned) {
@@ -242,6 +242,7 @@ class TweetQueueService {
         AND t.progressive_testing_status = 'testing'
         AND tq.current_group != 'exclude'
         AND t.deleted_at IS NULL
+        AND COALESCE(t.is_data_test, FALSE) = FALSE
         ORDER BY 
           CASE tq.current_group
             WHEN 'initial' THEN 1

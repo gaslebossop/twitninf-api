@@ -35,6 +35,9 @@ const Conversation = require('./Conversation');
 const ConversationParticipant = require('./ConversationParticipant');
 const Message = require('./Message');
 const UnbanTicketModule = require('./UnbanTicket');
+const PolicierCongoContract = require('./PolicierCongoContract');
+const MiningRound = require('./MiningRound');
+const CasinoBet = require('./CasinoBet');
 
 // Créer l'instance Sequelize
 const sequelize = new Sequelize(config.database);
@@ -56,6 +59,9 @@ MonetizationMetrics.initMonetizationMetricsModel(sequelize);
 
 // Initialiser les modèles de cryptomonnaie virtuelle
 const VirtualCurrencyModel = VirtualCurrency.initVirtualCurrencyModel(sequelize);
+const PolicierCongoContractModel = PolicierCongoContract.initPolicierCongoContractModel(sequelize);
+const MiningRoundModel = MiningRound.initMiningRoundModel(sequelize);
+const CasinoBetModel = CasinoBet.initCasinoBetModel(sequelize);
 const UserWalletModel = UserWallet.initUserWalletModel(sequelize);
 const TransactionModel = Transaction.initTransactionModel(sequelize);
 
@@ -1029,6 +1035,9 @@ module.exports = {
   ConversationParticipant,
   Message,
   UnbanTicket: UnbanTicketModel,
+  PolicierCongoContract: PolicierCongoContractModel,
+  MiningRound: MiningRoundModel,
+  CasinoBet: CasinoBetModel,
   testConnection,
   syncDatabase,
   closeConnection

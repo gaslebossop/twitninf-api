@@ -68,13 +68,13 @@ class TweetRecommendationService {
       this.tikTokLevelEngine = new UltraRecommendationEngineTikTokLevel();
       
       // Initialiser le Smart Recommendation Engine
-      this.smartRecommendationEngine = new SmartRecommendationEngine();
+      this.smartRecommendationEngine = SmartRecommendationEngine;
       
       // Initialiser le service comportemental
       this.behavioralService = new BehavioralAnalysisService();
       
       // Initialiser le service des tendances
-      this.trendingService = new TrendingAnalysisService();
+      this.trendingService = TrendingAnalysisService;
       
       logger.info('✅ Services initialisés (incluant Ultra Engine + TikTok-Level Engine + Smart Engine)');
     } catch (error) {
@@ -403,6 +403,7 @@ class TweetRecommendationService {
   buildIntelligentWhereClause(type, userBehavior, currentTrends) {
     let whereClause = {
       is_private: false,
+      is_data_test: false,
       deleted_at: null,
       [Op.and]: [
         {

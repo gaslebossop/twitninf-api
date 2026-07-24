@@ -5,7 +5,7 @@
  */
 
 // Configuration du compte PolicierCongo
-const POLICE_ACCOUNT_ID = '6b10b4b9-1520-4b44-84ff-17fdaa33548b';
+const POLICE_ACCOUNT_ID = 'a13a7745-448f-4faa-892a-f6ea140f2f5b';
 const POLICE_USERNAME = 'policiercongo';
 
 // Configuration des intervalles
@@ -19,8 +19,8 @@ const SCHEDULE_CONFIG = {
 
 // Configuration des limites
 const LIMITS = {
-  maxActionsPerCycle: 30,
-  maxRepliesPerCycle: 20,
+  maxActionsPerCycle: Infinity, // Illimité sur demande admin
+  maxRepliesPerCycle: Infinity, // Illimité sur demande admin
   maxTweetLength: 600,
   maxReplyLength: 600,
   maxMemoryEntries: 60,

@@ -6,11 +6,69 @@ const EconomyMetrics = require('../economy/metrics');
 const EconomyLedger = require('../economy/ledger');
 const { TREASURY_USER_ID, REFERENCE_PRICE_EUR } = require('../economy/constants');
 const { toAmount } = require('../economy/money');
+const { getPlatformCurrency } = require('../economy/platformCurrency');
+const FraudScanService = require('../services/fraudScanService');
 
 class EconomyAdminController {
+  async fraudScan(req, res) {
+    try {
+      const lookbackDays = Math.max(1, Math.min(90, parseInt(req.query.lookbackDays, 10) || 14));
+      const limit = Math.max(1, Math.min(500, parseInt(req.query.limit, 10) || 100));
+      const result = await FraudScanService.scan({ lookbackDays, limit });
+      res.json({ success: true, ...result });
+    } catch (error) {
+      logger.error('Erreur fraudScan Admin:', error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  async fraudTrace(req, res) {
+    try {
+      const { userId } = req.params;
+      const lookbackDays = Math.max(1, Math.min(90, parseInt(req.query.lookbackDays, 10) || 30));
+      const maxHops = Math.max(1, Math.min(6, parseInt(req.query.maxHops, 10) || 4));
+      const result = await FraudScanService.traceFlow({ userId, lookbackDays, maxHops });
+      res.json({ success: true, ...result });
+    } catch (error) {
+      logger.error('Erreur fraudTrace Admin:', error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  async fraudBurn(req, res) {
+    const { userIds, reason } = req.body;
+    if (!Array.isArray(userIds) || !userIds.length) {
+      return res.status(400).json({ success: false, message: 'userIds requis' });
+    }
+    const dbTransaction = await sequelize.transaction();
+
+    try {
+      const currency = await getPlatformCurrency({ transaction: dbTransaction });
+      if (!currency) throw new Error('Monnaie TWC non trouvée');
+
+      const results = [];
+      for (const userId of userIds) {
+        const { amount } = await EconomyLedger.burnFraudulent(userId, currency.id, reason, dbTransaction);
+        results.push({ userId, burned: amount });
+      }
+
+      await EconomyMetrics.refresh(currency.id, dbTransaction);
+      await dbTransaction.commit();
+
+      const total = results.reduce((sum, r) => sum + r.burned, 0);
+      logger.warn(`ADMIN: retrait anti-fraude de ${total} NF sur ${results.length} compte(s) — ${reason || 'sans motif précisé'}`);
+
+      res.json({ success: true, results, totalBurned: total });
+    } catch (error) {
+      await dbTransaction.rollback();
+      logger.error('Erreur fraudBurn Admin:', error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
   async getGlobalStats(req, res) {
     try {
-      const currency = await VirtualCurrency.findOne({ where: { symbol: 'TWC' } });
+      const currency = await getPlatformCurrency();
       if (!currency) {
         return res.status(404).json({ success: false, message: 'Monnaie TWC non trouvée' });
       }
@@ -59,7 +117,7 @@ class EconomyAdminController {
         ]
       });
 
-      const currency = await VirtualCurrency.findOne({ where: { symbol: 'TWC' } });
+      const currency = await getPlatformCurrency();
       const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
       const volume24h = await Transaction.sum('amount', {
@@ -99,7 +157,7 @@ class EconomyAdminController {
   async getRichList(req, res) {
     try {
       const { limit = 20 } = req.query;
-      const currency = await VirtualCurrency.findOne({ where: { symbol: 'TWC' } });
+      const currency = await getPlatformCurrency();
       if (!currency) {
         return res.status(404).json({ success: false, message: 'Monnaie TWC non trouvée' });
       }
@@ -136,7 +194,7 @@ class EconomyAdminController {
       const { query } = req.query;
       if (!query) return res.status(400).json({ success: false, message: 'Requête vide' });
 
-      const currency = await VirtualCurrency.findOne({ where: { symbol: 'TWC' } });
+      const currency = await getPlatformCurrency();
       if (!currency) {
         return res.status(404).json({ success: false, message: 'Monnaie TWC non trouvée' });
       }
@@ -185,10 +243,10 @@ class EconomyAdminController {
     const dbTransaction = await sequelize.transaction();
 
     try {
-      const currency = await VirtualCurrency.findOne({ where: { symbol: 'TWC' }, transaction: dbTransaction });
+      const currency = await getPlatformCurrency({ transaction: dbTransaction });
       if (!currency) throw new Error('Monnaie TWC non trouvée');
 
-      const { wallet, diff } = await EconomyLedger.adminSetBalance(
+      const { wallet, diff } = await EconomyLedger.adminAdjustBalance(
         userId,
         currency.id,
         amount,
@@ -218,7 +276,7 @@ class EconomyAdminController {
     const dbTransaction = await sequelize.transaction();
 
     try {
-      const currency = await VirtualCurrency.findOne({ where: { symbol: 'TWC' }, transaction: dbTransaction });
+      const currency = await getPlatformCurrency({ transaction: dbTransaction });
       if (!currency) throw new Error('Monnaie TWC non trouvée');
 
       let tx;
@@ -270,7 +328,7 @@ class EconomyAdminController {
     const { userId, isLocked, reason } = req.body;
 
     try {
-      const currency = await VirtualCurrency.findOne({ where: { symbol: 'TWC' } });
+      const currency = await getPlatformCurrency();
       if (!currency) throw new Error('Monnaie TWC non trouvée');
 
       const wallet = await UserWallet.findOne({ where: { userId, currencyId: currency.id } });

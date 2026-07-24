@@ -11,6 +11,11 @@ const logger = require('../utils/logger');
 const RUST_BASE_URL = process.env.RUST_RECOMMENDER_URL || 'http://127.0.0.1:3002';
 const TIMEOUT_MS = 4000; // 4s max — sinon fallback JS
 
+// Connexion persistante vers le service Rust (co-localisé sur le VPS) : évite
+// de renégocier une connexion TCP à chaque appel /recommendations, appelé à
+// chaque chargement/scroll du fil d'accueil.
+const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
+
 /**
  * Effectue une requête HTTP vers le service Rust.
  * @param {string} path - Ex: '/recommendations'
@@ -30,6 +35,7 @@ async function rustPost(path, body) {
         'Content-Length': Buffer.byteLength(payload),
       },
       timeout: TIMEOUT_MS,
+      agent: keepAliveAgent,
     };
 
     const req = http.request(options, (res) => {
@@ -58,7 +64,7 @@ async function rustPost(path, body) {
 async function rustGet(path) {
   return new Promise((resolve, reject) => {
     const req = http.get(
-      { hostname: '127.0.0.1', port: 3002, path, timeout: TIMEOUT_MS },
+      { hostname: '127.0.0.1', port: 3002, path, timeout: TIMEOUT_MS, agent: keepAliveAgent },
       (res) => {
         let data = '';
         res.on('data', (c) => { data += c; });

@@ -266,15 +266,10 @@ class VirtualCurrencyController {
         dailyMiningCount: wallet.dailyMiningCount + 1
       });
 
-      // Mettre à jour les statistiques de la cryptomonnaie
-      const totalBalance = await UserWallet.sum('balance', {
-        where: { currencyId }
-      });
-
-      await currency.update({
-        circulatingSupply: totalBalance || 0,
-        marketCap: (totalBalance || 0) * currency.currentPrice
-      });
+      // Mettre à jour les statistiques de la cryptomonnaie (incrément, pas de SUM sur tous les portefeuilles)
+      await currency.increment('circulatingSupply', { by: reward });
+      await currency.reload();
+      await currency.update({ marketCap: currency.circulatingSupply * currency.currentPrice });
 
       const response = {
         success: true,
@@ -318,8 +313,11 @@ class VirtualCurrencyController {
       const { toUserId, currencyId, amount, description } = req.body;
       const fromUserId = req.user.id;
 
-      // Vérifier que la cryptomonnaie existe
-      const currency = await VirtualCurrency.findByPk(currencyId);
+      // Vérifier que la cryptomonnaie et le destinataire existent
+      const [currency, toUser] = await Promise.all([
+        VirtualCurrency.findByPk(currencyId),
+        User.findByPk(toUserId)
+      ]);
       if (!currency || !currency.isActive) {
         return res.status(404).json({
           success: false,
@@ -327,8 +325,6 @@ class VirtualCurrencyController {
         });
       }
 
-      // Vérifier que le destinataire existe
-      const toUser = await User.findByPk(toUserId);
       if (!toUser) {
         return res.status(404).json({
           success: false,
@@ -345,13 +341,10 @@ class VirtualCurrencyController {
       }
 
       // Récupérer les portefeuilles
-      const fromWallet = await UserWallet.findOne({
-        where: { userId: fromUserId, currencyId }
-      });
-
-      const toWallet = await UserWallet.findOne({
-        where: { userId: toUserId, currencyId }
-      });
+      const [fromWallet, toWallet] = await Promise.all([
+        UserWallet.findOne({ where: { userId: fromUserId, currencyId } }),
+        UserWallet.findOne({ where: { userId: toUserId, currencyId } })
+      ]);
 
       if (!fromWallet) {
         return res.status(404).json({
@@ -681,15 +674,10 @@ class VirtualCurrencyController {
         totalEarned: wallet.totalEarned + amount
       });
 
-      // Mettre à jour les statistiques de la cryptomonnaie
-      const totalBalance = await UserWallet.sum('balance', {
-        where: { currencyId }
-      });
-
-      await currency.update({
-        circulatingSupply: totalBalance || 0,
-        marketCap: (totalBalance || 0) * currency.currentPrice
-      });
+      // Mettre à jour les statistiques de la cryptomonnaie (incrément, pas de SUM sur tous les portefeuilles)
+      await currency.increment('circulatingSupply', { by: amount });
+      await currency.reload();
+      await currency.update({ marketCap: currency.circulatingSupply * currency.currentPrice });
 
       const response = {
         success: true,

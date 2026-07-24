@@ -7,6 +7,7 @@ const { sequelize } = require('../database/index');
 const { Op } = require('sequelize');
 const { UserWallet, VirtualCurrency, Tweet, User } = require('../models');
 const NewEconomyService = require('./newEconomyService');
+const { getPlatformCurrency } = require('../economy/platformCurrency');
 const logger = require('../utils/logger');
 
 class TweetMonetizationService {
@@ -183,8 +184,8 @@ class TweetMonetizationService {
         return { success: false, reason: 'Aucune récompense valide' };
       }
 
-      const currency = await VirtualCurrency.findOne({ where: { symbol: 'TWC' } });
-      if (!currency) throw new Error('Cryptomonnaie TWC non trouvée');
+      const currency = await getPlatformCurrency();
+      if (!currency) throw new Error('Cryptomonnaie non trouvée');
 
       const result = await NewEconomyService.rewardUser(
         userId,
@@ -193,12 +194,12 @@ class TweetMonetizationService {
         `Récompense pour tweet ${tweetId || '(multi)'}`
       );
 
-      if (result.success) {
-        logger.info(`💰 Récompense distribuée: ${reward} TWC à l'utilisateur ${userId}`);
+      if (result.success && result.transaction) {
+        logger.info(`💰 Récompense distribuée: ${reward} ${currency.symbol} à l'utilisateur ${userId}`);
         return { success: true, reward, newBalance: result.transaction.amount };
       }
 
-      return { success: false, reason: 'Échec de la distribution économique' };
+      return { success: false, reason: result.reason || 'Échec de la distribution économique' };
     } catch (error) {
       logger.error('Erreur lors de la distribution de la récompense:', error);
       throw error;
@@ -323,11 +324,17 @@ class TweetMonetizationService {
         }
       }
 
-      const currency = await VirtualCurrency.findOne({ where: { symbol: 'TWC' } });
+      const currency = await getPlatformCurrency();
       const wallet = await UserWallet.findOne({ where: { userId, currencyId: currency?.id } });
       const currentBalance = wallet ? parseFloat(wallet.balance) : 0;
 
-      return { totalRewards, currentBalance, newBalance: currentBalance + totalRewards, tweetDetails: details };
+      return {
+        totalRewards,
+        eligibleTweets: details.length,
+        currentBalance,
+        newBalance: currentBalance + totalRewards,
+        tweetDetails: details
+      };
     } catch (error) {
       logger.error('Erreur previewEarnings:', error);
       throw error;
@@ -355,12 +362,10 @@ class TweetMonetizationService {
    */
   static async getMonetizationStats() {
     try {
-      const currency = await VirtualCurrency.findOne({
-        where: { symbol: 'TWC' }
-      });
+      const currency = await getPlatformCurrency();
 
       if (!currency) {
-        throw new Error('Cryptomonnaie TwitCoins non trouvée');
+        throw new Error('Cryptomonnaie non trouvée');
       }
 
       // Statistiques des portefeuilles

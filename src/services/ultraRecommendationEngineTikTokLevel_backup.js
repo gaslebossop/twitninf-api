@@ -39,7 +39,7 @@ class UltraRecommendationEngineTikTokLevel {
     
     // Services d'analyse avancés
     this.behavioralService = new BehavioralAnalysisService();
-    this.trendingService = new TrendingAnalysisService();
+    this.trendingService = TrendingAnalysisService;
     
     // Système de scoring TikTok-Level (12 dimensions)
     this.scoreWeights = {

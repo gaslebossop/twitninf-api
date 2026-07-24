@@ -66,12 +66,14 @@ class BehaviorDataLoader {
       const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
       const globalStats = {
-        totalActions: await UserBehaviorData.count(),
+        totalActions: await UserBehaviorData.count({
+          where: this.realBehaviorWhere()
+        }),
         weeklyActions: await UserBehaviorData.count({
-          where: { timestamp: { [Op.gte]: sevenDaysAgo } }
+          where: this.realBehaviorWhere({ timestamp: { [Op.gte]: sevenDaysAgo } })
         }),
         dailyActions: await UserBehaviorData.count({
-          where: { timestamp: { [Op.gte]: oneDayAgo } }
+          where: this.realBehaviorWhere({ timestamp: { [Op.gte]: oneDayAgo } })
         }),
         activeUsers: await this.getActiveUsersCount(),
         topActions: await this.getTopActionTypes(),
@@ -106,9 +108,7 @@ class BehaviorDataLoader {
           'user_id',
           [UserBehaviorData.sequelize.fn('COUNT', UserBehaviorData.sequelize.col('id')), 'action_count']
         ],
-        where: {
-          timestamp: { [Op.gte]: sevenDaysAgo }
-        },
+        where: this.realBehaviorWhere({ timestamp: { [Op.gte]: sevenDaysAgo } }),
         group: ['user_id'],
         having: UserBehaviorData.sequelize.literal('COUNT(id) >= 10'), // Au moins 10 actions
         order: [[UserBehaviorData.sequelize.literal('action_count'), 'DESC']],
@@ -148,9 +148,7 @@ class BehaviorDataLoader {
           [UserBehaviorData.sequelize.fn('COUNT', UserBehaviorData.sequelize.col('id')), 'count_today'],
           [UserBehaviorData.sequelize.literal(`COUNT(CASE WHEN timestamp >= '${twoDaysAgo.toISOString()}' AND timestamp < '${oneDayAgo.toISOString()}' THEN 1 END)`), 'count_yesterday']
         ],
-        where: {
-          timestamp: { [Op.gte]: twoDaysAgo }
-        },
+        where: this.realBehaviorWhere({ timestamp: { [Op.gte]: twoDaysAgo } }),
         group: ['action_type'],
         order: [[UserBehaviorData.sequelize.literal('count_today'), 'DESC']]
       });
@@ -202,7 +200,7 @@ class BehaviorDataLoader {
       const behaviorData = await UserBehaviorData.findAll({
         where: {
           user_id: userId,
-          timestamp: { [Op.gte]: thirtyDaysAgo }
+          ...this.realBehaviorWhere({ timestamp: { [Op.gte]: thirtyDaysAgo } })
         },
         order: [['timestamp', 'DESC']],
         limit: 1000
@@ -561,9 +559,7 @@ class BehaviorDataLoader {
       attributes: [
         [UserBehaviorData.sequelize.fn('COUNT', UserBehaviorData.sequelize.fn('DISTINCT', UserBehaviorData.sequelize.col('user_id'))), 'count']
       ],
-      where: {
-        timestamp: { [Op.gte]: oneDayAgo }
-      }
+      where: this.realBehaviorWhere({ timestamp: { [Op.gte]: oneDayAgo } })
     });
 
     return parseInt(result?.dataValues?.count || 0);
@@ -577,9 +573,7 @@ class BehaviorDataLoader {
         'action_type',
         [UserBehaviorData.sequelize.fn('COUNT', UserBehaviorData.sequelize.col('id')), 'count']
       ],
-      where: {
-        timestamp: { [Op.gte]: oneDayAgo }
-      },
+      where: this.realBehaviorWhere({ timestamp: { [Op.gte]: oneDayAgo } }),
       group: ['action_type'],
       order: [[UserBehaviorData.sequelize.literal('count'), 'DESC']],
       limit: 10
@@ -598,10 +592,10 @@ class BehaviorDataLoader {
       attributes: [
         [UserBehaviorData.sequelize.fn('AVG', UserBehaviorData.sequelize.col('interaction_quality')), 'avg_quality']
       ],
-      where: {
+      where: this.realBehaviorWhere({
         timestamp: { [Op.gte]: oneDayAgo },
         interaction_quality: { [Op.not]: null }
-      }
+      })
     });
 
     return parseFloat(result?.dataValues?.avg_quality || 0);
@@ -614,10 +608,10 @@ class BehaviorDataLoader {
       attributes: [
         [UserBehaviorData.sequelize.fn('AVG', UserBehaviorData.sequelize.col('interaction_quality')), 'avg_quality']
       ],
-      where: {
+      where: this.realBehaviorWhere({
         timestamp: { [Op.gte]: sevenDaysAgo },
         interaction_quality: { [Op.gte]: 0.5 }
-      }
+      })
     });
 
     return parseFloat(result?.dataValues?.avg_quality || 0.5);
@@ -632,15 +626,25 @@ class BehaviorDataLoader {
         include: [{
           model: UserPreferences,
           as: 'userPreferences'
-        }]
+        }],
+        where: {
+          [Op.or]: [
+            { is_data_test: false },
+            { is_data_test: null }
+          ]
+        },
+        limit: 5000
       });
 
-      const updatePromises = users.map(async (user) => {
+      let updated = 0;
+      for (const user of users) {
         try {
           const behaviorData = await UserBehaviorData.findAll({
             where: {
               user_id: user.id,
-              timestamp: { [Op.gte]: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
+              ...this.realBehaviorWhere({
+                timestamp: { [Op.gte]: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
+              })
             },
             limit: 500
           });
@@ -649,14 +653,14 @@ class BehaviorDataLoader {
 
           if (user.userPreferences) {
             await user.userPreferences.update({ personalization_score: score });
+            updated++;
           }
         } catch (error) {
           logger.error(`❌ Erreur calcul score personnalisation utilisateur ${user.id}:`, error);
         }
-      });
+      }
 
-      await Promise.all(updatePromises);
-      logger.info(`✅ Scores de personnalisation calculés pour ${users.length} utilisateurs`);
+      logger.info(`Scores de personnalisation calcules pour ${updated}/${users.length} utilisateurs`);
 
     } catch (error) {
       logger.error('❌ Erreur calcul scores personnalisation:', error);
@@ -686,6 +690,16 @@ class BehaviorDataLoader {
       behaviorPatterns: this.cache.behaviorPatterns.size,
       globalStats: !!this.cache.globalStats,
       lastUpdate: this.cache.lastUpdate
+    };
+  }
+
+  realBehaviorWhere(extra = {}) {
+    return {
+      ...extra,
+      [Op.or]: [
+        { is_data_test: false },
+        { is_data_test: null }
+      ]
     };
   }
 }

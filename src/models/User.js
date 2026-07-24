@@ -348,6 +348,17 @@ const userSchema = {
   },
 
   // Visibilité fil algorithmique : 1 = normal, 0 = quasi absent, jusqu’à 5 = +500 % (×5)
+  is_data_test: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
+  },
+
+  data_test_batch_id: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+
   algorithmic_visibility_multiplier: {
     type: DataTypes.FLOAT,
     allowNull: false,

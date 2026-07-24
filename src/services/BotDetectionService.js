@@ -16,6 +16,7 @@ const FeatureExtractor = require('../../../brain-engine/FeatureExtractor');
 // ─── Configuration ─────────────────────────────────────────────────────────────
 
 const CONFIG = {
+  AUTO_SANCTION: process.env.BOT_DETECTION_AUTO_SANCTION === 'true',
   ENABLED: false, // 🚨 Désactivé temporairement car il bannit tout le monde
 
   CACHE_TTL_CLEAN_MS: 5_000,
@@ -125,6 +126,10 @@ class BotDetectionService {
       const fastResult = this._fastHeuristicCheck(features);
       if (fastResult.isBot) {
           logger.warn(`🚀 [BotDetection-Fast] user=${userId} détecté via HEURISTIQUE (${fastResult.reason})`);
+          if (!CONFIG.AUTO_SANCTION) {
+            await this._updateReputation(userId, 99);
+            return { isBot: true, score: 99, reasons: [fastResult.reason], meta: { features, fast: true, monitor_only: true } };
+          }
           await this._applyProgressiveSanction(userId, 99, [fastResult.reason], { features, fast: true });
           await this._rollbackFraudulentInteractions(userId, actions);
           return { isBot: true, score: 99, reasons: [fastResult.reason], meta: { fast: true } };
@@ -142,6 +147,12 @@ class BotDetectionService {
 
       // 3. Sanction progressive si le seuil IA est dépassé
       if (score >= CONFIG.AI_BAN_THRESHOLD) {
+        if (!CONFIG.AUTO_SANCTION) {
+          await this._updateReputation(userId, score);
+          const result = { isBot: true, score, reasons, meta: { ...meta, monitor_only: true } };
+          this.cache.set(userId, result, CONFIG.CACHE_TTL_BOT_MS);
+          return result;
+        }
         await this._applyProgressiveSanction(userId, score, reasons, meta);
         await this._updateReputation(userId, score);
         

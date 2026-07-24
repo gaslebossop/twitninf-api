@@ -28,7 +28,7 @@ const schema = {
     type: DataTypes.TEXT,
     allowNull: false,
     validate: {
-      len: [1, 3000]
+      notEmpty: true
     }
   },
   message_type: {

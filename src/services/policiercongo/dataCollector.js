@@ -211,6 +211,19 @@ class DataCollector {
         logger.warn('⚠️ Erreur collecte tendances:', e?.message);
       }
 
+      // Tweets déjà likés par PolicierCongo — à exclure des candidats "à liker/reposter"
+      // pour ne pas qu'il retombe indéfiniment sur les mêmes (constaté en prod 21/07/2026).
+      let alreadyLikedTweetIds = [];
+      try {
+        const ownLikes = await TweetLike.findAll({
+          where: { user_id: POLICE_ACCOUNT_ID },
+          attributes: ['tweet_id'],
+          limit: 500,
+          order: [['created_at', 'DESC']]
+        });
+        alreadyLikedTweetIds = ownLikes.map(l => l.tweet_id);
+      } catch (_) { }
+
       // 🌐 DERNIERS TWEETS DE TOUTE LA PLATEFORME (contexte temps réel)
       let recentPlatformTweets = [];
       try {
@@ -220,12 +233,15 @@ class DataCollector {
           processedPlatformTweetIds = memoryManager.getProcessedPlatformTweetIds?.() || [];
         } catch (_) { }
 
+        const excludedIds = [...new Set([...processedPlatformTweetIds.slice(-250), ...alreadyLikedTweetIds])];
+
         const platformTweets = await Tweet.findAll({
           where: {
             user_id: { [Op.ne]: POLICE_ACCOUNT_ID },
             parent_tweet_id: null,
             content: { [Op.ne]: null },
-            ...(processedPlatformTweetIds.length > 0 ? { id: { [Op.notIn]: processedPlatformTweetIds.slice(-250) } } : {})
+            moderation_status: 'approved',
+            ...(excludedIds.length > 0 ? { id: { [Op.notIn]: excludedIds } } : {})
           },
           include: [{ model: User, as: 'author', attributes: ['username', 'is_suspended'], where: { is_suspended: false } }],
           order: [['created_at', 'DESC']],
@@ -254,7 +270,9 @@ class DataCollector {
             user_id: { [Op.ne]: POLICE_ACCOUNT_ID },
             created_at: { [Op.gte]: sixHoursAgo },
             parent_tweet_id: null,
-            content: { [Op.ne]: null }
+            content: { [Op.ne]: null },
+            moderation_status: 'approved',
+            ...(alreadyLikedTweetIds.length > 0 ? { id: { [Op.notIn]: alreadyLikedTweetIds } } : {})
           },
           include: [
             { model: User, as: 'author', attributes: ['username', 'is_suspended'], where: { is_suspended: false } },
@@ -269,6 +287,7 @@ class DataCollector {
         userTrendingTweets = popularTweets
           .filter(t => (t.content || '').length > 30)
           .map(t => ({
+            id: t.id,
             author: t.author?.username,
             content: t.content,
             likes: t.likes?.length || 0,
@@ -1297,8 +1316,9 @@ class DataCollector {
    */
   async collectFinancialData() {
     try {
-      const { UserWallet, MonetizationMetrics, VirtualCurrency, Tweet } = require('../../models');
+      const { UserWallet, VirtualCurrency, Transaction, User } = require('../../models');
       const { Op } = require('sequelize');
+      const TweetMonetizationService = require('../tweetMonetizationService');
 
       // 1. Récupérer le portefeuille principal
       const wallets = await UserWallet.findAll({
@@ -1306,20 +1326,30 @@ class DataCollector {
         include: [{ model: VirtualCurrency, as: 'currency' }]
       });
 
-      // 2. Récupérer les métriques de monétisation récentes (30 derniers jours)
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-      const monetizationStats = await MonetizationMetrics.findAll({
-        include: [{
-          model: Tweet,
-          as: 'tweet',
-          where: { user_id: POLICE_ACCOUNT_ID, created_at: { [Op.gte]: thirtyDaysAgo } }
-        }]
+      // 1bis. Dernières transactions (reçues ET envoyées), avec l'autre partie
+      // identifiée — sans ça, le solde du wallet est un chiffre sans preuve de
+      // qui l'a envoyé ni pourquoi (constaté : impossible de justifier un
+      // paiement reçu sans ce détail).
+      const recentTransactions = await Transaction.findAll({
+        where: {
+          [Op.or]: [{ fromUserId: POLICE_ACCOUNT_ID }, { toUserId: POLICE_ACCOUNT_ID }]
+        },
+        include: [
+          { model: User, as: 'fromUser', attributes: ['id', 'username'] },
+          { model: User, as: 'toUser', attributes: ['id', 'username'] },
+          { model: VirtualCurrency, as: 'currency', attributes: ['symbol'] }
+        ],
+        order: [['createdAt', 'DESC']],
+        limit: 20
       });
 
-      const totalRevenue = monetizationStats.reduce((sum, m) => sum + parseFloat(m.revenue || 0), 0);
-      const totalViews = monetizationStats.reduce((sum, m) => sum + (m.views || 0), 0);
+      // 2. Récompenses en attente, calculées en direct sur les vraies stats
+      // d'engagement (vues/likes/RT/réponses) — la table MonetizationMetrics
+      // n'est jamais alimentée par le vrai chemin de monétisation et ne
+      // reflète donc rien : on réutilise ici le même calcul que le panneau
+      // "Collecter mes gains" côté utilisateur pour rester cohérent.
+      const preview = await TweetMonetizationService.previewEarnings(POLICE_ACCOUNT_ID);
 
-      // Calculer le total historique via les portefeuilles
       const walletTotals = wallets.reduce((acc, w) => {
         acc.earned += parseFloat(w.totalEarned || 0);
         acc.balance += parseFloat(w.balance || 0);
@@ -1334,19 +1364,31 @@ class DataCollector {
           totalEarned: parseFloat(w.totalEarned).toFixed(2)
         })),
         monetization: {
-          totalRevenue30d: totalRevenue > 0 ? totalRevenue.toFixed(2) : walletTotals.earned.toFixed(2), // Fallback sur le gagné total si 30j est vide
-          isHistoricalTotal: totalRevenue === 0,
-          totalViews30d: totalViews,
-          topMonetizedTweets: monetizationStats
-            .sort((a, b) => b.revenue - a.revenue)
+          totalEarnedHistorical: walletTotals.earned.toFixed(2),
+          pendingRewards: preview.totalRewards.toFixed(2),
+          pendingEligibleTweets: preview.eligibleTweets,
+          topPendingTweets: preview.tweetDetails
+            .sort((a, b) => b.reward - a.reward)
             .slice(0, 5)
-            .map(m => ({
-              tweetId: m.tweet_id,
-              content: m.tweet?.content?.substring(0, 50) + '...',
-              revenue: parseFloat(m.revenue).toFixed(2),
-              views: m.views
+            .map(d => ({
+              tweetId: d.tweetId,
+              content: d.content,
+              reward: d.reward.toFixed(2),
+              views: d.stats.views
             }))
-        }
+        },
+        recentTransactions: recentTransactions.map(tx => ({
+          id: tx.id,
+          type: tx.type,
+          direction: tx.toUserId === POLICE_ACCOUNT_ID ? 'received' : 'sent',
+          amount: parseFloat(tx.amount).toFixed(2),
+          currency: tx.currency?.symbol,
+          from: tx.fromUser ? { id: tx.fromUser.id, username: tx.fromUser.username } : null,
+          to: tx.toUser ? { id: tx.toUser.id, username: tx.toUser.username } : null,
+          description: tx.description,
+          status: tx.status,
+          created_at: tx.createdAt
+        }))
       };
     } catch (error) {
       logger.error('❌ Erreur lors de la collecte des données financières:', error);

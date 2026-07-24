@@ -6,6 +6,7 @@
  */
 
 const { sequelize, UserBehaviorData, UserPreferences, User } = require('../models');
+const { Op } = require('sequelize');
 const logger = require('../utils/logger');
 
 class BehaviorDataMigration {
@@ -211,7 +212,11 @@ class BehaviorDataMigration {
           required: false
         }],
         where: {
-          '$userPreferences.id$': null
+          '$userPreferences.id$': null,
+          [Op.or]: [
+            { is_data_test: false },
+            { is_data_test: null }
+          ]
         }
       });
 

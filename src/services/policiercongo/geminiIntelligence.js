@@ -365,9 +365,9 @@ Ton = scroll paresseux + reaction spontanee. Si t'as rien a dire, tu dis rien.`;
       const collectedData = await dataCollector.collectRecentData();
 
       // 🚀 REDIRECTION V2 (NOUVEAU SYSTÈME)
-      const pc2 = require('./policiercongoV2Bridge');
+      const pc2 = require('./policiercongov3/compatibilityBridge');
       if (pc2.isPolicierCongoV2Enabled()) {
-        logger.info('🧠 geminiIntelligence.analyze() -> Redirection vers PolicierCongoV2');
+        logger.info('🧠 geminiIntelligence.analyze() -> Redirection vers PolicierCongo V3');
         const event = {
           id: `analyze_${Date.now()}`,
           trigger: pc2.TRIGGER_TYPES.PROACTIVE,

@@ -1279,7 +1279,7 @@ class SimilarityRecommendationEngine {
 
       // 🚓 Réduction de visibilité (90% en moins) pour les tweets PolicierCongo de plus de 30 jours (720h)
       const meta = this.tweetMeta.get(tweetId);
-      if (meta && meta.authorId === '6b10b4b9-1520-4b44-84ff-17fdaa33548b') {
+      if (meta && meta.authorId === 'a13a7745-448f-4faa-892a-f6ea140f2f5b') {
         const ageHours = (now - meta.createdAt.getTime()) / 3600000;
         if (ageHours > 720) score *= 0.05;
       }
@@ -1426,7 +1426,7 @@ class SimilarityRecommendationEngine {
         quality;
 
       // 🚓 Réduction de visibilité (90% en moins) pour les tweets PolicierCongo de plus de 30 jours (720h)
-      if (meta.authorId === '6b10b4b9-1520-4b44-84ff-17fdaa33548b' && ageHours > 720) {
+      if (meta.authorId === 'a13a7745-448f-4faa-892a-f6ea140f2f5b' && ageHours > 720) {
         score *= 0.10;
       }
 

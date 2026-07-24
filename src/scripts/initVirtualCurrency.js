@@ -1,5 +1,6 @@
 const { sequelize } = require('../database/index');
 const { VirtualCurrency, UserWallet, User } = require('../models');
+const { Op } = require('sequelize');
 const logger = require('../utils/logger');
 
 async function initVirtualCurrency() {
@@ -44,7 +45,13 @@ async function initVirtualCurrency() {
 
     // 2. Créer des portefeuilles pour tous les utilisateurs existants
     const users = await User.findAll({
-      attributes: ['id', 'username', 'email']
+      attributes: ['id', 'username', 'email'],
+      where: {
+        [Op.or]: [
+          { is_data_test: false },
+          { is_data_test: null }
+        ]
+      }
     });
 
     logger.info(`📊 Création de portefeuilles pour ${users.length} utilisateurs...`);

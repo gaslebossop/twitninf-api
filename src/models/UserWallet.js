@@ -71,6 +71,17 @@ class UserWallet {
         type: DataTypes.STRING,
         allowNull: true,
         comment: 'Raison du verrouillage'
+      },
+      lastMiningDate: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        comment: 'Dernier minage (app Windows)'
+      },
+      dailyMiningCount: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+        comment: 'Nombre de minages effectués le jour de lastMiningDate'
       }
     }, {
       tableName: 'user_wallets',

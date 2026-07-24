@@ -62,19 +62,17 @@ router.get('/', [
       options.type = type;
     }
 
-    const notifications = await Notification.getUserNotifications(userId, options);
-
-    // Compter le total des notifications non lues
-    const unreadCount = await Notification.countUnreadNotifications(userId);
-
-    // Compter le total pour la pagination
-    const totalCount = await Notification.count({
-      where: {
-        recipient_id: userId,
-        ...(type !== 'all' && { type }),
-        ...(unread_only && { is_read: false })
-      }
-    });
+    const [notifications, unreadCount, totalCount] = await Promise.all([
+      Notification.getUserNotifications(userId, options),
+      Notification.countUnreadNotifications(userId),
+      Notification.count({
+        where: {
+          recipient_id: userId,
+          ...(type !== 'all' && { type }),
+          ...(unread_only && { is_read: false })
+        }
+      })
+    ]);
 
     res.json({
       success: true,

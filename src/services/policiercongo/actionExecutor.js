@@ -154,6 +154,10 @@ class ActionExecutor {
           result = await this.executeRepost(decision);
           break;
 
+        case 'FOLLOW':
+          result = await this.executeFollow(decision);
+          break;
+
         case 'NOTIFY':
           result = await this.executeNotify(decision);
           break;
@@ -384,7 +388,7 @@ class ActionExecutor {
   async executePostTweet(decision) {
     try {
       logger.info('📝 Exécution de la création de tweet...');
-      
+
       let tweetContent = decision.details?.content;
       
       // Si c'est une action multiple, chercher le contenu dans les sous-détails
@@ -531,8 +535,12 @@ class ActionExecutor {
       
       let newUsername = decision.details?.new_username;
       let newFullName = decision.details?.new_full_name;
+      let newBio = decision.details?.new_bio;
+      let newProfilePicture = decision.details?.new_profile_picture;
+      const hasAnyProfileValue = () => [newUsername, newFullName, newBio, newProfilePicture]
+        .some(value => value !== undefined && value !== null);
       
-      if (!newUsername || !newFullName) {
+      if (!hasAnyProfileValue()) {
         logger.warn('⚠️ Données de profil manquantes dans la décision, tentative de suggestion via Gemini');
         try {
           const { geminiIntelligence } = require('./index');
@@ -558,7 +566,7 @@ class ActionExecutor {
         }
       }
 
-      if (!newUsername && !newFullName) {
+      if (!hasAnyProfileValue()) {
         logger.warn('⚠️ Toujours pas de données de profil suffisantes après tentative, application d\'un fallback local');
         try {
           const { User } = require('../../models');
@@ -573,7 +581,7 @@ class ActionExecutor {
           logger.warn('⚠️ Fallback local profil impossible:', e?.message);
         }
         // Si encore insuffisant, déclencher une requête dédiée à Gemini avec la mémoire complète
-        if (!newUsername && !newFullName) {
+        if (!hasAnyProfileValue()) {
           try {
             const { geminiIntelligence, memoryManager, dataCollector } = require('./index');
             const currentProfile = await require('../../models').User.findByPk(require('./config').POLICE_ACCOUNT_ID, { attributes: ['username', 'full_name'] });
@@ -588,20 +596,21 @@ class ActionExecutor {
             logger.warn('⚠️ Requête dédiée Gemini pour profil échouée:', reqErr?.message);
           }
         }
-        if (!newUsername && !newFullName) {
+        if (!hasAnyProfileValue()) {
           return { success: false, error: 'Données de profil manquantes' };
         }
       }
 
       // Utiliser le service User pour mettre à jour le profil
       const { User } = require('../../models');
+      const profileUpdates = { updated_at: new Date() };
+      if (newUsername !== undefined && newUsername !== null) profileUpdates.username = newUsername;
+      if (newFullName !== undefined && newFullName !== null) profileUpdates.full_name = newFullName;
+      if (newBio !== undefined && newBio !== null) profileUpdates.bio = newBio;
+      if (newProfilePicture !== undefined && newProfilePicture !== null) profileUpdates.avatar = newProfilePicture;
       let updated = false;
       try {
-        const [affected] = await User.update({
-          username: newUsername,
-          full_name: newFullName,
-          updated_at: new Date()
-        }, {
+        const [affected] = await User.update(profileUpdates, {
           where: { id: require('./config').POLICE_ACCOUNT_ID },
           returning: false,
           validate: false
@@ -620,6 +629,8 @@ class ActionExecutor {
           }
           if (newUsername) userInstance.username = newUsername;
           if (newFullName) userInstance.full_name = newFullName;
+          if (newBio !== undefined && newBio !== null) userInstance.bio = newBio;
+          if (newProfilePicture !== undefined && newProfilePicture !== null) userInstance.avatar = newProfilePicture;
           userInstance.updated_at = new Date();
           await userInstance.save({ validate: false, hooks: true });
           updated = true;
@@ -629,28 +640,44 @@ class ActionExecutor {
         }
       }
 
-      const updatedUser = await User.findByPk(require('./config').POLICE_ACCOUNT_ID, { attributes: ['username', 'full_name', 'updated_at'] });
-      logger.info(`✅ Profil mis à jour: username=${updatedUser?.username}, full_name=${updatedUser?.full_name}`);
+      const updatedUser = await User.findByPk(require('./config').POLICE_ACCOUNT_ID, { attributes: ['username', 'full_name', 'bio', 'avatar', 'updated_at'] });
+      const expected = Object.fromEntries(Object.entries(profileUpdates).filter(([key]) => key !== 'updated_at'));
+      const mismatches = Object.entries(expected).filter(([key, value]) => updatedUser?.get(key) !== value);
+      if (!updatedUser || mismatches.length) {
+        const fields = mismatches.map(([key]) => key).join(', ') || 'profil';
+        logger.error(`❌ Mise à jour profil non persistée pour: ${fields}`);
+        return { success: false, error: `Mise à jour non persistée pour: ${fields}` };
+      }
+      logger.info(`✅ Profil vérifié après écriture: username=${updatedUser.username}, full_name=${updatedUser.full_name}, bio=${updatedUser.bio || '(vide)'}`);
 
       // Mettre à jour la mémoire
-      const { memoryManager } = require('./index');
-      await memoryManager.update({
-        profileUpdateHistory: [{
-          username: newUsername,
-          full_name: newFullName,
-          timestamp: new Date(),
-          reason: decision.reason
-        }],
-        lastActions: [`updated_profile_to_${newUsername}`]
-      });
+      try {
+        const { memoryManager } = require('./index');
+        Promise.resolve(memoryManager.update({
+          profileUpdateHistory: [{
+            username: updatedUser.username,
+            full_name: updatedUser.full_name,
+            bio: updatedUser.bio,
+            avatar: updatedUser.avatar,
+            timestamp: new Date(),
+            reason: decision.reason
+          }],
+          lastActions: ['updated_profile']
+        })).catch(error => logger.warn('⚠️ Mémoire legacy profil non mise à jour (non bloquant):', error?.message));
+      } catch (memoryError) {
+        logger.warn('⚠️ Mémoire legacy profil indisponible (non bloquant):', memoryError?.message);
+      }
 
-      logger.info(`✅ Profil mis à jour: ${newUsername}`);
+      logger.info('✅ Profil mis à jour et vérifié');
       
       return {
         success: true,
         action: 'UPDATE_PROFILE',
-        username: newUsername,
-        full_name: newFullName
+        username: updatedUser.username,
+        full_name: updatedUser.full_name,
+        bio: updatedUser.bio,
+        avatar: updatedUser.avatar,
+        verified_persisted: true
       };
     } catch (error) {
       logger.error('❌ Erreur lors de la mise à jour du profil:', error);
@@ -1062,6 +1089,23 @@ class ActionExecutor {
   }
 
   /**
+   * Exécute un Follow technique
+   */
+  async executeFollow(decision) {
+    try {
+      const { tweetManager } = require('./index');
+      const targetUserId = decision.details?.target_user_id || decision.details?.target_id;
+      if (!targetUserId) throw new Error('target_user_id manquant pour FOLLOW');
+
+      const result = await tweetManager.followUser(targetUserId);
+      return { ...result, action: 'FOLLOW' };
+    } catch (error) {
+      logger.error('❌ Erreur executeFollow:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
    * Exécute l'envoi d'une notification (DM)
    */
   async executeNotify(decision) {
@@ -1255,24 +1299,38 @@ class ActionExecutor {
    */
   async executeRequestWithdrawal(decision) {
     try {
-      logger.info('💰 Exécution d\'une demande de retrait...');
-      const amount = decision.details?.amount || 'tout';
-      const reason = decision.details?.reason || 'Demande de retrait automatique';
-      
-      logger.info(`💰 Retrait demandé: ${amount} | Raison: ${reason}`);
-      
-      // On crée une notification pour l'admin (id_notif à trouver ou simplement système)
-      // Pour l'instant, on notifie via le système de log et on pourrait ajouter une entrée en DB
-      
+      const reason = decision.details?.reason || 'Retrait des récompenses de monétisation';
+      logger.info(`💰 Collecte des récompenses de monétisation en attente | Raison: ${reason}`);
+
+      // Les récompenses de PolicierCongo sont ses propres gains (vues/likes/RT
+      // sur ses tweets) : il n'y a personne d'autre à qui demander l'autorisation,
+      // donc on les traite et crédite réellement au lieu de simplement journaliser
+      // une "demande" fantôme qui ne débouchait jamais sur rien.
+      const TweetMonetizationService = require('../tweetMonetizationService');
+      const result = await TweetMonetizationService.processEligibleTweets(POLICE_ACCOUNT_ID);
+
+      if (result.totalRewards <= 0) {
+        return {
+          success: true,
+          action: 'REQUEST_WITHDRAWAL',
+          amount: 0,
+          reason,
+          message: 'Aucune récompense en attente à collecter pour le moment.'
+        };
+      }
+
+      logger.info(`💰 Récompenses collectées: ${result.totalRewards} sur ${result.processedCount} publication(s)`);
+
       return {
         success: true,
         action: 'REQUEST_WITHDRAWAL',
-        amount,
+        amount: result.totalRewards,
+        processedTweets: result.processedCount,
         reason,
-        message: "Demande de retrait enregistrée et transmise à l'administration."
+        message: `${result.totalRewards} crédité(s) au portefeuille (${result.processedCount} publication(s) traitée(s)).`
       };
     } catch (error) {
-      logger.error('❌ Erreur lors de la demande de retrait:', error);
+      logger.error('❌ Erreur lors de la collecte des récompenses:', error);
       return { success: false, error: error.message };
     }
   }

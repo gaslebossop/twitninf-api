@@ -352,6 +352,7 @@ class ProgressiveRecommendationEngine {
       const recentTweets = await Tweet.findAll({
         where: {
           deleted_at: null,
+          is_data_test: false,
           moderation_status: 'approved',
           parent_tweet_id: null,
           created_at: {
@@ -696,6 +697,7 @@ class ProgressiveRecommendationEngine {
       // Construire la condition WHERE
       const whereCondition = {
         deleted_at: null,
+        is_data_test: false,
         moderation_status: 'approved',
         parent_tweet_id: null,
         created_at: {

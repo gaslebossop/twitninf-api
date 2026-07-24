@@ -2614,4 +2614,4 @@ class SmartRecommendationEngine {
   }
 }
 
-module.exports = SmartRecommendationEngine;
+module.exports = new SmartRecommendationEngine();

@@ -1,5 +1,100 @@
 const fraudService = require('../services/fraudDetectionService');
+const authService = require('../services/authService');
 const logger = require('../utils/logger');
+
+// L'exemption desktop reste volontairement étroite. Les en-têtes seuls sont
+// falsifiables : ils doivent être accompagnés d'un JWT signé, non expiré et
+// contenant un identifiant utilisateur. Les routes d'authentification et de
+// paiement conservent systématiquement les contrôles FraudShield spécialisés.
+const WINDOWS_FRAUD_BYPASS_EXCLUDED_PATHS = [
+  '/api/auth/login',
+  '/api/payments',
+  '/api/new-economy/purchase',
+  '/api/premium/subscribe',
+  '/api/users/purchase-subscription',
+  '/api/users/purchase-premium',
+];
+
+const APP_NAVIGATION_NOISE_PATHS = [
+  '/auth/me',
+  '/track',
+  '/behavior',
+  '/functional-events',
+  '/neural-rank/recommendations',
+  '/users/search',
+  '/tweets/views/increment',
+];
+
+function getRequestPath(req) {
+  return String(req.originalUrl || req.url || req.path || '').split('?')[0].toLowerCase();
+}
+
+function getApiScopedPath(req) {
+  const path = String(req.path || '').split('?')[0].toLowerCase();
+  return path.startsWith('/api/') ? path.slice(4) : path;
+}
+
+function isAppNavigationNoise(req) {
+  const path = getApiScopedPath(req);
+  const method = String(req.method || 'GET').toUpperCase();
+
+  if (method === 'OPTIONS' || method === 'HEAD') return true;
+
+  const isReadMethod = method === 'GET';
+  const isTelemetryMethod = method === 'POST' && (
+    path === '/track' ||
+    path.startsWith('/behavior') ||
+    path === '/tweets/views/increment'
+  );
+
+  if (!isReadMethod && !isTelemetryMethod) return false;
+
+  return APP_NAVIGATION_NOISE_PATHS.some((safePath) => (
+    path === safePath || path.startsWith(`${safePath}/`)
+  )) || /^\/users\/[0-9a-f-]{36}$/.test(path);
+}
+
+function isWindowsFraudBypassExcluded(req) {
+  const path = getRequestPath(req);
+  return WINDOWS_FRAUD_BYPASS_EXCLUDED_PATHS.some((excluded) => (
+    path === excluded || path.startsWith(`${excluded}/`)
+  ));
+}
+
+function getVerifiedBearerUserId(req) {
+  const authorization = String(req.headers?.authorization || '').trim();
+  const match = authorization.match(/^Bearer\s+([^\s]+)$/i);
+  if (!match) return null;
+
+  const token = match[1];
+  // Un JWT doit avoir exactement trois segments avant même la vérification.
+  if (token.split('.').length !== 3) return null;
+
+  const decoded = authService.verifyToken(token);
+  if (!decoded?.id) return null;
+  return String(decoded.id);
+}
+
+function hasWindowsElectronTransport(req) {
+  const userAgent = String(req.headers?.['user-agent'] || '').toLowerCase();
+  const platform = String(req.headers?.['user-platform'] || '').trim().toLowerCase();
+  const ownership = String(req.headers?.['x-app-ownership'] || '').trim().toLowerCase();
+  const client = String(req.headers?.['x-twitninf-client'] || '').trim().toLowerCase();
+
+  if (!userAgent.includes('twitninf-windows')) return false;
+  if (platform !== 'windows') return false;
+  if (ownership !== 'standalone') return false;
+  if (client !== 'windows-electron') return false;
+
+  return true;
+}
+
+function isTrustedWindowsElectronRequest(req) {
+  if (isWindowsFraudBypassExcluded(req)) return false;
+  if (!hasWindowsElectronTransport(req)) return false;
+
+  return Boolean(getVerifiedBearerUserId(req));
+}
 
 // ─── Pré-filtre synchrone (Node.js, sans passer par Rust) ────────────────────
 // Détecte les patterns d'injection évidents AVANT d'envoyer la requête au contrôleur.
@@ -143,6 +238,7 @@ function getUserId(req) {
 // ─── Middleware 1: Check if IP is blocked (fast, before any processing) ────────
 const blockBannedIp = async (req, res, next) => {
   if (!fraudService.isReady()) return next();
+  if (isAppNavigationNoise(req) && getVerifiedBearerUserId(req)) return next();
 
   const ip = getIp(req);
   try {
@@ -214,6 +310,7 @@ const checkLogin = (successField = null) => async (req, res, next) => {
 // ─── Middleware 3: Report login outcome (after auth succeeded or failed) ───────
 // Call after the controller responds to update Rust's behavioral baseline.
 const reportLoginOutcome = (success) => async (req, _res, next) => {
+  if (isTrustedWindowsElectronRequest(req)) return next();
   if (!fraudService.isReady()) return next();
 
   const ip = getIp(req);
@@ -289,6 +386,8 @@ const checkTransaction = async (req, res, next) => {
 
 // ─── Middleware 5: Global request check (synchrone sur injections, async sinon) ─
 const checkApiRequest = async (req, res, next) => {
+  if (isTrustedWindowsElectronRequest(req)) return next();
+  if (isAppNavigationNoise(req)) return next();
   const ip = getIp(req);
 
   // ── 1. Pré-filtre synchrone ultra-rapide (regex Node.js, ~0.1ms) ────────────
@@ -375,4 +474,7 @@ module.exports = {
   // Exposés pour les tests unitaires / la réutilisation
   quickScan,
   getIp,
+  isTrustedWindowsElectronRequest,
+  hasWindowsElectronTransport,
+  isAppNavigationNoise,
 };

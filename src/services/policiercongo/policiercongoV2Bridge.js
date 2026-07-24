@@ -10,6 +10,31 @@ const logger = require('../../utils/logger');
 const { createPostgresAdapters } = require('./policiercongoV2.memoryAdapters');
 const { createLocalEmbedQuery, createCohereEmbedQuery } = require('./policiercongoV2Embeddings');
 const { PolicierCongoV2, DEFAULT_CLAUDE_MODEL, TRIGGER_TYPES, ReplyQueue, CommunitySignals } = require('./policiercongoV2');
+const { generateWithClaudeCode } = require('./claudeCodeClient');
+const { generateWithCodex } = require('./codexClient');
+
+/**
+ * Provider LLM pour PolicierCongoV2 : 'claude' (défaut, Claude Code / abonnement Anthropic)
+ * ou 'openai' (Codex CLI / abonnement ChatGPT). Changer via POLICIERCONGO_LLM_PROVIDER.
+ */
+function _resolveProvider() {
+  const p = (process.env.POLICIERCONGO_LLM_PROVIDER || 'claude').trim().toLowerCase();
+  return (p === 'openai' || p === 'codex') ? 'openai' : 'claude';
+}
+
+/**
+ * Pause ponctuelle demandée par l'admin : pas d'appel Codex/OpenAI entre 06h et 12h
+ * (Paris) le 21/07/2026, pour ne pas taper dans le quota de tokens OpenAI de l'admin.
+ */
+function _isOpenAIQuietHoursToday() {
+  const parts = new Intl.DateTimeFormat('fr-FR', {
+    timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23'
+  }).formatToParts(new Date());
+  const get = (t) => parts.find(p => p.type === t)?.value;
+  const dateStr = `${get('year')}-${get('month')}-${get('day')}`;
+  const hour = parseInt(get('hour'), 10);
+  return dateStr === '2026-07-21' && hour >= 6 && hour < 12;
+}
 const instructionManager = require('./InstructionManager');
 const schedulerManager = require('./schedulerManager');
 const { POLICE_ACCOUNT_ID } = require('./config');
@@ -37,38 +62,38 @@ function buildRuntimeContextPack(collectedData, event = {}) {
   }
 
   if (Array.isArray(c.unrepliedComments) && c.unrepliedComments.length) {
-    lines.push('[file_reponses]');
-    c.unrepliedComments.slice(0, 15).forEach((u, i) => {
-      const ex = (u.content || '').replace(/\s+/g, ' ').trim().slice(0, 220);
+    lines.push('[file_reponses] (illimité — DERNIÈRE CHANCE : chaque commentaire listé ici disparaîtra de la file après ce cycle, que tu agisses ou non. Décide MAINTENANT pour chacun : reply, moderate, ou ignore délibérément. Gros volume -> triage rapide, pas besoin de tout traiter un par un avec le même soin.)');
+    c.unrepliedComments.forEach((u, i) => {
+      const ex = (u.content || '').replace(/\s+/g, ' ').trim().slice(0, 160);
       lines.push(`${i + 1}. id=${u.id} @${u.author || '?'} urg=${u.urgency || '?'} h=${u.hours_ago ?? '?'} | ${ex}`);
     });
   }
 
   if (c.trendingTopics && typeof c.trendingTopics === 'object') {
-    const tags = (c.trendingTopics.hashtags || []).slice(0, 14).join(', ');
-    const sujets = (c.trendingTopics.sujets || []).slice(0, 10).join(', ');
+    const tags = (c.trendingTopics.hashtags || []).slice(0, 8).join(', ');
+    const sujets = (c.trendingTopics.sujets || []).slice(0, 6).join(', ');
     if (tags || sujets) lines.push(`[tendances_24h] hashtags: ${tags} | sujets: ${sujets}`);
   }
 
   if (Array.isArray(c.userTrendingTweets) && c.userTrendingTweets.length) {
-    lines.push('[extraits_tl_populaire]');
-    c.userTrendingTweets.slice(0, 12).forEach(t => {
-      lines.push(`- @${t.author || '?'}: ${(t.content || '').replace(/\s+/g, ' ').trim().slice(0, 200)}`);
+    lines.push('[extraits_tl_populaire] (id= utilisable pour like/repost)');
+    c.userTrendingTweets.slice(0, 6).forEach(t => {
+      lines.push(`- id=${t.id || '?'} @${t.author || '?'}: ${(t.content || '').replace(/\s+/g, ' ').trim().slice(0, 150)}`);
     });
   }
 
   if (Array.isArray(c.recentPlatformTweets) && c.recentPlatformTweets.length) {
-    lines.push('[tl_recente]');
-    c.recentPlatformTweets.slice(0, 20).forEach(t => {
+    lines.push('[tl_recente] (id= utilisable pour like/repost)');
+    c.recentPlatformTweets.slice(0, 10).forEach(t => {
       const when = t.heure_paris || t.ago || '';
-      lines.push(`- [${when}] @${t.author || '?'}: ${(t.content || '').replace(/\s+/g, ' ').trim().slice(0, 200)}`);
+      lines.push(`- id=${t.id || '?'} [${when}] @${t.author || '?'}: ${(t.content || '').replace(/\s+/g, ' ').trim().slice(0, 150)}`);
     });
   }
 
   if (Array.isArray(c.mainTweets) && c.mainTweets.length) {
     lines.push('[tes_derniers_posts]');
-    c.mainTweets.slice(0, 12).forEach((t, i) => {
-      lines.push(`${i + 1}. (${t.likes ?? 0}♥) ${(t.content || '').replace(/\s+/g, ' ').trim().slice(0, 240)}`);
+    c.mainTweets.slice(0, 6).forEach((t, i) => {
+      lines.push(`${i + 1}. (${t.likes ?? 0}♥) ${(t.content || '').replace(/\s+/g, ' ').trim().slice(0, 180)}`);
     });
   }
 
@@ -78,7 +103,7 @@ function buildRuntimeContextPack(collectedData, event = {}) {
     lines.push(`[prochaine_cible_suggeree] @${a}: ${String(lc.content || lc.text).replace(/\s+/g, ' ').trim().slice(0, 180)}`);
   }
 
-  return lines.join('\n').slice(0, 6500);
+  return lines.join('\n').slice(0, 3000);
 }
 
 let _pool = null;
@@ -245,13 +270,13 @@ async function runPolicierCongoV2Turn({ event, buildOptions = {}, geminiIntellig
           `SELECT content, created_at FROM tweets
            WHERE user_id = $1 AND parent_tweet_id IS NULL AND deleted_at IS NULL
            ORDER BY created_at DESC
-           LIMIT 25`,
+           LIMIT 10`,
           [POLICE_ACCOUNT_ID]
         );
         if (ownTweetRows.length > 0) {
           const lines = ownTweetRows.map((r, i) => {
             const when = r.created_at ? formatParisTs(r.created_at) : '?';
-            const body = (r.content || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+            const body = (r.content || '').replace(/\s+/g, ' ').trim().slice(0, 220);
             return `${i + 1}. [${when} Paris] ${body}`;
           });
           blocks.push(
@@ -264,11 +289,11 @@ async function runPolicierCongoV2Turn({ event, buildOptions = {}, geminiIntellig
           `SELECT source_text FROM policiercongo_v2_embeddings
            WHERE metadata->>'role' = 'assistant'
            ORDER BY created_at DESC
-           LIMIT 12`
+           LIMIT 6`
         );
         if (historyRows.length > 0) {
           const historyText = historyRows
-            .map(r => `- "${(r.source_text || '').replace(/\s+/g, ' ').trim().slice(0, 280)}"`)
+            .map(r => `- "${(r.source_text || '').replace(/\s+/g, ' ').trim().slice(0, 180)}"`)
             .join('\n');
           blocks.push(`MÉMOIRE RÉCENTE (ce que tu as déjà dit — pour t\'orienter) :\n${historyText}`);
         }
@@ -349,42 +374,36 @@ async function runPolicierCongoV2Turn({ event, buildOptions = {}, geminiIntellig
   logger.info(`[pc2.bridge] V2.1 : ReplyQueue pending=${_replyQueue.pendingCount()}, Signals active.`);
 
   const prompt = flattenV2Messages(prep.messages);
-  const targetModel = prep.model || DEFAULT_CLAUDE_MODEL;
+  const provider = _resolveProvider();
 
-  let llmRaw = null;
-
-  // 🔄 ÉTAPE 1 : Tentative avec le modèle cible (généralement Claude Opus 4.7)
-  const isGeminiPrimary = targetModel.startsWith('gemini');
-  if (isGeminiPrimary) {
-    logger.info(`🧠 Bridge V2: Utilisation directe de Gemini (${targetModel})`);
-    llmRaw = await geminiIntelligence.generateContent(prompt, targetModel, true);
+  let llmRaw;
+  let targetModel;
+  if (provider === 'openai' && _isOpenAIQuietHoursToday()) {
+    logger.info('🔇 [pc2.bridge] Pause OpenAI (06h-12h Paris, 21/07) : aucun appel Codex, silence délibéré (quota tokens).');
+    // Succès délibéré (pas un échec) : on évite tout fallback vers un autre provider/legacy.
+    return {
+      ok: true,
+      structured: { action: 'NO_ACTION', reason: 'Pause OpenAI 06h-12h (quota tokens admin)' },
+      actions: [{ type: 'NO_ACTION', content: '' }],
+      replyText: '',
+      model: 'quiet_hours_openai',
+      meta: prep.meta
+    };
+  } else if (provider === 'openai') {
+    targetModel = process.env.POLICIERCONGO_CODEX_MODEL || 'codex';
+    logger.info(`🧠 Bridge V2: Utilisation Codex (OpenAI, ${targetModel})`);
+    llmRaw = await generateWithCodex(prompt);
   } else {
-    llmRaw = await geminiIntelligence.generateWithMegaLLM(prompt, targetModel);
-    
-    // 🔄 ÉTAPE 2 : FALLBACK 1 -> GPT-5.4 (Si le premier choix a échoué et n'était pas déjà GPT-5.4)
-    if ((!llmRaw || !String(llmRaw).trim()) && targetModel !== 'gpt-5.4') {
-      logger.warn(`[pc2.bridge] MegaLLM (${targetModel}) indisponible, tentative Fallback 1: gpt-5.4`);
-      llmRaw = await geminiIntelligence.generateWithMegaLLM(prompt, 'gpt-5.4');
-    }
-
-    // 🔄 ÉTAPE 3 : FALLBACK 2 -> Gemini Flash Preview (Dernier recours)
-    if (!llmRaw || !String(llmRaw).trim()) {
-      const finalModel = 'gemini-3-flash-preview';
-      logger.warn(`[pc2.bridge] MegaLLM indisponible ou vide, tentative Fallback 2: ${finalModel}`);
-      try {
-        llmRaw = await geminiIntelligence.generateContent(prompt, finalModel, true);
-      } catch (fallbackErr) {
-        logger.error(`[pc2.bridge] Échec du fallback final Gemini: ${fallbackErr.message}`);
-        llmRaw = null;
-      }
-    }
+    targetModel = prep.model || DEFAULT_CLAUDE_MODEL;
+    logger.info(`🧠 Bridge V2: Utilisation Claude Code (${targetModel})`);
+    llmRaw = await generateWithClaudeCode(prompt, targetModel);
   }
 
   if (!llmRaw || !String(llmRaw).trim()) {
-    logger.error('[pc2.bridge] Échec critique : Aucun LLM (MegaLLM/Gemini) n\'a pu répondre.');
+    logger.error(`[pc2.bridge] Échec critique : ${provider === 'openai' ? 'Codex' : 'Claude Code'} n'a pas pu répondre.`);
     return {
       ok: false,
-      error: 'Tous les LLM ont échoué',
+      error: `${provider === 'openai' ? 'Codex' : 'Claude Code'} indisponible`,
       replyText: ''
     };
   }
@@ -393,6 +412,20 @@ async function runPolicierCongoV2Turn({ event, buildOptions = {}, geminiIntellig
   const { structured, actions } = await bot.finalizeTurn(event, llmRaw || '', resolveId);
 
   const isDirectChat = (event.trigger === TRIGGER_TYPES.DIRECT_MESSAGE || event.trigger === TRIGGER_TYPES.MENTION);
+
+  // Marquer TOUS les commentaires montrés ce cycle comme "vus" — qu'il ait répondu,
+  // modéré ou choisi de les ignorer, ils ne doivent plus jamais revenir hanter les
+  // cycles suivants (sinon on re-signale/re-considère indéfiniment la même vague).
+  if (!isDirectChat && Array.isArray(collectedData?.unrepliedComments) && collectedData.unrepliedComments.length) {
+    try {
+      const { memoryManager } = require('./index');
+      for (const c of collectedData.unrepliedComments) {
+        if (c?.id) await memoryManager.markCommentAsReplied(c.id, { reason: 'considered_this_cycle' });
+      }
+    } catch (markErr) {
+      logger.warn(`[pc2.bridge] Marquage commentaires "vus" échoué: ${markErr.message}`);
+    }
+  }
 
   // Mise à jour du Planning (Scheduler) — CRITIQUE pour éviter les boucles au démarrage
   if (structured && !isDirectChat) {
@@ -475,6 +508,12 @@ async function runPolicierCongoV2Turn({ event, buildOptions = {}, geminiIntellig
 
     // Si on a plusieurs actions, on les pack pour l'ActionExecutor
     if (isArrayAlready && structured.length > 1) {
+      // `actions` (calculé plus haut par finalizeTurn) reste le tableau normalisé —
+      // sans lui, les appelants (DM/chat) ne voient aucune action à exécuter et le
+      // bot "annonce" avoir posté/liké sans que rien ne se déclenche réellement.
+      const replyAction =
+        structured.find(s => ['reply', 'respond_to_user', 'REPLY', 'RESPOND_TO_USER'].includes(s.action) && typeof s.content === 'string' && s.content.trim())
+        || structured.find(s => typeof s.content === 'string' && s.content.trim());
       return {
         ok: true,
         model: bot.modelUsed || 'unknown',
@@ -486,7 +525,8 @@ async function runPolicierCongoV2Turn({ event, buildOptions = {}, geminiIntellig
             details: s
           }))
         },
-        replyText: structured[0].content || '',
+        actions,
+        replyText: replyAction?.content || structured[0].content || '',
         meta: prep.meta
       };
     }
@@ -498,9 +538,18 @@ async function runPolicierCongoV2Turn({ event, buildOptions = {}, geminiIntellig
     }
   }
 
+  // Si l'IA renvoie plusieurs actions (ex: reply + post depuis un DM), structured
+  // est un TABLEAU sans .content propre — il faut extraire le texte depuis l'action
+  // de type reply dans le tableau normalisé `actions`, sinon le message de chat/DM
+  // part vide (constaté en prod : la réponse DM disparaissait silencieusement).
   let replyText = '';
   if (structured && typeof structured.content === 'string') {
     replyText = structured.content.trim();
+  } else if (Array.isArray(actions)) {
+    const replyAction =
+      actions.find(a => ['REPLY', 'RESPOND_TO_USER'].includes(String(a?.type || '').toUpperCase()) && typeof a?.content === 'string' && a.content.trim())
+      || actions.find(a => typeof a?.content === 'string' && a.content.trim());
+    if (replyAction) replyText = replyAction.content.trim();
   }
 
   return {

@@ -11,6 +11,7 @@ const redis = require('redis');
 const cron = require('node-cron');
 const http = require('http');
 const { Server } = require('socket.io');
+const { registerMiningHandlers } = require('./sockets/miningSocket');
 
 // Configuration pour désactiver PolicierCongo
 const DISABLE_POLICIERCONGO = false; // Désactiver l'automatisation de PolicierCongo
@@ -53,6 +54,7 @@ const trackingRoutes = require('./routes/trackingRoutes');
 const virtualCurrencyRoutes = require('./routes/virtualCurrencyRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const newEconomyRoutes = require('./routes/newEconomyRoutes');
+const casinoRoutes = require('./routes/casinoRoutes');
 const tweetMonetizationRoutes = require('./routes/tweetMonetizationRoutes');
 const eventRoutes = require('./routes/events');
 const functionalEventRoutes = require('./routes/functionalEventRoutes');
@@ -71,6 +73,8 @@ const similarityAdminRoutes = require('./routes/similarityAdminRoutes');
 const shadowbanAdminRoutes = require('./routes/shadowbanAdminRoutes');
 const policierCongoAdminRoutes = require('./routes/policierCongoAdminRoutes');
 const policierCongoChatRoutes = require('./routes/policierCongoChatRoutes');
+const policierCongoV3Router = require('./services/policiercongo/policiercongov3/router');
+const { getPolicierCongoV3 } = require('./services/policiercongo/policiercongov3/orchestrator');
 const developerAdminRoutes = require('./routes/developerAdminRoutes');
 const detectionRoutes = require('./routes/detectionRoutes');
 const userSimilarityRoutes = require('./routes/userSimilarityRoutes');
@@ -107,6 +111,14 @@ const { blockBannedIp, checkApiRequest } = require('./middleware/fraudMiddleware
 // Créer l'application Express
 const app = express();
 
+// ⚠️ SÉCURITÉ — Confiance au proxy inverse (Nginx) UNIQUEMENT.
+// Avec `trust proxy = 1`, Express dérive req.ip du DERNIER hop de confiance
+// (le X-Forwarded-For ajouté par Nginx), et ignore tout XFF supplémentaire
+// injecté par le client. Sans cela, un attaquant pourrait usurper son IP via
+// l'en-tête X-Forwarded-For et contourner le blocage d'IP, la réputation et
+// le rate-limit. La valeur 1 = un seul proxy (Nginx) devant l'API.
+app.set('trust proxy', 1);
+
 // Configuration Redis pour le cache
 const redisClient = redis.createClient(config.redis);
 redisClient.on('error', (err) => logger.error('Erreur Redis:', err));
@@ -140,12 +152,29 @@ app.use(compression(config.performance.compression));
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 1000, // 1000 requêtes par fenêtre (augmenté)
+  // Le minage (app Windows) soumet un nonce à chaque bloc trouvé — en usage
+  // normal ça peut aller bien au-delà de 1000/15min sans être un abus, donc
+  // ces routes ont leur propre limite dédiée (voir miningLimiter) au lieu de
+  // partager le quota global avec le reste de l'app.
+  skip: (req) => req.path.startsWith('/new-economy/mining'),
   message: {
     success: false,
     message: 'Trop de requêtes. Réessayez plus tard.'
   }
 });
 app.use('/api/', limiter);
+
+// Limitation dédiée au minage : plus permissive que le quota global, car un
+// mineur actif (surtout GPU) peut légitimement soumettre beaucoup de blocs.
+const miningLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 300, // 300 requêtes/minute (round + submit cumulés)
+  message: {
+    success: false,
+    message: 'Trop de requêtes de minage. Réessayez dans quelques secondes.'
+  }
+});
+app.use('/api/new-economy/mining', miningLimiter);
 
 // Protection rate limit sur les routes d'authentification
 const authLimiter = rateLimit({
@@ -195,11 +224,10 @@ app.use(morgan('combined', {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Middleware pour ajouter l'IP réelle
-app.use((req, res, next) => {
-  req.ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-  next();
-});
+// NOTE SÉCURITÉ : on n'écrase PLUS req.ip à partir de l'en-tête brut
+// X-Forwarded-For (falsifiable par le client). Express calcule désormais
+// req.ip de façon fiable grâce à `app.set('trust proxy', 1)` ci-dessus.
+// (req.ip est en lecture seule via un getter une fois trust proxy actif.)
 
 // Middleware pour ajouter la plateforme utilisateur
 app.use((req, res, next) => {
@@ -314,6 +342,11 @@ app.use('/api/new-economy', (req, res, next) => {
   next();
 }, newEconomyRoutes);
 
+app.use('/api/casino', (req, res, next) => {
+  console.log('🎰 Route casino appelée:', req.method, req.path);
+  next();
+}, casinoRoutes);
+
 app.use('/api/tweet-monetization', (req, res, next) => {
   console.log('💰 Route monétisation tweets appelée:', req.method, req.path);
   next();
@@ -413,6 +446,9 @@ app.use('/api/admin/policiercongo', policierCongoAdminRoutes);
 
 // 💬 Routes de Chat avec PolicierCongo
 app.use('/api/policiercongo/chat', policierCongoChatRoutes);
+
+// 🧠 PolicierCongo V3 — moteur agentique, mémoire et streaming
+app.use('/api/policiercongo/v3', policierCongoV3Router);
 
 // 🎯 Routes du ciblage étendu (Targeting)
 if (targetingRoutes) {
@@ -822,6 +858,13 @@ function setupCronJobs() {
     }
 
     try {
+      const policierCongoV3 = getPolicierCongoV3();
+      if (policierCongoV3.config.enabled) {
+        // Le scheduler persistant V3 décide seul des réveils. Ce cron reste un filet de sécurité.
+        const tick = await policierCongoV3.scheduler.runDueOnce();
+        if (tick.claimed > 0) logger.info(`🧠 [Cron] PolicierCongo V3: ${tick.claimed} réveil(s) traité(s)`);
+        return;
+      }
       const schedulerManager = require('./services/policiercongo/schedulerManager');
 
       // GATE : Respecter le planning décidé par l'IA
@@ -1090,6 +1133,8 @@ async function startServer() {
         });
       });
       
+      registerMiningHandlers(io, socket);
+
       socket.on('join_video_upload', (tweetId) => {
         socket.join(`video_upload_${tweetId}`);
         logger.info(`👤 User ${userId} a rejoint le salon video_upload_${tweetId}`);
@@ -1187,8 +1232,14 @@ async function startServer() {
     // ⏰ Initialiser le scheduler PolicierCongo SANS run immédiat
     // Le cron */10 prendra le relais après le délai de grâce
     if (!DISABLE_POLICIERCONGO) {
+      const policierCongoV3 = getPolicierCongoV3();
+      if (policierCongoV3.config.enabled) {
+        await policierCongoV3.initialize();
+        logger.info('🧠 PolicierCongo V3 activé au démarrage; scheduler persistant prêt.');
+      } else {
       const schedulerManager = require('./services/policiercongo/schedulerManager');
       schedulerManager.initOnStartup(3); // 3 min de grâce après démarrage
+      }
     }
 
   // 🛑 Desactive au demarrage, execution uniquement via cron horaire
@@ -1199,6 +1250,7 @@ async function startServer() {
       logger.info('SIGTERM reçu, arrêt gracieux du serveur...');
       server.close(async () => {
         logger.info('Serveur arrêté');
+        await getPolicierCongoV3().close();
         await closeConnection();
         redisClient.quit();
         process.exit(0);
@@ -1209,6 +1261,7 @@ async function startServer() {
       logger.info('SIGINT reçu, arrêt gracieux du serveur...');
       server.close(async () => {
         logger.info('Serveur arrêté');
+        await getPolicierCongoV3().close();
         await closeConnection();
         redisClient.quit();
         process.exit(0);

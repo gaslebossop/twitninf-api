@@ -28,7 +28,7 @@ class UltraRecommendationEngine {
     
     // Services d'analyse avancés
     this.behavioralService = new BehavioralAnalysisService();
-    this.trendingService = new TrendingAnalysisService();
+    this.trendingService = TrendingAnalysisService;
     
     // Système de scoring ultra-avancé multi-dimensionnel
     this.scoreWeights = {

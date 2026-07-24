@@ -141,6 +141,17 @@ const userBehaviorDataSchema = {
     comment: 'Indique si cette donnée a été traitée par l\'algorithme'
   },
   
+  is_data_test: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
+  },
+
+  data_test_batch_id: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+
   processing_date: {
     type: DataTypes.DATE,
     allowNull: true

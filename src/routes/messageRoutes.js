@@ -6,6 +6,8 @@ const { authenticateToken, denySuspended } = require('../middleware/authMiddlewa
 const { sequelize, User, UserFollow, Conversation, ConversationParticipant, Message } = require('../models');
 const { POLICE_ACCOUNT_ID } = require('../services/policiercongo/config');
 const { geminiIntelligence } = require('../services/policiercongo');
+const { runPolicierCongoV2Turn, TRIGGER_TYPES } = require('../services/policiercongo/policiercongov3/compatibilityBridge');
+const contractService = require('../services/policiercongo/contractService');
 
 async function requireMembership(conversationId, userId) {
   return ConversationParticipant.findOne({
@@ -73,7 +75,27 @@ async function canOpenDirectWithoutInvitation(senderId, recipientId) {
   return !!(aFollowsB && bFollowsA);
 }
 
+function getPendingReplyForwardInstruction(conversation, senderId, senderUser, incomingContent) {
+  const pending = conversation?.metadata?.pending_reply_forward;
+  if (!pending || pending.status !== 'pending') return '';
+  if (pending.target_user_id && !sameId(pending.target_user_id, senderId)) return '';
+  if (!pending.requested_by_user_id || sameId(pending.requested_by_user_id, senderId)) return '';
+
+  const requester = pending.requested_by_username
+    ? `@${pending.requested_by_username}`
+    : `l'utilisateur ${pending.requested_by_user_id}`;
+  const senderName = senderUser?.username ? `@${senderUser.username}` : 'la personne cible';
+  return [
+    'PROMESSE EN ATTENTE:',
+    `Tu avais contacte ${senderName} a la demande de ${requester}.`,
+    `Tu avais promis de prevenir ${requester} si ${senderName} repondait.`,
+    `Message actuel de ${senderName}: "${String(incomingContent || '').trim()}"`,
+    `Si c'est bien une reponse a relayer, utilise send_outbound_private_message vers ${requester} avec un resume naturel. Ensuite tu peux repondre ici normalement.`
+  ].join('\n');
+}
+
 async function maybeAutoReplyFromPolicier(conversationId, senderId, incomingContent, io = null) {
+  let runToken = null;
   try {
     if (!conversationId || !senderId || senderId === POLICE_ACCOUNT_ID) return;
 
@@ -82,6 +104,20 @@ async function maybeAutoReplyFromPolicier(conversationId, senderId, incomingCont
     });
     if (!policeMembership) return;
 
+    const seenAt = new Date();
+    await policeMembership.update({ last_read_at: seenAt });
+    if (io) {
+      const readPayload = {
+        conversation_id: conversationId,
+        conversationId,
+        user_id: String(POLICE_ACCOUNT_ID),
+        userId: String(POLICE_ACCOUNT_ID),
+        last_read_at: seenAt.toISOString()
+      };
+      io.to(`conversation_${conversationId}`).emit('read:update', readPayload);
+      io.to(`user_${senderId}`).emit('read:update', readPayload);
+    }
+
     const recent = await Message.findAll({
       where: { conversation_id: conversationId },
       include: [{ model: User, as: 'sender', attributes: ['id', 'username'] }],
@@ -89,67 +125,177 @@ async function maybeAutoReplyFromPolicier(conversationId, senderId, incomingCont
       limit: 8
     });
     const timeline = recent.reverse().map((m) => `${m.sender?.id === POLICE_ACCOUNT_ID ? '@policiercongo' : `@${m.sender?.username || 'user'}`}: ${m.content}`).join('\n');
+    const senderUser = await User.findByPk(senderId, { attributes: ['id', 'username', 'full_name', 'verified'] });
 
-    const prompt = `Tu es @policiercongo dans un groupe/DM TwitNinf.
-Reponds a ce message en gardant ton style: direct, argot 2026, court, sans hashtag.
-Ne dis jamais que tu es une IA.
+    // Capture pour un éventuel contrat en attente sur ce DM — no-op silencieux
+    // s'il n'y en a pas (cas normal de la plupart des DMs).
+    await contractService.captureMessage(conversationId, { senderId, senderUsername: senderUser?.username, content: incomingContent });
+    const conversationForContext = await Conversation.findByPk(conversationId);
+    const pendingReplyForwardInstruction = getPendingReplyForwardInstruction(conversationForContext, senderId, senderUser, incomingContent);
 
-Conversation recente:
-${timeline}
+    // Même pipeline (Claude Code / Codex + mémoire + personnalité) que les tweets,
+    // pas un prompt Gemini bespoke à part (source du roleplay "vicos/opé" constaté).
+    // /admin en DM d'un compte vérifié force l'exécution de l'action demandée
+    // sur CE tour, même si elle enfreint une règle plateforme (garde-fou
+    // technique du second avis croisé sur les actions destructrices inchangé,
+    // voir adaptLegacyEvent dans compatibilityBridge.js).
+    const adminOverrideRequested = Boolean(senderUser?.verified) && /\/admin\b/i.test(String(incomingContent || ''));
 
-Dernier message a traiter:
-"${incomingContent}"
+    const event = {
+      id: `msg_${conversationId}_${Date.now()}`,
+      trigger: TRIGGER_TYPES.DIRECT_MESSAGE,
+      userId: senderId,
+      username: senderUser?.username,
+      threadId: `conv_${conversationId}`,
+      rawText: incomingContent,
+      metadata: { source: 'messages_dm', username: senderUser?.username },
+      adminOverrideRequested
+    };
+    const contextPack = [
+      senderUser ? `Expéditeur DM: @${senderUser.username} (id: ${senderUser.id}, nom: ${senderUser.full_name || senderUser.username})` : '',
+      timeline ? `CONVERSATION DM RÉCENTE:\n${timeline}` : ''
+      , pendingReplyForwardInstruction
+    ].filter(Boolean).join('\n');
 
-Retourne UNIQUEMENT un JSON:
-{"reply":"<ta reponse courte>"}`;
-
-    if (io) {
+    let policeTypingVisible = false;
+    const emitPoliceTyping = (isTyping) => {
+      if (!io || policeTypingVisible === isTyping) return;
+      policeTypingVisible = isTyping;
       io.to(`conversation_${conversationId}`).emit('typing:update', {
         conversation_id: conversationId,
         conversationId,
         user_id: String(POLICE_ACCOUNT_ID),
         userId: String(POLICE_ACCOUNT_ID),
         username: 'policiercongo',
-        is_typing: true,
-        isTyping: true
+        is_typing: isTyping,
+        isTyping
       });
-    }
-
-    // Dans les messages (DM/groupes), on force Gemini pour la reponse PolicierCongo.
-    const raw = await geminiIntelligence.generateContent(prompt, 'gemini-3-flash-preview', true);
-    if (!raw) return;
+    };
 
     let reply = '';
-    try {
-      const parsed = JSON.parse(String(raw).replace(/```json\n?|```/g, '').trim());
-      reply = String(parsed?.reply || '').trim();
-    } catch (_) {
-      reply = String(raw).trim();
+    // Trace du tour exposée côté client (rendu façon "Claude Code" dans l'app
+    // Windows : réflexion en italique, outils utilisés listés). Construite à
+    // partir des événements agentLoop.js — jamais depuis une reconstruction a
+    // posteriori, qui perdrait l'ordre réel réflexion → appel → résultat.
+    // Chaque étape est AUSSI poussée en direct sur le socket (event
+    // "policier:trace") au fur et à mesure qu'elle arrive : sans ça, le
+    // client ne voit rien tant que le tour entier (souvent plusieurs
+    // itérations d'outils) n'est pas terminé, alors que côté serveur les
+    // événements sont déjà disponibles un par un en temps réel.
+    runToken = `pc3_live_${conversationId}_${Date.now()}`;
+    const traceSteps = [];
+    const pendingToolSteps = new Map();
+    const emitTraceStep = (step) => {
+      if (!io) return;
+      io.to(`conversation_${conversationId}`).emit('policier:trace', {
+        conversation_id: conversationId,
+        conversationId,
+        run_token: runToken,
+        step
+      });
+    };
+    const onAgentEvent = (agentEvent) => {
+      if (agentEvent?.type === 'final.ready') { emitPoliceTyping(true); return; }
+      if (agentEvent?.type === 'model.decision') {
+        const text = String(agentEvent.decision_summary || '').trim();
+        if (text) {
+          const step = { id: `think_${agentEvent.iteration}`, type: 'thinking', text };
+          traceSteps.push(step);
+          emitTraceStep(step);
+        }
+        for (const [index, call] of (agentEvent.tool_calls || []).entries()) {
+          const stepId = call.id || `tool_${agentEvent.iteration}_${index}`;
+          const step = { id: stepId, type: 'tool', name: call.name, purpose: call.purpose || '', status: 'pending' };
+          traceSteps.push(step);
+          if (call.id) pendingToolSteps.set(call.id, step);
+          emitTraceStep(step);
+        }
+        return;
+      }
+      if (agentEvent?.type === 'tool.completed' && pendingToolSteps.has(agentEvent.callId)) {
+        const step = pendingToolSteps.get(agentEvent.callId);
+        step.status = 'success';
+        emitTraceStep(step);
+        return;
+      }
+      if (agentEvent?.type === 'tool.failed' && pendingToolSteps.has(agentEvent.callId)) {
+        const step = pendingToolSteps.get(agentEvent.callId);
+        step.status = 'failed';
+        step.error = String(agentEvent.error || '').slice(0, 300);
+        emitTraceStep(step);
+      }
+    };
+
+    // /createcontrat est géré de façon déterministe (pas par le modèle) pour
+    // garantir que le contrat est bien créé quand la commande est valide —
+    // pas dépendant de si l'agent a "compris" la commande ce tour-ci.
+    if (contractService.isCreateContractCommand(incomingContent)) {
+      const outcome = await contractService.tryCreateContract({ senderUser, conversationId, text: incomingContent });
+      if (outcome?.error === 'not_verified') {
+        reply = 'Seuls les comptes vérifiés peuvent créer un contrat avec moi.';
+      } else if (outcome?.error === 'empty_text') {
+        reply = 'Le texte du contrat est vide — envoie /createcontrat suivi du texte du contrat.';
+      } else if (outcome?.contract) {
+        reply = `Contrat ${outcome.contract.id} créé, en attente. J'accepte ou je refuse une fois que j'ai ce qu'il me faut pour trancher.`;
+      }
+    } else {
+      try {
+        const v2 = await runPolicierCongoV2Turn({
+          event,
+          buildOptions: { contextPack },
+          geminiIntelligence,
+          onEvent: onAgentEvent
+        });
+        reply = String(v2?.replyText || '').trim();
+
+        // Si le DM lui a fait décider d'une VRAIE action (post/like/repost/...), on
+        // l'exécute réellement — sinon il "annonce" avoir fait un truc sans jamais
+        // l'avoir fait (constaté en prod : "c'est fait frérot" sans aucun tweet posté).
+        const sideEffectActions = Array.isArray(v2?.actions)
+          ? v2.actions.filter((a) => {
+            const t = String(a?.type || '').toUpperCase();
+            return t && !['NOOP', 'NO_ACTION', 'REPLY', 'RESPOND_TO_USER', 'CLARIFY', 'SUGGEST'].includes(t);
+          })
+          : [];
+        if (sideEffectActions.length) {
+          const ActionExecutor = require('../services/policiercongo/actionExecutor');
+          const executor = new ActionExecutor();
+          for (const act of sideEffectActions) {
+            try {
+              await executor.executeSingleAction({ action: act.type, reason: act.reason, priority: 'medium', details: act.details || act });
+            } catch (execErr) {
+              logger.warn('⚠️ Exécution action déclenchée par DM échouée:', execErr?.message);
+            }
+          }
+        }
+      } catch (v2Err) {
+        logger.warn('⚠️ Auto-réponse PolicierCongo V3 échouée:', v2Err?.message);
+      }
     }
-    if (!reply) return;
+    if (!reply) {
+      emitPoliceTyping(false);
+      if (io && traceSteps.length) {
+        io.to(`conversation_${conversationId}`).emit('policier:trace:end', { conversation_id: conversationId, conversationId, run_token: runToken });
+      }
+      return;
+    }
 
     const message = await Message.create({
       conversation_id: conversationId,
       sender_id: POLICE_ACCOUNT_ID,
       content: reply,
       message_type: 'text',
-      metadata: { source: 'policiercongo_auto_reply' }
+      metadata: { source: 'policiercongo_auto_reply', ...(traceSteps.length ? { trace: traceSteps } : {}) }
     });
     await Conversation.update({ updated_at: new Date() }, { where: { id: conversationId }, silent: true });
+    await contractService.captureMessage(conversationId, { senderId: POLICE_ACCOUNT_ID, senderUsername: 'policiercongo', content: reply });
 
     if (io) {
-      io.to(`conversation_${conversationId}`).emit('typing:update', {
-        conversation_id: conversationId,
-        conversationId,
-        user_id: String(POLICE_ACCOUNT_ID),
-        userId: String(POLICE_ACCOUNT_ID),
-        username: 'policiercongo',
-        is_typing: false,
-        isTyping: false
-      });
+      emitPoliceTyping(false);
       io.to(`conversation_${conversationId}`).emit('message:new', {
         conversation_id: conversationId,
         conversationId,
+        run_token: runToken,
         message
       });
       const members = await ConversationParticipant.findAll({
@@ -174,6 +320,9 @@ Retourne UNIQUEMENT un JSON:
         is_typing: false,
         isTyping: false
       });
+      if (runToken) {
+        io.to(`conversation_${conversationId}`).emit('policier:trace:end', { conversation_id: conversationId, conversationId, run_token: runToken });
+      }
     }
     logger.warn('⚠️ Auto-reponse PolicierCongo echouee:', e?.message);
   }
@@ -293,6 +442,9 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
     const otherUserId = req.params.userId;
     const content = String(req.body?.content || '').trim();
     if (!content) return res.status(400).json({ success: false, message: 'Message vide' });
+    if (!req.user?.verified && content.length > 3000) {
+      return res.status(400).json({ success: false, message: 'Message trop long (max 3000 caractères)' });
+    }
     if (currentUserId === otherUserId) return res.status(400).json({ success: false, message: 'Conversation invalide' });
 
     const otherUser = await User.findByPk(otherUserId, { transaction: tx });
@@ -1096,11 +1248,16 @@ router.post('/conversations/:conversationId/messages', authenticateToken, denySu
     const conversationId = req.params.conversationId;
     const content = String(req.body?.content || '').trim();
     if (!content) return res.status(400).json({ success: false, message: 'Message vide' });
+    if (!req.user?.verified && content.length > 3000) {
+      return res.status(400).json({ success: false, message: 'Message trop long (max 3000 caractères)' });
+    }
 
-    const membership = await requireMembership(conversationId, userId);
+    const [membership, conv] = await Promise.all([
+      requireMembership(conversationId, userId),
+      Conversation.findByPk(conversationId)
+    ]);
     if (!membership) return res.status(403).json({ success: false, message: 'Accès refusé' });
 
-    const conv = await Conversation.findByPk(conversationId);
     const invitation = getInvitationMeta(conv);
     const groupInvitation = conv?.type === 'group' ? getGroupInvitationForUser(conv, userId) : null;
     if (conv?.type === 'direct' && invitation.status === 'declined') {
@@ -1128,35 +1285,38 @@ router.post('/conversations/:conversationId/messages', authenticateToken, denySu
       return res.status(403).json({ success: false, message: 'Invitation groupe refusee' });
     }
 
-    const message = await Message.create({
-      conversation_id: conversationId,
-      sender_id: userId,
-      content,
-      message_type: 'text'
-    });
-
-    await Conversation.update(
-      { updated_at: new Date() },
-      { where: { id: conversationId }, silent: true }
-    );
+    const [message] = await Promise.all([
+      Message.create({
+        conversation_id: conversationId,
+        sender_id: userId,
+        content,
+        message_type: 'text'
+      }),
+      Conversation.update(
+        { updated_at: new Date() },
+        { where: { id: conversationId }, silent: true }
+      )
+    ]);
 
     const io = req.app.get('io');
-    if (io) {
-      io.to(`conversation_${conversationId}`).emit('message:new', {
-        conversation_id: conversationId,
-        conversationId,
-        message
-      });
-      const members = await ConversationParticipant.findAll({
-        where: { conversation_id: conversationId },
-        attributes: ['user_id']
-      });
-      members.forEach((m) => {
-        io.to(`user_${m.user_id}`).emit('conversation:update', { conversation_id: conversationId });
-      });
-    }
 
-    setImmediate(() => {
+    // Le fan-out socket ne doit pas retarder l'accusé de réception HTTP au
+    // client qui vient d'envoyer le message.
+    setImmediate(async () => {
+      if (io) {
+        io.to(`conversation_${conversationId}`).emit('message:new', {
+          conversation_id: conversationId,
+          conversationId,
+          message
+        });
+        const members = await ConversationParticipant.findAll({
+          where: { conversation_id: conversationId },
+          attributes: ['user_id']
+        });
+        members.forEach((m) => {
+          io.to(`user_${m.user_id}`).emit('conversation:update', { conversation_id: conversationId });
+        });
+      }
       maybeAutoReplyFromPolicier(conversationId, userId, content, io);
     });
 

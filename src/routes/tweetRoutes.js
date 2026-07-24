@@ -108,7 +108,7 @@ router.get('/', [
 
             // Fetcher les vidéos complètes
             const dbVideos = await Tweet.findAll({
-              where: { id: { [Op.in]: videoIds }, deleted_at: null },
+              where: { id: { [Op.in]: videoIds }, deleted_at: null, is_data_test: false },
               include: [
                 {
                   model: User,
@@ -134,7 +134,7 @@ router.get('/', [
                 const [lCount, rtCount, repCount] = await Promise.all([
                   TweetLike.countTweetLikes(vId).catch(() => 0),
                   TweetRetweet.countTweetRetweets(vId).catch(() => 0),
-                  Tweet.count({ where: { parent_tweet_id: vId } }).catch(() => 0)
+                  Tweet.count({ where: { parent_tweet_id: vId, is_data_test: false } }).catch(() => 0)
                 ]);
 
                 // Construct standard tweet structure for the app
@@ -217,7 +217,7 @@ router.get('/', [
 
             // 2. Fetcher les tweets complets depuis PostgreSQL
             const dbTweets = await Tweet.findAll({
-              where: { id: { [Op.in]: tweetIds }, deleted_at: null },
+              where: { id: { [Op.in]: tweetIds }, deleted_at: null, is_data_test: false },
               include: [
                 {
                   model: User,
@@ -255,7 +255,7 @@ router.get('/', [
                 // Calcul des stats (peut être optimisé plus tard via caching)
                 const lCount = await TweetLike.countTweetLikes(tweetData.id);
                 const rtCount = await TweetRetweet.countTweetRetweets(tweetData.id);
-                const repCount = await Tweet.count({ where: { parent_tweet_id: tweetData.id } });
+                const repCount = await Tweet.count({ where: { parent_tweet_id: tweetData.id, is_data_test: false } });
                 const iLiked = await TweetLike.hasUserLikedTweet(userId, tweetData.id);
                 const iRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, tweetData.id);
 
@@ -352,6 +352,7 @@ router.get('/', [
     // Clause WHERE simplifiée pour une meilleure pagination
     let whereClause = {
       is_private: false,
+      is_data_test: false,
       deleted_at: null,
       moderation_status: 'approved' // Seulement les tweets approuvés pour la simplicité
     };
@@ -431,7 +432,7 @@ router.get('/', [
       const likeCount = await TweetLike.countTweetLikes(tweet.id);
       const retweetCount = await TweetRetweet.countTweetRetweets(tweet.id);
       const replyCount = await Tweet.count({
-        where: { parent_tweet_id: tweet.id }
+        where: { parent_tweet_id: tweet.id, is_data_test: false }
       });
 
       // Vérifier si l'utilisateur connecté a liké/retweeté ce tweet (obligatoire)
@@ -630,7 +631,7 @@ router.get('/:id', [
 
     const likeCount = await TweetLike.countTweetLikes(tweet.id);
     const retweetCount = await TweetRetweet.countTweetRetweets(tweet.id);
-    const replyCount = await Tweet.count({ where: { parent_tweet_id: tweet.id } });
+    const replyCount = await Tweet.count({ where: { parent_tweet_id: tweet.id, is_data_test: false } });
 
     let isLiked = false;
     let isRetweeted = false;
@@ -658,7 +659,7 @@ router.get('/:id', [
       enrichedTweet.replies = await Promise.all(enrichedTweet.replies.map(async (reply) => {
         const rLikeCount = await TweetLike.countTweetLikes(reply.id);
         const rRetweetCount = await TweetRetweet.countTweetRetweets(reply.id);
-        const rReplyCount = await Tweet.count({ where: { parent_tweet_id: reply.id } });
+        const rReplyCount = await Tweet.count({ where: { parent_tweet_id: reply.id, is_data_test: false } });
         let rIsLiked = false;
         let rIsRetweeted = false;
         if (userId) {
@@ -763,7 +764,7 @@ router.get('/:id/similar', [
       const [lCount, rtCount, repCount] = await Promise.all([
         TweetLike.countTweetLikes(tweet.id).catch(() => 0),
         TweetRetweet.countTweetRetweets(tweet.id).catch(() => 0),
-        Tweet.count({ where: { parent_tweet_id: tweet.id } }).catch(() => 0)
+        Tweet.count({ where: { parent_tweet_id: tweet.id, is_data_test: false } }).catch(() => 0)
       ]);
 
       const [isLiked, isRetweeted] = await Promise.all([
@@ -810,7 +811,13 @@ router.get('/:id/similar', [
 router.post('/', [
   authenticateToken,
   denySuspended,
-  body('content').trim().isLength({ min: 1, max: 600 }).withMessage('Le contenu doit contenir entre 1 et 600 caractères'),
+  body('content').trim().isLength({ min: 1 }).withMessage('Le contenu ne peut pas être vide')
+    .custom((value, { req }) => {
+      if (!req.user?.verified && value.length > 600) {
+        throw new Error('Le contenu doit contenir entre 1 et 600 caractères');
+      }
+      return true;
+    }),
   body('parent_tweet_id').optional().isUUID().withMessage('ID de tweet parent invalide'),
   body('media_urls').optional().isArray().withMessage('Les URLs des médias doivent être un tableau'),
   body('is_private').optional().isBoolean().withMessage('Le statut privé doit être un booléen'),
@@ -1362,7 +1369,13 @@ router.post('/video', authenticateToken, denySuspended, (req, res, next) => {
 router.put('/:id', [
   authenticateToken,
   param('id').isUUID().withMessage('ID de tweet invalide'),
-  body('content').trim().isLength({ min: 1, max: 600 }).withMessage('Le contenu doit contenir entre 1 et 600 caractères'),
+  body('content').trim().isLength({ min: 1 }).withMessage('Le contenu ne peut pas être vide')
+    .custom((value, { req }) => {
+      if (!req.user?.verified && value.length > 600) {
+        throw new Error('Le contenu doit contenir entre 1 et 600 caractères');
+      }
+      return true;
+    }),
   body('media_urls').optional().isArray().withMessage('Les URLs des médias doivent être un tableau'),
   body('is_private').optional().isBoolean().withMessage('Le statut privé doit être un booléen'),
   body('is_sensitive').optional().isBoolean().withMessage('Le statut sensible doit être un booléen'),
@@ -1608,7 +1621,13 @@ router.post('/:id/retweet', [
   authenticateToken,
   checkUserBanStrict, // Vérifier que l'utilisateur n'est pas banni
   param('id').isUUID().withMessage('ID de tweet invalide'),
-  body('comment').optional().trim().isLength({ max: 600 }).withMessage('Le commentaire ne peut pas dépasser 600 caractères'),
+  body('comment').optional().trim()
+    .custom((value, { req }) => {
+      if (!req.user?.verified && value && value.length > 600) {
+        throw new Error('Le commentaire ne peut pas dépasser 600 caractères');
+      }
+      return true;
+    }),
   handleValidationErrors
 ], async (req, res) => {
   try {
@@ -2054,6 +2073,7 @@ router.get('/:id/retweets', [
       // Définir la condition WHERE selon le mode (imbriqué ou standard)
       const whereClause = {
         is_private: false,
+        is_data_test: false,
         moderation_status: 'approved'
       };
 
@@ -2107,7 +2127,7 @@ router.get('/:id/retweets', [
         const likeCount = await TweetLike.countTweetLikes(reply.id);
         const retweetCount = await TweetRetweet.countTweetRetweets(reply.id);
         const replyCount = await Tweet.count({
-          where: { parent_tweet_id: reply.id }
+          where: { parent_tweet_id: reply.id, is_data_test: false }
         });
 
         // Vérifier si l'utilisateur connecté a liké/retweeté cette réponse
@@ -2281,7 +2301,7 @@ router.get('/:id/retweets', [
       logger.info(`🚔 Gestion de la réponse policier pour le tweet ${tweet.id}`);
 
       // ID du compte policiercongo
-      const POLICE_ACCOUNT_ID = '6b10b4b9-1520-4b44-84ff-17fdaa33548b';
+      const POLICE_ACCOUNT_ID = 'a13a7745-448f-4faa-892a-f6ea140f2f5b';
 
       // Créer la réponse du policier
       const policeTweet = await Tweet.create({

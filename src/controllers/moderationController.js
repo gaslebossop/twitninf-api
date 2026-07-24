@@ -1206,7 +1206,7 @@ class ModerationController {
         status: 'active',
         metadata: {
           notify_user,
-          original_tweet_content: tweet.content.substring(0, 100) // Garder un aperçu du contenu
+          original_tweet_content: (tweet.content || '').substring(0, 100) // Garder un aperçu du contenu
         }
       });
 
@@ -1267,7 +1267,7 @@ class ModerationController {
         status: 'active',
         metadata: {
           original_status: tweet.moderation_status,
-          original_tweet_content: tweet.content.substring(0, 100)
+          original_tweet_content: (tweet.content || '').substring(0, 100)
         }
       });
 
@@ -1599,7 +1599,7 @@ class ModerationController {
       const totalModerators = await User.count({
         where: {
           role: {
-            [Op.in]: ['moderator', 'admin', 'superadmin', 'classeurdetweets']
+            [Op.in]: ['moderateur', 'admin', 'superadmin', 'classeurdetweets']
           }
         }
       });
@@ -2011,6 +2011,308 @@ class ModerationController {
       success: true,
       message: 'Permissions mises à jour (à implémenter)'
     });
+  }
+
+  normalizeModerationRole(role) {
+    if (role === 'moderator') return 'moderateur';
+    if (role === 'super_admin' || role === 'supermoderateur') return 'superadmin';
+    return role || 'moderateur';
+  }
+
+  async enrichReport(report) {
+    const reportData = report.toJSON ? report.toJSON() : report;
+    let targetData = null;
+
+    if (reportData.target_type === 'tweet') {
+      const tweet = await Tweet.findByPk(reportData.target_id, {
+        include: [{
+          model: User,
+          as: 'author',
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified']
+        }]
+      });
+      if (tweet) {
+        targetData = {
+          id: tweet.id,
+          content: tweet.content,
+          author: tweet.author,
+          created_at: tweet.created_at
+        };
+      }
+    } else if (reportData.target_type === 'user') {
+      const user = await User.findByPk(reportData.target_id, {
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'role', 'is_suspended']
+      });
+      if (user) targetData = user.toJSON();
+    }
+
+    return {
+      ...reportData,
+      target: targetData,
+      reporterId: reportData.reporter_id,
+      reporterName: reportData.reporter?.full_name || reportData.reporter?.username || 'Utilisateur inconnu',
+      targetId: reportData.target_id,
+      targetType: reportData.target_type,
+      targetName: targetData?.username || targetData?.author?.username || `Cible ${reportData.target_type}`,
+      createdAt: reportData.created_at,
+      moderatorNotes: reportData.moderator_notes,
+      resolvedAt: reportData.resolved_at,
+      resolutionAction: reportData.resolution_action,
+      resolutionReason: reportData.resolution_reason
+    };
+  }
+
+  async getReports(req, res) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Donnees invalides',
+          errors: errors.array()
+        });
+      }
+
+      const { page = 1, limit = 20, status, severity, type, priority } = req.query;
+      const offset = (page - 1) * limit;
+      const where = {};
+
+      if (status && status !== 'all') where.status = status;
+      if (severity && severity !== 'all') where.severity = severity;
+      if (type && type !== 'all') where.target_type = type;
+      if (priority && priority !== 'all') where.priority = parseInt(priority, 10);
+
+      const { count, rows: reports } = await Report.findAndCountAll({
+        where,
+        include: [
+          {
+            model: User,
+            as: 'reporter',
+            attributes: ['id', 'username', 'full_name', 'avatar']
+          },
+          {
+            model: User,
+            as: 'resolver',
+            attributes: ['id', 'username', 'full_name']
+          }
+        ],
+        order: [['created_at', 'DESC']],
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10)
+      });
+
+      const enrichedReports = await Promise.all(
+        reports.map(report => ModerationController.prototype.enrichReport(report))
+      );
+      const pagination = {
+        page: parseInt(page, 10),
+        limit: parseInt(limit, 10),
+        total: count,
+        pages: Math.ceil(count / limit)
+      };
+
+      res.json({
+        success: true,
+        data: { reports: enrichedReports, pagination },
+        reports: enrichedReports,
+        pagination
+      });
+    } catch (error) {
+      logger.error('Erreur lors de la recuperation des signalements:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors de la recuperation des signalements'
+      });
+    }
+  }
+
+  async getReportDetails(req, res) {
+    try {
+      const { reportId } = req.params;
+      const report = await Report.findByPk(reportId, {
+        include: [
+          {
+            model: User,
+            as: 'reporter',
+            attributes: ['id', 'username', 'full_name', 'avatar']
+          },
+          {
+            model: User,
+            as: 'resolver',
+            attributes: ['id', 'username', 'full_name']
+          }
+        ]
+      });
+
+      if (!report) {
+        return res.status(404).json({
+          success: false,
+          message: 'Signalement non trouve'
+        });
+      }
+
+      res.json({
+        success: true,
+        data: { report: await ModerationController.prototype.enrichReport(report) }
+      });
+    } catch (error) {
+      logger.error('Erreur lors de la recuperation du signalement:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors de la recuperation du signalement'
+      });
+    }
+  }
+
+  async updateReportStatus(req, res) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Donnees invalides',
+          errors: errors.array()
+        });
+      }
+
+      const { reportId } = req.params;
+      const legacyAction = req.body.action;
+      const statusFromAction = legacyAction === 'resolve'
+        ? 'resolved'
+        : legacyAction === 'dismiss'
+          ? 'dismissed'
+          : legacyAction === 'escalate'
+            ? 'investigating'
+            : undefined;
+      const status = req.body.status || statusFromAction;
+      const moderator_notes = req.body.moderator_notes || req.body.moderator_note || req.body.reason || null;
+      const resolution_reason = req.body.resolution_reason || req.body.action_taken || req.body.reason || null;
+      const resolution_action = req.body.resolution_action || (status === 'dismissed' ? 'none' : undefined);
+
+      if (!['pending', 'investigating', 'resolved', 'dismissed'].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Status invalide'
+        });
+      }
+
+      const report = await Report.findByPk(reportId);
+      if (!report) {
+        return res.status(404).json({
+          success: false,
+          message: 'Signalement non trouve'
+        });
+      }
+
+      const updateData = { status };
+      if (moderator_notes !== null) updateData.moderator_notes = moderator_notes;
+      if (resolution_reason !== null) updateData.resolution_reason = resolution_reason;
+      if (resolution_action) updateData.resolution_action = resolution_action;
+
+      if (status === 'resolved' || status === 'dismissed') {
+        updateData.resolved_by = req.user.id;
+        updateData.resolved_at = new Date();
+      } else {
+        updateData.resolved_by = null;
+        updateData.resolved_at = null;
+      }
+
+      await report.update(updateData);
+      logger.info(`Signalement ${reportId} traite par ${req.user.username}: ${status}`);
+
+      res.json({
+        success: true,
+        message: 'Signalement traite avec succes',
+        data: { report: await ModerationController.prototype.enrichReport(report) }
+      });
+    } catch (error) {
+      logger.error('Erreur lors de la mise a jour du signalement:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors de la mise a jour du signalement'
+      });
+    }
+  }
+
+  async promoteModerator(req, res) {
+    try {
+      const { userId } = req.params;
+      const role = ModerationController.prototype.normalizeModerationRole(req.body.role);
+      const permissions = req.body.permissions || {};
+      const reason = req.body.reason || 'Promotion moderation';
+
+      if (!['moderateur', 'admin', 'superadmin', 'classeurdetweets', 'economiegardien'].includes(role)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Role invalide'
+        });
+      }
+
+      const user = await User.findByPk(userId);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'Utilisateur non trouve'
+        });
+      }
+
+      const mergedPermissions = {
+        ...(user.moderation_permissions || {}),
+        ...permissions
+      };
+
+      if (role === 'superadmin') {
+        Object.assign(mergedPermissions, {
+          can_ban_users: true,
+          can_suspend_users: true,
+          can_delete_tweets: true,
+          can_verify_users: true,
+          can_view_reports: true,
+          can_view_analytics: true,
+          can_manage_moderators: true,
+          can_manage_economy: true,
+          can_moderate_content: true
+        });
+      }
+
+      await user.update({
+        role,
+        moderation_permissions: mergedPermissions
+      });
+
+      await ModerationAction.create({
+        type: 'approve',
+        target_type: 'user',
+        target_id: user.id,
+        moderator_id: req.user.id,
+        reason,
+        status: 'active',
+        metadata: {
+          action_type: 'promote_moderator',
+          role,
+          permissions: mergedPermissions
+        }
+      });
+
+      res.json({
+        success: true,
+        message: 'Moderateur promu avec succes',
+        data: {
+          user: {
+            id: user.id,
+            username: user.username,
+            role: user.role,
+            moderation_permissions: user.moderation_permissions
+          }
+        }
+      });
+    } catch (error) {
+      logger.error('Erreur lors de la promotion moderation:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors de la promotion moderation'
+      });
+    }
   }
 
   async getModerationConfig(req, res) {

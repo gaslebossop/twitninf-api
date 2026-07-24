@@ -337,14 +337,12 @@ async function processPendingTweet(tweetId, tweetContent, authorUsername, isRepl
      logger.info(`   - Raison: ${geminiResult.reason}`);
      logger.info(`   - Score: ${geminiResult.score}`);
     
-    // 2. Vérification mention @policiercongo
+    // 2. Réponse auto sur mention @policiercongo : DÉSACTIVÉ.
+    // Ce répondeur legacy (prompt Gemini générique, hors personnalité/mémoire) répondait
+    // avant le pipeline PolicierCongoV2 (Claude Code) et bloquait ensuite ce dernier
+    // ("déjà répondu"). Les mentions sont désormais traitées uniquement par PolicierCongoV2.
     let policeResponse = null;
-    if (tweetContent.toLowerCase().includes('@policiercongo')) {
-      logger.info(`🚔 Mention @policiercongo détectée dans tweet ${tweetId}`);
-      policeResponse = await generatePoliceResponse(tweetContent, authorUsername);
-      logger.info(`✅ Réponse policier générée pour tweet ${tweetId}: ${policeResponse.success ? 'succès' : 'échec'}`);
-    }
-    
+
          // Déterminer le statut de modération
          let moderationStatus;
          let moderationReason;

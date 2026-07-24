@@ -61,6 +61,23 @@ async function fetchTweetsByIds(tweetIds, userId) {
       t.mentions,
       t.tweet_type,
       t.original_tweet_id,
+      -- Tweet d'origine (les retweets purs ont volontairement content = '')
+      ot.id          AS original_id,
+      ot.content     AS original_content,
+      ot.created_at  AS original_created_at,
+      ot.is_retweet  AS original_is_retweet,
+      ot.is_quote    AS original_is_quote,
+      ot.parent_tweet_id AS original_parent_tweet_id,
+      ot.media_urls  AS original_media_urls,
+      ot.hashtags    AS original_hashtags,
+      ot.mentions    AS original_mentions,
+      ot.tweet_type  AS original_tweet_type,
+      ot.original_tweet_id AS original_original_tweet_id,
+      -- Tweet parent (pour les réponses recommandées : affichées avec leur contexte)
+      pt.id          AS parent_id,
+      pt.content     AS parent_content,
+      pt.created_at  AS parent_created_at,
+      pt.media_urls  AS parent_media_urls,
       -- Auteur
       u.id          AS author_id,
       u.username    AS author_username,
@@ -69,6 +86,22 @@ async function fetchTweetsByIds(tweetIds, userId) {
       u.verified    AS author_verified,
       u.verification_style AS author_verification_style,
       u.premium     AS author_premium,
+      -- Auteur du tweet d'origine
+      ou.id          AS original_author_id,
+      ou.username    AS original_author_username,
+      ou.full_name   AS original_author_full_name,
+      ou.avatar      AS original_author_avatar,
+      ou.verified    AS original_author_verified,
+      ou.verification_style AS original_author_verification_style,
+      ou.premium     AS original_author_premium,
+      -- Auteur du tweet parent
+      pu.id          AS parent_author_id,
+      pu.username    AS parent_author_username,
+      pu.full_name   AS parent_author_full_name,
+      pu.avatar      AS parent_author_avatar,
+      pu.verified    AS parent_author_verified,
+      pu.verification_style AS parent_author_verification_style,
+      pu.premium     AS parent_author_premium,
       -- Stats agrégées
       COALESCE((SELECT COUNT(*) FROM tweet_likes    WHERE tweet_id = t.id), 0) AS likes_count,
       COALESCE((SELECT COUNT(*) FROM tweet_retweets WHERE tweet_id = t.id), 0) AS retweets_count,
@@ -79,8 +112,22 @@ async function fetchTweetsByIds(tweetIds, userId) {
       EXISTS(SELECT 1 FROM tweet_retweets WHERE tweet_id = t.id AND user_id = :userId::uuid) AS is_retweeted
     FROM tweets t
     JOIN users u ON u.id = t.user_id
+    LEFT JOIN tweets ot
+      ON ot.id = t.original_tweet_id
+      AND ot.deleted_at IS NULL
+      AND ot.moderation_status = 'approved'
+      AND ot.is_private = false
+    LEFT JOIN users ou ON ou.id = ot.user_id AND ou.is_active = true
+    LEFT JOIN tweets pt
+      ON pt.id = t.parent_tweet_id
+      AND pt.deleted_at IS NULL
+      AND pt.moderation_status = 'approved'
+      AND pt.is_private = false
+    LEFT JOIN users pu ON pu.id = pt.user_id AND pu.is_active = true
     WHERE t.id IN (${idsStr})
       AND t.deleted_at IS NULL
+      AND t.moderation_status = 'approved'
+      AND t.is_private = false
   `, {
     replacements: { userId },
     type: QueryTypes.SELECT,
@@ -97,6 +144,66 @@ async function fetchTweetsByIds(tweetIds, userId) {
   for (const id of tweetIds) {
     const row = byId[id];
     if (!row) continue;
+
+    const isRetweet = Boolean(row.is_retweet) || row.tweet_type === 'retweet';
+    const originalTweet = row.original_id && row.original_author_id ? {
+      id: String(row.original_id),
+      content: row.original_content || '',
+      created_at: row.original_created_at,
+      is_retweet: Boolean(row.original_is_retweet),
+      is_quote: Boolean(row.original_is_quote),
+      tweet_type: row.original_tweet_type || 'tweet',
+      parent_tweet_id: row.original_parent_tweet_id || null,
+      original_tweet_id: row.original_original_tweet_id || null,
+      media_urls: row.original_media_urls || [],
+      hashtags: row.original_hashtags || [],
+      mentions: row.original_mentions || [],
+      author: {
+        id: String(row.original_author_id),
+        username: row.original_author_username,
+        full_name: row.original_author_full_name || row.original_author_username,
+        avatar: row.original_author_avatar || null,
+        verified: Boolean(row.original_author_verified),
+        verification_style: row.original_author_verification_style || 'default',
+        premium: Boolean(row.original_author_premium),
+        stats: {},
+      },
+    } : null;
+
+    // Un retweet pur n'a pas de contenu propre : sans original exploitable il
+    // produirait une carte entièrement vide dans les clients.
+    if (isRetweet && !originalTweet) continue;
+    if (isRetweet && originalTweet?.parent_tweet_id) continue;
+
+    const isReply = Boolean(row.parent_tweet_id);
+    const parentTweet = row.parent_id && row.parent_author_id ? {
+      id: String(row.parent_id),
+      content: row.parent_content || '',
+      created_at: row.parent_created_at,
+      media_urls: row.parent_media_urls || [],
+      author: {
+        id: String(row.parent_author_id),
+        username: row.parent_author_username,
+        full_name: row.parent_author_full_name || row.parent_author_username,
+        avatar: row.parent_author_avatar || null,
+        verified: Boolean(row.parent_author_verified),
+        verification_style: row.parent_author_verification_style || 'default',
+        premium: Boolean(row.parent_author_premium),
+        stats: {},
+      },
+    } : null;
+    // Une réponse dont le parent est supprimé/privé/non modéré n'a pas de
+    // contexte affichable : elle flotterait sans ancrage dans le fil.
+    if (isReply && !parentTweet) continue;
+
+    const ownMedia = Array.isArray(row.media_urls) ? row.media_urls : [];
+    const originalMedia = Array.isArray(originalTweet?.media_urls) ? originalTweet.media_urls : [];
+    const hasRenderableContent = Boolean(String(row.content || '').trim())
+      || ownMedia.length > 0
+      || Boolean(String(originalTweet?.content || '').trim())
+      || originalMedia.length > 0;
+    if (!hasRenderableContent) continue;
+
     tweets.push({
       id: String(row.id),
       content: row.content || '',
@@ -106,6 +213,8 @@ async function fetchTweetsByIds(tweetIds, userId) {
       tweet_type: row.tweet_type || 'tweet',
       parent_tweet_id: row.parent_tweet_id || null,
       original_tweet_id: row.original_tweet_id || null,
+      originalTweet,
+      parentTweet,
       media_urls: row.media_urls || [],
       hashtags: row.hashtags || [],
       mentions: row.mentions || [],
@@ -132,7 +241,29 @@ async function fetchTweetsByIds(tweetIds, userId) {
     });
   }
 
-  return tweets;
+  return spaceOutReplies(tweets, 4);
+}
+
+/**
+ * Réétale les réponses dans le fil pour qu'il n'y en ait jamais plus d'une
+ * par bloc de `minGap` tweets (une réponse tous les 4 tweets maximum), tout
+ * en conservant l'ordre relatif du scoring Rust pour le reste du fil.
+ */
+function spaceOutReplies(tweets, minGap = 4) {
+  const others = tweets.filter(tweet => !tweet.parent_tweet_id);
+  const replies = tweets.filter(tweet => tweet.parent_tweet_id);
+  if (!replies.length) return others;
+
+  const merged = [];
+  let replyIndex = 0;
+  for (let i = 0; i < others.length; i++) {
+    merged.push(others[i]);
+    if ((i + 1) % minGap === 0 && replyIndex < replies.length) {
+      merged.push(replies[replyIndex++]);
+    }
+  }
+  while (replyIndex < replies.length) merged.push(replies[replyIndex++]);
+  return merged;
 }
 
 /**
@@ -188,18 +319,40 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
         limit: limitInt,
         offset: offsetInt,
       });
+      const recommendations = (fallbackResult.recommendations || []).filter(recommendation => {
+        const tweet = recommendation?.tweet || recommendation;
+        const type = String(tweet?.tweet_type || tweet?.type || '').toLowerCase();
+        const original = tweet?.originalTweet || tweet?.original_tweet || null;
+        const isRetweet = Boolean(tweet?.is_retweet) || type === 'retweet';
+        const ownMedia = normalizeMediaList(tweet?.media_urls, tweet?.media_url, tweet?.image_url);
+        const originalMedia = normalizeMediaList(original?.media_urls, original?.media_url, original?.image_url);
+        const renderable = Boolean(String(tweet?.content || '').trim())
+          || ownMedia.length > 0
+          || Boolean(String(original?.content || '').trim())
+          || originalMedia.length > 0;
+
+        // Le moteur de secours ne sait pas vérifier "suivi ou plus de likes
+        // que le parent" (pas d'accès au graphe social ici) : par prudence il
+        // exclut les réponses plutôt que de les recommander sans filtre.
+        return tweet?.parent_tweet_id == null
+          && tweet?.parentTweetId == null
+          && type !== 'reply'
+          && type !== 'comment'
+          && (!isRetweet || (original && original?.parent_tweet_id == null))
+          && renderable;
+      });
 
       return res.json({
         success: true,
         engine: 'js-progressive-fallback',
         data: {
-          recommendations: fallbackResult.recommendations || [],
-          count: fallbackResult.recommendations?.length || 0,
+          recommendations,
+          count: recommendations.length,
           pagination: {
             limit: limitInt,
             offset: offsetInt,
             hasMore: false,
-            total: fallbackResult.recommendations?.length || 0,
+            total: recommendations.length,
           },
         },
       });
@@ -303,3 +456,22 @@ router.get('/health', authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
+
+function normalizeMediaList(...values) {
+  const result = [];
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      result.push(...value.filter(Boolean));
+      continue;
+    }
+    if (typeof value !== 'string' || !value.trim()) continue;
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) result.push(...parsed.filter(Boolean));
+      else result.push(value);
+    } catch {
+      result.push(value);
+    }
+  }
+  return result;
+}
