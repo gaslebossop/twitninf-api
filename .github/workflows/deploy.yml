@@ -140,25 +140,43 @@ jobs:
           VPS_PATH: ${{ secrets.VPS_PATH }}
         run: |
           set -euo pipefail
+          VPS_USER=$(printf '%s' "$VPS_USER" | tr -d '[:space:]')
+          VPS_HOST=$(printf '%s' "$VPS_HOST" | tr -d '[:space:]')
+          VPS_PATH=$(printf '%s' "$VPS_PATH" | tr -d '[:space:]')
+          VPS_PATH=${VPS_PATH%/}
+
           # Filet de securite : une archive de l'arbre courant AVANT toute
           # ecriture, pour pouvoir revenir en arriere a la main si le
           # deploiement casse quelque chose. Les medias et node_modules en
           # sont exclus (volumineux, et de toute facon jamais ecrases).
+          #
+          # Aucun `|| true` ici, volontairement. La premiere version en avait
+          # un : quand tar a echoue sur un chemin invalide, il a produit une
+          # archive de 20 octets contenant zero fichier, sans que rien ne le
+          # signale, et le deploiement a continue. Un filet muet et vide est
+          # pire que pas de filet.
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
             "${VPS_USER}@${VPS_HOST}" bash -s <<EOF
           set -euo pipefail
-          BACKUP_DIR="/home/\$(whoami)/deploy-backups"
+          test -d "${VPS_PATH}" || { echo "Repertoire introuvable : ${VPS_PATH}" >&2; exit 1; }
+          BACKUP_DIR="\$HOME/deploy-backups"
           mkdir -p "\$BACKUP_DIR"
-          STAMP=\$(date +%Y%m%d-%H%M%S)
-          tar -czf "\$BACKUP_DIR/api-\$STAMP.tar.gz" \
+          ARCHIVE="\$BACKUP_DIR/api-\$(date +%Y%m%d-%H%M%S).tar.gz"
+          tar -czf "\$ARCHIVE" \
             --exclude=node_modules \
             --exclude=storage \
             --exclude=src/public/avatars \
-            -C "${VPS_PATH}" . 2>/dev/null || true
-          echo "Sauvegarde : \$BACKUP_DIR/api-\$STAMP.tar.gz"
+            -C "${VPS_PATH}" .
+          # Une archive vide sort de tar sans erreur : on compte les entrees.
+          COUNT=\$(tar -tzf "\$ARCHIVE" | wc -l)
+          echo "Sauvegarde : \$ARCHIVE (\$COUNT entrees)"
+          if [ "\$COUNT" -lt 50 ]; then
+            echo "Archive anormalement vide — deploiement interrompu." >&2
+            exit 1
+          fi
           # On ne garde que les cinq dernieres, pour ne pas remplir le disque.
           ls -1t "\$BACKUP_DIR"/api-*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
-          ls -lh "\$BACKUP_DIR" | tail -6
+          ls -lh "\$BACKUP_DIR"/api-*.tar.gz | tail -5
           EOF
 
       - name: Synchroniser le code
@@ -168,6 +186,19 @@ jobs:
           VPS_PATH: ${{ secrets.VPS_PATH }}
         run: |
           set -euo pipefail
+          # Un espace, un retour a la ligne ou un CR en fin de secret suffit a
+          # rendre le chemin distant invalide : rsync tente alors de creer un
+          # repertoire au nom errone et echoue sur « No such file or
+          # directory », alors que la vraie cible existe. On nettoie.
+          VPS_USER=$(printf '%s' "$VPS_USER" | tr -d '[:space:]')
+          VPS_HOST=$(printf '%s' "$VPS_HOST" | tr -d '[:space:]')
+          VPS_PATH=$(printf '%s' "$VPS_PATH" | tr -d '[:space:]')
+          VPS_PATH=${VPS_PATH%/}
+
+          # La cible doit exister AVANT rsync : sinon il essaie de la creer et
+          # masque une erreur de configuration derriere une erreur d'IO.
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes             "${VPS_USER}@${VPS_HOST}"             "test -d '${VPS_PATH}' || { echo \"Repertoire cible introuvable : ${VPS_PATH}\" >&2; exit 1; }"
+
           rsync -az --human-readable \
             -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes" \
             --exclude='.git/' \
