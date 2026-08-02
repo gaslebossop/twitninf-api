@@ -1,0 +1,138 @@
+name: Deploy API
+
+# Déploiement automatique de l'API sur le VPS à chaque push sur `main`.
+#
+# Points sensibles, tous vérifiés dans le code de l'app avant d'écrire ceci :
+#
+#  - Les médias uploadés par les utilisateurs vivent DANS l'arbre déployé :
+#    `src/public/avatars/` (servi par /static/avatars) et `storage/` (servi
+#    par /storage, voir src/server.js). Sept avatars de test sont en plus
+#    suivis par git. Une synchro naïve de tout l'arbre écraserait donc les
+#    avatars de production par ceux du dépôt. Ces deux dossiers sont exclus,
+#    et `rsync` tourne SANS `--delete` : ce qui existe sur le VPS et pas dans
+#    le dépôt n'est jamais supprimé.
+#
+#  - `.env` n'est pas dans le dépôt (gitignore) et ne doit jamais être
+#    écrasé : il est exclu explicitement.
+#
+#  - `package-lock.json` est gitignoré, donc absent du dépôt : `npm ci` ne
+#    peut pas fonctionner. On utilise `npm install --omit=dev`.
+#
+#  - pm2 est la source de vérité, PAS systemd. Un service systemd
+#    `twitninf-api.service` existe encore sur le VPS mais est stoppé : le
+#    démarrer replante en boucle sur EADDRINUSE (même port 3001). On utilise
+#    donc uniquement `pm2 restart`.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Deux déploiements en parallèle écriraient dans le même répertoire et
+# redémarreraient pm2 en même temps. On sérialise, sans annuler celui qui
+# tourne déjà : l'interrompre laisserait l'arbre à moitié synchronisé.
+concurrency:
+  group: deploy-api-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configurer la clé SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_KEY:-}" ]; then
+            echo "::error::Secret VPS_SSH_KEY absent. Voir l'en-tete de ce fichier."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # Empreinte epinglee si elle est fournie : c'est la seule facon de
+          # se premunir d'un homme du milieu. A defaut, on la releve au vol
+          # (confiance a la premiere connexion, plus faible mais utilisable).
+          if [ -n "${KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "::warning::VPS_KNOWN_HOSTS absent — empreinte relevee au vol (ssh-keyscan)."
+            ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Synchroniser le code
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PATH: ${{ secrets.VPS_PATH }}
+        run: |
+          set -euo pipefail
+          rsync -az --human-readable \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes" \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='node_modules/' \
+            --exclude='.env' \
+            --exclude='*.log' \
+            --exclude='src/public/avatars/' \
+            --exclude='storage/' \
+            --exclude='tmp/' \
+            --exclude='reports/' \
+            --exclude='.task-cache/' \
+            ./ "${VPS_USER}@${VPS_HOST}:${VPS_PATH}/"
+
+      - name: Installer les dépendances et redémarrer
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PATH: ${{ secrets.VPS_PATH }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            "${VPS_USER}@${VPS_HOST}" bash -s <<EOF
+          set -euo pipefail
+          cd "${VPS_PATH}"
+          # Pas de 'npm ci' : package-lock.json est gitignore, donc absent.
+          npm install --omit=dev --no-audit --no-fund
+          pm2 restart twitninf-api --update-env
+          pm2 save
+          EOF
+
+      - name: Vérifier que l'API répond
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          # Un 'pm2 restart' rend la main avant que le process ecoute. On
+          # laisse jusqu'a 60 s, puis on echoue franchement : un deploiement
+          # qui casse la prod ne doit pas apparaitre vert.
+          for i in $(seq 1 12); do
+            code=$(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+              "${VPS_USER}@${VPS_HOST}" \
+              "curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/api/health || true")
+            echo "Tentative $i/12 — /api/health => ${code:-aucune reponse}"
+            if [ "$code" = "200" ]; then
+              echo "API en ligne."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::L'API ne repond pas sur /api/health apres le redemarrage."
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            "${VPS_USER}@${VPS_HOST}" "pm2 list; pm2 logs twitninf-api --lines 40 --nostream" || true
+          exit 1
+
+      - name: Nettoyer la clé
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
