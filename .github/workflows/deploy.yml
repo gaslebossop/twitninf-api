@@ -41,7 +41,11 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # Historique complet : le garde-fou anti-retour-arriere plus bas doit
+      # pouvoir comparer le commit deploye et le commit courant.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Configurer la clé SSH
         env:
@@ -69,6 +73,77 @@ jobs:
             ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
           fi
           chmod 600 ~/.ssh/known_hosts
+
+      - name: Refuser un retour à une version antérieure
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PATH: ${{ secrets.VPS_PATH }}
+        run: |
+          set -euo pipefail
+          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST}"
+
+          DEPLOYED=$($SSH "cat '${VPS_PATH}/.deployed_sha' 2>/dev/null || true" | tr -d '[:space:]')
+
+          if [ -z "$DEPLOYED" ]; then
+            echo "::warning::Aucun .deployed_sha sur le VPS — premier deploiement par ce workflow."
+            echo "Le contenu actuel du VPS n'a pas ete pose par ce workflow : il n'y a aucun"
+            echo "moyen de savoir a quel commit il correspond. Verifie que le commit ci-dessous"
+            echo "est bien plus recent que ce qui tourne en prod."
+            echo "Commit a deployer : ${GITHUB_SHA}"
+            exit 0
+          fi
+
+          echo "Commit deploye sur le VPS : $DEPLOYED"
+          echo "Commit a deployer         : $GITHUB_SHA"
+
+          if [ "$DEPLOYED" = "$GITHUB_SHA" ]; then
+            echo "Identique — rien a faire, mais on redeploie quand meme (idempotent)."
+            exit 0
+          fi
+
+          if ! git cat-file -e "${DEPLOYED}^{commit}" 2>/dev/null; then
+            echo "::warning::Le commit deploye est inconnu de ce depot — comparaison impossible."
+            exit 0
+          fi
+
+          # `--is-ancestor A B` est vrai si A precede B : deployer un commit
+          # qui precede celui deja en prod, c'est un retour arriere.
+          if git merge-base --is-ancestor "$GITHUB_SHA" "$DEPLOYED"; then
+            echo "::error::Retour arriere refuse : ${GITHUB_SHA} precede ${DEPLOYED} deja en production."
+            echo "Deployer ce commit remettrait une version anterieure sur le VPS."
+            exit 1
+          fi
+
+          echo "Le commit est posterieur a celui en production — deploiement autorise."
+
+      - name: Sauvegarder la version en place sur le VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PATH: ${{ secrets.VPS_PATH }}
+        run: |
+          set -euo pipefail
+          # Filet de securite : une archive de l'arbre courant AVANT toute
+          # ecriture, pour pouvoir revenir en arriere a la main si le
+          # deploiement casse quelque chose. Les medias et node_modules en
+          # sont exclus (volumineux, et de toute facon jamais ecrases).
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            "${VPS_USER}@${VPS_HOST}" bash -s <<EOF
+          set -euo pipefail
+          BACKUP_DIR="/home/\$(whoami)/deploy-backups"
+          mkdir -p "\$BACKUP_DIR"
+          STAMP=\$(date +%Y%m%d-%H%M%S)
+          tar -czf "\$BACKUP_DIR/api-\$STAMP.tar.gz" \
+            --exclude=node_modules \
+            --exclude=storage \
+            --exclude=src/public/avatars \
+            -C "${VPS_PATH}" . 2>/dev/null || true
+          echo "Sauvegarde : \$BACKUP_DIR/api-\$STAMP.tar.gz"
+          # On ne garde que les cinq dernieres, pour ne pas remplir le disque.
+          ls -1t "\$BACKUP_DIR"/api-*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
+          ls -lh "\$BACKUP_DIR" | tail -6
+          EOF
 
       - name: Synchroniser le code
         env:
@@ -106,6 +181,9 @@ jobs:
           npm install --omit=dev --no-audit --no-fund
           pm2 restart twitninf-api --update-env
           pm2 save
+          # Trace du commit reellement en place : c'est ce que lit le
+          # garde-fou anti-retour-arriere au deploiement suivant.
+          echo "${GITHUB_SHA}" > "${VPS_PATH}/.deployed_sha"
           EOF
 
       - name: Vérifier que l'API répond
