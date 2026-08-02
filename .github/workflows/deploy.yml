@@ -97,7 +97,7 @@ jobs:
           VPS_PATH: ${{ secrets.VPS_PATH }}
         run: |
           set -euo pipefail
-          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes ${VPS_USER}@${VPS_HOST}"
+          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 ${VPS_USER}@${VPS_HOST}"
 
           DEPLOYED=$($SSH "cat '${VPS_PATH}/.deployed_sha' 2>/dev/null || true" | tr -d '[:space:]')
 
@@ -155,7 +155,7 @@ jobs:
           # archive de 20 octets contenant zero fichier, sans que rien ne le
           # signale, et le deploiement a continue. Un filet muet et vide est
           # pire que pas de filet.
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "${VPS_USER}@${VPS_HOST}" bash -s <<EOF
           set -euo pipefail
           test -d "${VPS_PATH}" || { echo "Repertoire introuvable : ${VPS_PATH}" >&2; exit 1; }
@@ -197,17 +197,17 @@ jobs:
 
           # La cible doit exister AVANT rsync : sinon il essaie de la creer et
           # masque une erreur de configuration derriere une erreur d'IO.
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes             "${VPS_USER}@${VPS_HOST}"             "test -d '${VPS_PATH}' || { echo \"Repertoire cible introuvable : ${VPS_PATH}\" >&2; exit 1; }"
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20             "${VPS_USER}@${VPS_HOST}"             "test -d '${VPS_PATH}' || { echo \"Repertoire cible introuvable : ${VPS_PATH}\" >&2; exit 1; }"
 
           rsync -az --human-readable \
-            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes" \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20" \
             --exclude='.git/' \
             --exclude='.github/' \
             --exclude='node_modules/' \
             --exclude='.env' \
             --exclude='*.log' \
             --exclude='src/public/avatars/' \
-            --exclude='storage/' \
+            --exclude='storage/' \n            --exclude='core.*' \
             --exclude='tmp/' \
             --exclude='reports/' \
             --exclude='.task-cache/' \
@@ -220,7 +220,7 @@ jobs:
           VPS_PATH: ${{ secrets.VPS_PATH }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "${VPS_USER}@${VPS_HOST}" bash -s <<EOF
           set -euo pipefail
           cd "${VPS_PATH}"
@@ -243,7 +243,7 @@ jobs:
           # laisse jusqu'a 60 s, puis on echoue franchement : un deploiement
           # qui casse la prod ne doit pas apparaitre vert.
           for i in $(seq 1 12); do
-            code=$(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            code=$(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
               "${VPS_USER}@${VPS_HOST}" \
               "curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/api/health || true")
             echo "Tentative $i/12 — /api/health => ${code:-aucune reponse}"
@@ -254,7 +254,7 @@ jobs:
             sleep 5
           done
           echo "::error::L'API ne repond pas sur /api/health apres le redemarrage."
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "${VPS_USER}@${VPS_HOST}" "pm2 list; pm2 logs twitninf-api --lines 40 --nostream" || true
           exit 1
 
