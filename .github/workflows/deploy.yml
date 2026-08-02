@@ -161,7 +161,8 @@ jobs:
             --exclude='.env' \
             --exclude='*.log' \
             --exclude='src/public/avatars/' \
-            --exclude='storage/' \n            --exclude='core.*' \
+            --exclude='storage/' \
+            --exclude='core.*' \
             --exclude='tmp/' \
             --exclude='reports/' \
             --exclude='.task-cache/' \
