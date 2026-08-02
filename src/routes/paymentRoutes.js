@@ -1,11 +1,12 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { VirtualCurrency, UserWallet, Transaction } = require('../models');
+const { VirtualCurrency, UserWallet, Transaction, sequelize } = require('../models');
 const crypto = require('crypto');
 const logger = require('../utils/logger');
 const authMiddleware = require('../middleware/authMiddleware');
 
 const { checkTransaction } = require('../middleware/fraudMiddleware');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 
 const router = express.Router();
 
@@ -22,6 +23,7 @@ router.post('/apple-pay', [
   body('paymentMethod').isString().notEmpty().withMessage('Méthode de paiement requise'),
   body('deviceToken').optional().isString().withMessage('Token de dispositif invalide')
 ], async (req, res) => {
+  let dbTransaction = null;
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -49,16 +51,21 @@ router.post('/apple-pay', [
 
     // Simuler un délai de traitement
     await new Promise(resolve => setTimeout(resolve, 2000));
+    dbTransaction = await sequelize.transaction();
 
     // Calculer le montant de cryptomonnaie à recevoir
     const ninfiAmount = parseFloat(amount) / parseFloat(currency.currentPrice);
 
     // Récupérer le portefeuille
     let wallet = await UserWallet.findOne({
-      where: { userId, currencyId }
+      where: { userId, currencyId },
+      transaction: dbTransaction,
+      lock: dbTransaction.LOCK.UPDATE
     });
 
     if (!wallet) {
+      await dbTransaction.rollback();
+      dbTransaction = null;
       return res.status(404).json({
         success: false,
         message: 'Portefeuille non trouvé'
@@ -68,6 +75,18 @@ router.post('/apple-pay', [
     // Générer un ID de transaction Apple Pay factice
     const applePayTransactionId = `AP_${crypto.randomBytes(16).toString('hex').toUpperCase()}`;
     const transactionHash = crypto.randomBytes(32).toString('hex');
+    const riskAuthorization = await transactionAuthorizationService.authorize({
+      userId,
+      transactionKind: 'wallet_topup',
+      direction: 'inbound',
+      amount: ninfiAmount,
+      amountEur: Number(amount),
+      currencyId,
+      merchantId: 'twitninf_apple_pay',
+      paymentMethod,
+      itemType: 'virtual_currency',
+      itemId: currencyId
+    });
 
     // Créer la transaction d'achat
     const transaction = await Transaction.create({
@@ -87,10 +106,16 @@ router.post('/apple-pay', [
         deviceToken,
         purchaseAmount: amount,
         exchangeRate: currency.currentPrice,
-        processingTime: '2.1s'
+        processingTime: '2.1s',
+        ...transactionAuthorizationService.riskMetadata(riskAuthorization)
       },
       confirmedAt: new Date()
-    });
+    }, { transaction: dbTransaction });
+    await transactionAuthorizationService.consume(
+      riskAuthorization,
+      transaction.id,
+      dbTransaction
+    );
 
     // Mettre à jour le portefeuille
     const newBalance = parseFloat(wallet.balance) + ninfiAmount;
@@ -99,17 +124,20 @@ router.post('/apple-pay', [
     await wallet.update({
       balance: newBalance.toFixed(8),
       totalEarned: newTotalEarned.toFixed(8)
-    });
+    }, { transaction: dbTransaction });
 
     // Mettre à jour les statistiques de la cryptomonnaie
     const totalBalance = await UserWallet.sum('balance', {
-      where: { currencyId }
+      where: { currencyId },
+      transaction: dbTransaction
     });
 
     await currency.update({
       circulatingSupply: totalBalance || 0,
       marketCap: (totalBalance || 0) * currency.currentPrice
-    });
+    }, { transaction: dbTransaction });
+    await dbTransaction.commit();
+    dbTransaction = null;
 
     const response = {
       success: true,
@@ -147,10 +175,15 @@ router.post('/apple-pay', [
     res.json(response);
 
   } catch (error) {
+    if (dbTransaction && !dbTransaction.finished) {
+      await dbTransaction.rollback();
+    }
     logger.error('❌ Erreur lors du paiement Apple Pay:', error);
-    res.status(500).json({
+    const isRiskError = transactionAuthorizationService.constructor.isRiskError(error);
+    res.status(isRiskError ? error.httpStatus : 500).json({
       success: false,
-      message: 'Erreur lors du traitement du paiement'
+      message: isRiskError ? error.message : 'Erreur lors du traitement du paiement',
+      code: isRiskError ? error.code : undefined
     });
   }
 });

@@ -150,7 +150,7 @@ router.get('/:id', [
         {
           model: User,
           as: 'sender',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium']
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'profile_customization']
         },
         {
           model: Tweet,
@@ -159,7 +159,7 @@ router.get('/:id', [
           include: [{
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'profile_customization']
           }]
         }
       ]

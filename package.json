@@ -18,7 +18,8 @@
     "db:test": "node test-db-node.js",
     "test:routes": "node test-routes.js",
     "test:tweets": "node test-tweets-system.js",
-    "test:full": "npm run test:routes && npm run test:tweets"
+    "test:full": "npm run test:routes && npm run test:tweets",
+    "test:fraud-load": "node scripts/simulateNfFraudLoad.js"
   },
   "keywords": [
     "twitninf",

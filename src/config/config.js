@@ -11,7 +11,7 @@ const config = {
     env: process.env.NODE_ENV || 'development',
     cors: {
       origin: process.env.CORS_ORIGIN || '*',
-      credentials: true
+      credentials: false
     }
   },
 
@@ -21,7 +21,7 @@ const config = {
     port: parseInt(process.env.DB_PORT, 10) || 5432,
     database: process.env.DB_NAME || 'twitninf',
     username: process.env.DB_USER || 'admin',
-    password: process.env.DB_PASSWORD || 'myytree88',
+    password: process.env.DB_PASSWORD,
     dialect: 'postgres',
     pool: {
       max: parseInt(process.env.DB_POOL_MAX, 10) || 10,
@@ -52,9 +52,14 @@ const config = {
 
   // Configuration JWT
   jwt: {
-    secret: process.env.JWT_SECRET || 'twitninf-super-secret-key-2024',
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d'
+    secret: process.env.JWT_SECRET,
+    // Access token court : il embarque le rôle, le statut premium et la
+    // suspension, qui mettaient jusqu'ici 7 jours à se propager. Le client
+    // le renouvelle de façon transparente via /api/auth/refresh.
+    expiresIn: process.env.JWT_EXPIRES_IN || '1h',
+    // Conservé pour l'ancien generateRefreshToken (déprécié) : la durée de vie
+    // réelle des sessions est SESSION_TTL_MS dans authService.
+    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '180d'
   },
 
   // Configuration de sécurité

@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { UserWallet, Transaction, VirtualCurrency, User, sequelize } = require('../models');
+const { Op } = require('sequelize');
+const { UserWallet, Transaction, VirtualCurrency, User } = require('../models');
 const { authenticateToken } = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
-const crypto = require('crypto');
+const NewEconomyService = require('../services/newEconomyService');
 
 router.use(authenticateToken);
 
@@ -64,8 +65,10 @@ router.get('/transactions', async (req, res) => {
     const userId = req.user.id;
     const { limit = 50, offset = 0, type = null } = req.query;
 
+    // `sequelize.Op` n'existe pas en Sequelize v6 : cette route plantait
+    // systématiquement (500) à chaque appel, `Op` étant undefined.
     const where = {
-      [sequelize.Op.or]: [
+      [Op.or]: [
         { toUserId: userId },
         { fromUserId: userId },
       ],
@@ -130,49 +133,13 @@ router.post('/transfer', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Montant invalide' });
     }
 
-    // Vérifier le portefeuille source
-    const fromWallet = await UserWallet.findOne({
-      where: { userId: fromUserId, currencyId },
-    });
-
-    if (!fromWallet || parseFloat(fromWallet.balance) < parseFloat(amount)) {
-      return res.status(400).json({ success: false, message: 'Solde insuffisant' });
-    }
-
-    // Vérifier le portefeuille destinataire
-    let toWallet = await UserWallet.findOne({
-      where: { userId: toUserId, currencyId },
-    });
-
-    if (!toWallet) {
-      return res.status(404).json({ success: false, message: 'Portefeuille destinataire non trouvé' });
-    }
-
-    const transactionHash = crypto.randomBytes(32).toString('hex');
-
-    // Créer la transaction
-    const transaction = await Transaction.create({
-      transactionHash,
+    const result = await NewEconomyService.transferCoins(
       fromUserId,
       toUserId,
       currencyId,
-      amount: parseFloat(amount),
-      type: 'TRANSFER',
-      status: 'COMPLETED',
-      description: description || `Transfer from ${req.user.username}`,
-      confirmedAt: new Date(),
-    });
-
-    // Mettre à jour les portefeuilles
-    await fromWallet.update({
-      balance: (parseFloat(fromWallet.balance) - parseFloat(amount)).toFixed(8),
-      totalSpent: (parseFloat(fromWallet.totalSpent) + parseFloat(amount)).toFixed(8),
-    });
-
-    await toWallet.update({
-      balance: (parseFloat(toWallet.balance) + parseFloat(amount)).toFixed(8),
-      totalEarned: (parseFloat(toWallet.totalEarned) + parseFloat(amount)).toFixed(8),
-    });
+      parseFloat(amount),
+      description || `Transfer from ${req.user.username}`
+    );
 
     logger.info(`💸 Transfer: ${req.user.username} → ${toUserId} | ${amount} ${currencyId}`);
 
@@ -181,18 +148,24 @@ router.post('/transfer', async (req, res) => {
       message: 'Transfert effectué',
       data: {
         transaction: {
-          id: transaction.id,
-          hash: transaction.transactionHash,
+          id: result.tx.id,
+          hash: result.tx.transactionHash,
           amount: parseFloat(amount),
           status: 'COMPLETED',
         },
-        from_balance: parseFloat(fromWallet.balance),
-        to_balance: parseFloat(toWallet.balance),
+        fee: result.fee,
+        net_amount: result.netAmount,
       },
     });
   } catch (error) {
     logger.error('❌ Erreur transfer:', error);
-    res.status(500).json({ success: false, message: 'Erreur serveur' });
+    const riskService = require('../services/transactionAuthorizationService');
+    const isRiskError = riskService.constructor.isRiskError(error);
+    res.status(isRiskError ? error.httpStatus : 500).json({
+      success: false,
+      message: isRiskError ? error.message : 'Erreur serveur',
+      code: isRiskError ? error.code : undefined,
+    });
   }
 });
 

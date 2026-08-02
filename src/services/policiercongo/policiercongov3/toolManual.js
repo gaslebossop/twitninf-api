@@ -9,7 +9,7 @@ Règle générale
 4. Affine la requête suivante à partir de l'observation. Ne répète pas les mêmes arguments.
 5. Pour une écriture, utilise uniquement les identifiants réellement observés. Après l'appel, ne prétends au succès que si success=true.
 
-Mode compte suspendu
+Mode compte suspendu: check_ban_status / appeal_ban / check_appeal_response
 - Si le compte PolicierCongo est suspendu, seuls check_ban_status, appeal_ban et check_appeal_response sont disponibles.
 - Commence par check_ban_status pour lire la raison, la duree restante et savoir si un recours existe deja.
 - Utilise appeal_ban une seule fois par suspension active, avec une raison claire. Si un recours existe deja, utilise check_appeal_response au lieu de retenter.
@@ -124,6 +124,15 @@ send_money
 - Transfert réel et irréversible de TWC/NF vers un autre utilisateur, soumis au second avis croisé (risque destructif). Résous d'abord le destinataire, vérifie ton solde avec get_financial_context : un solde insuffisant fait échouer le transfert. Une commission plateforme est prélevée sur le montant envoyé.
 - Pour justifier un paiement, cite dans reason soit l'accord observable (ex: tweet public), soit l'ID d'un contrat accepté (get_contract pour le relire). Le vérificateur ne voit que ce que tu écris dans reason, pas le fil de conversation ni le contrat automatiquement.
 
+list_community_currencies / get_community_currency
+- list_community_currencies liste toutes les monnaies communautaires (nom, symbole, créateur, prix, capitalisation, offre, ce que tu détiens), triées par capitalisation décroissante. Filtre optionnel par créateur. Point de départ si tu ne connais pas déjà le symbole exact.
+- get_community_currency donne la fiche complète d'UNE monnaie : cours en euros et en NF, variation depuis l'émission, courbe de prix récente (jusqu'à 30 jours), capitalisation, offre émise à la création vs offre réellement en circulation, activité 30 jours (opérations/volume/comptes actifs), principaux détenteurs. Consulte-la avant un trade_community_currency ou pay_currency_holders pour juger si une monnaie est sous/sur-évaluée ou en tendance — ne devine jamais un cours ou une tendance sans l'avoir vérifiée ici.
+
+exchange_nf_eur / trade_community_currency / pay_currency_holders
+- exchange_nf_eur convertit réellement entre ton portefeuille NF et ton portefeuille EUR interne, au cours NF courant (contrairement à convert_nf_eur qui ne fait que calculer). Aucun tiers impliqué, donc pas de second avis, mais l'opération est réelle et irréversible.
+- trade_community_currency achète (direction=buy, tu dépenses NF/EUR) ou vend (direction=sell, tu dépenses la monnaie communautaire) une monnaie émise par un utilisateur, contre NF ou EUR, depuis ton propre portefeuille. Même logique que exchange_nf_eur : aucun tiers, pas de second avis, mais réel et irréversible — un montant important déplace le cours des deux monnaies. Vérifie le cours avec get_community_currency avant un montant important.
+- pay_currency_holders verse un montant fixe (amount_per_holder) à TOUS les détenteurs actuels d'une monnaie communautaire donnée (photo instantanée), en NF, EUR ou une autre monnaie communautaire (payout_currency). Tu es automatiquement exclu de la liste si tu détiens toi-même la monnaie (impossible de se payer soi-même). Plafonné à 300 destinataires par appel — au-delà, réduis la portée plutôt que de contourner la limite. Soumis au second avis croisé comme send_money : justifie la distribution dans reason.
+
 get_contract / accept_contract / refuse_contract
 - Un utilisateur vérifié crée un contrat en DM avec /createcontrat <texte>. Tant qu'il est en attente, tous les messages échangés dans ce DM sont capturés dans le contrat (visibles via get_contract).
 - accept_contract fige le contrat (fin de capture) : il devient un justificatif consultable, notamment pour send_money.
@@ -163,9 +172,10 @@ list_reports / resolve_report / get_moderation_history
 - list_reports lit la file de signalements en attente ou déjà traités. resolve_report la clôt (resolved/dismissed) mais ne sanctionne personne par lui-même : applique d'abord la sanction avec l'outil adapté.
 - get_moderation_history retrouve les actions déjà appliquées à un compte ou un tweet — à consulter avant toute nouvelle décision.
 
-verify_user_directly / unverify_user / approve_verification_request / reject_verification_request
+verify_user_directly / unverify_user / approve_verification_request / reject_verification_request / set_verification_style
 - verify_user_directly accorde le badge sans demande préalable : réservé aux cas évidents. Pour une vraie demande soumise par l'utilisateur, utilise plutôt approve_verification_request après avoir relu son contenu via get_verification_requests(include_form_data=true).
 - reject_verification_request exige une raison compréhensible par la personne (5 caractères minimum).
+- set_verification_style change uniquement le style visuel (default/rose/gray/gold) d'un badge déjà accordé — utile pour un prix de concours (ex. « certification rose »). N'accorde pas le badge lui-même : le compte doit déjà être verified, sinon verify_user_directly d'abord.
 
 get_unban_tickets / process_unban_ticket
 - Les comptes suspendus peuvent soumettre un ticket de recours. process_unban_ticket(decision=approved) lève automatiquement la suspension liée ; rejected ne change rien à son statut.
@@ -177,13 +187,79 @@ set_shadow_visibility / recalculate_user_recommendations
 get_algorithm_config / update_algorithm_config
 - update_algorithm_config change en direct des paramètres du moteur de recommandation pour TOUTE la plateforme. Blast radius maximal, réservé aux ajustements légitimes et documentés. Relis get_algorithm_config avant et après.`;
 
-function manualForTool(name) {
-  const marker = `\n${name}\n`;
-  const start = TOOL_USAGE_MANUAL.indexOf(marker);
-  if (start < 0) return '';
-  const rest = TOOL_USAGE_MANUAL.slice(start + 1);
-  const next = rest.search(/\n[a-z_]+(?: \/ [a-z_]+)*\n/);
-  return next > 0 ? rest.slice(0, next) : rest;
+/**
+ * Découpage du manuel en blocs adressables.
+ *
+ * Le manuel entier pèse ~20 400 caractères pour 84 outils. Injecté en bloc à
+ * chaque prompt, il ne tenait pas dans son budget de section (~12 200) et
+ * finissait coupé en plein milieu d'une phrase : les recettes des derniers
+ * outils (admin/modération) n'arrivaient jamais jusqu'au modèle.
+ *
+ * Un bloc = un paragraphe dont la première ligne est l'en-tête. On en déduit
+ * les outils concernés en repérant les identifiants de cette en-tête. Le
+ * modèle reçoit en permanence le noyau (règle générale) et récupère les
+ * recettes d'un outil précis quand il le demande via `inspect_tools`.
+ */
+const MANUAL_BLOCKS = (() => {
+  const blocks = [];
+  let section = null;
+  let seenToolBlock = false;
+  for (const raw of TOOL_USAGE_MANUAL.split(/\n{2,}/)) {
+    const text = raw.trim();
+    if (!text) continue;
+    const header = text.split('\n')[0];
+    // Un identifiant d'outil contient presque toujours un underscore
+    // (`get_tweet`, `ban_user`…), ce qu'aucun mot de prose française ne fait :
+    // sa présence identifie un en-tête d'outil. Dans un tel en-tête, tous les
+    // mots en minuscules sont alors des noms d'outils — c'est ce qui rattrape
+    // le seul nom sans underscore (`remember`). Les mots parasites d'un
+    // en-tête mixte (« casino actuel: … ») ne correspondent à aucun outil
+    // enregistré, donc ne sélectionnent jamais rien.
+    const underscored = header.match(/[a-z][a-z0-9_]*_[a-z0-9_]+/g) || [];
+    const tools = underscored.length ? (header.match(/[a-z][a-z0-9_]{2,}/g) || []) : [];
+    if (!tools.length) {
+      // En-tête de prose : préambule du manuel (avant tout bloc d'outil) ou
+      // préface d'une famille d'outils (« OUTILS D'ADMINISTRATION… »).
+      if (seenToolBlock) section = { header, text };
+      blocks.push({ header, text, tools: [], section: null, general: true, preamble: !seenToolBlock });
+      continue;
+    }
+    seenToolBlock = true;
+    blocks.push({ header, text, tools, section, general: false, preamble: false });
+  }
+  return blocks;
+})();
+
+/** Noyau toujours présent dans le prompt : titre + règle générale (~800 caractères). */
+const MANUAL_CORE = MANUAL_BLOCKS.filter(block => block.preamble).map(block => block.text).join('\n\n');
+
+/**
+ * Recettes d'usage des outils demandés, avec le préambule de leur section
+ * quand il y en a un (les outils d'administration héritent ainsi de leur
+ * avertissement commun).
+ *
+ * @param {string[]} names noms d'outils
+ * @returns {string} '' si aucun bloc ne concerne ces outils
+ */
+function manualFor(names) {
+  const wanted = new Set((Array.isArray(names) ? names : [names]).filter(Boolean));
+  if (!wanted.size) return '';
+  const parts = [];
+  const seenSections = new Set();
+  for (const block of MANUAL_BLOCKS) {
+    if (block.general || !block.tools.some(tool => wanted.has(tool))) continue;
+    if (block.section && !seenSections.has(block.section.header)) {
+      seenSections.add(block.section.header);
+      parts.push(block.section.text);
+    }
+    parts.push(block.text);
+  }
+  return parts.join('\n\n');
 }
 
-module.exports = { TOOL_USAGE_MANUAL, manualForTool };
+/** Recettes d'un seul outil (alias historique de `manualFor`). */
+function manualForTool(name) {
+  return manualFor([name]);
+}
+
+module.exports = { TOOL_USAGE_MANUAL, MANUAL_CORE, MANUAL_BLOCKS, manualFor, manualForTool };

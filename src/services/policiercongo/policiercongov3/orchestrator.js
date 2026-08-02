@@ -11,6 +11,7 @@ const { ToolPolicy } = require('./policy');
 const { ToolRegistry } = require('./toolRegistry');
 const { registerPlatformTools } = require('./platformTools');
 const { registerAdminModerationTools } = require('./adminModerationTools');
+const { registerIntrospectionTools } = require('./introspectionTools');
 const { ProviderRouter } = require('./provider');
 const { ContextEngine } = require('./contextEngine');
 const { AgentLoop } = require('./agentLoop');
@@ -33,6 +34,7 @@ class PolicierCongoV3Runtime {
     if (!options.tools) {
       registerPlatformTools(this.tools, { models: this.models, memory: this.memory, config: this.config, providerRouter: this.provider });
       registerAdminModerationTools(this.tools, { models: this.models, memory: this.memory, config: this.config });
+      registerIntrospectionTools(this.tools);
     }
     this.contextEngine = options.contextEngine || new ContextEngine({ config: this.config, memory: this.memory, tools: this.tools });
     this.agent = options.agent || new AgentLoop({ config: this.config, provider: this.provider, memory: this.memory, tools: this.tools, contextEngine: this.contextEngine, logger: this.logger });

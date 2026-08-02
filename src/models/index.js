@@ -10,6 +10,9 @@ const TweetRetweet = require('./TweetRetweet');
 const Notification = require('./Notification');
 const UserFollow = require('./UserFollow');
 const Report = require('./Report');
+const CommunityReviewItem = require('./CommunityReviewItem');
+const CommunityReviewVote = require('./CommunityReviewVote');
+const CommunityReviewAssignment = require('./CommunityReviewAssignment');
 const FeedHashtagRuleModule = require('./FeedHashtagRule');
 const ModerationAction = require('./ModerationAction');
 const UserBehaviorData = require('./UserBehaviorData');
@@ -30,14 +33,21 @@ const UserChallenge = require('./UserChallenge');
 const DeveloperAppModule = require('./DeveloperApp');
 const OAuthCodeModule = require('./OAuthCode');
 const OAuthTokenModule = require('./OAuthToken');
+const SessionModule = require('./Session');
 const BotReputation = require('./BotReputation');
 const Conversation = require('./Conversation');
 const ConversationParticipant = require('./ConversationParticipant');
 const Message = require('./Message');
+const MessageReaction = require('./MessageReaction');
 const UnbanTicketModule = require('./UnbanTicket');
 const PolicierCongoContract = require('./PolicierCongoContract');
 const MiningRound = require('./MiningRound');
 const CasinoBet = require('./CasinoBet');
+const Story = require('./Story');
+const StoryView = require('./StoryView');
+const StoryHighlight = require('./StoryHighlight');
+const StoryHighlightItem = require('./StoryHighlightItem');
+const TweetTranslation = require('./TweetTranslation');
 
 // Créer l'instance Sequelize
 const sequelize = new Sequelize(config.database);
@@ -67,6 +77,9 @@ const TransactionModel = Transaction.initTransactionModel(sequelize);
 
 // Initialiser les modèles de modération
 const ReportModel = Report(sequelize);
+const CommunityReviewItemModel = CommunityReviewItem(sequelize);
+const CommunityReviewVoteModel = CommunityReviewVote(sequelize);
+const CommunityReviewAssignmentModel = CommunityReviewAssignment(sequelize);
 const FeedHashtagRuleModel = FeedHashtagRuleModule(sequelize);
 const ModerationActionModel = ModerationAction(sequelize);
 
@@ -87,10 +100,17 @@ const UserChallengeModel = UserChallenge(sequelize);
 const DeveloperApp = DeveloperAppModule(sequelize);
 const OAuthCode = OAuthCodeModule(sequelize);
 const OAuthToken = OAuthTokenModule(sequelize);
+const Session = SessionModule(sequelize);
 BotReputation.initBotReputationModel(sequelize);
 Conversation.initConversationModel(sequelize);
 ConversationParticipant.initConversationParticipantModel(sequelize);
 Message.initMessageModel(sequelize);
+MessageReaction.initMessageReactionModel(sequelize);
+Story.initStoryModel(sequelize);
+StoryView.initStoryViewModel(sequelize);
+StoryHighlight.initStoryHighlightModel(sequelize);
+StoryHighlightItem.initStoryHighlightItemModel(sequelize);
+TweetTranslation.initTweetTranslationModel(sequelize);
 const UnbanTicketModel = UnbanTicketModule(sequelize);
 
 // Définir les associations entre les modèles
@@ -138,10 +158,21 @@ Tweet.hasMany(TweetLike, {
   onDelete: 'CASCADE'
 });
 
-Tweet.hasMany(TweetRetweet, { 
-  foreignKey: 'tweet_id', 
+Tweet.hasMany(TweetRetweet, {
+  foreignKey: 'tweet_id',
   as: 'retweets',
   onDelete: 'CASCADE'
+});
+
+Tweet.hasMany(TweetTranslation, {
+  foreignKey: 'tweet_id',
+  as: 'translations',
+  onDelete: 'CASCADE'
+});
+
+TweetTranslation.belongsTo(Tweet, {
+  foreignKey: 'tweet_id',
+  as: 'tweet'
 });
 
 Tweet.hasMany(Notification, { 
@@ -346,9 +377,20 @@ VirtualCurrencyModel.hasMany(TransactionModel, {
   as: 'transactions'
 });
 
-TransactionModel.belongsTo(VirtualCurrencyModel, { 
-  foreignKey: 'currencyId', 
+TransactionModel.belongsTo(VirtualCurrencyModel, {
+  foreignKey: 'currencyId',
   as: 'currency'
+});
+
+// Monnaies communautaires : NF et EUR gardent creatorId à NULL.
+VirtualCurrencyModel.belongsTo(User, {
+  foreignKey: 'creatorId',
+  as: 'creator'
+});
+
+User.hasMany(VirtualCurrencyModel, {
+  foreignKey: 'creatorId',
+  as: 'createdCurrencies'
 });
 
 User.hasMany(TransactionModel, { 
@@ -605,6 +647,17 @@ OAuthToken.belongsTo(User, {
   as: 'user'
 });
 
+// Sessions de connexion (jetons de rafraîchissement avec rotation)
+User.hasMany(Session, {
+  foreignKey: 'user_id',
+  as: 'sessions',
+  onDelete: 'CASCADE'
+});
+Session.belongsTo(User, {
+  foreignKey: 'user_id',
+  as: 'user'
+});
+
 // Associations Messages (DM + groupes)
 Conversation.belongsTo(User, {
   foreignKey: 'created_by',
@@ -658,6 +711,97 @@ User.hasMany(Message, {
 Message.belongsTo(User, {
   foreignKey: 'sender_id',
   as: 'sender'
+});
+
+// Associations réactions de message
+Message.hasMany(MessageReaction, {
+  foreignKey: 'message_id',
+  as: 'reactions',
+  onDelete: 'CASCADE'
+});
+
+MessageReaction.belongsTo(Message, {
+  foreignKey: 'message_id',
+  as: 'message'
+});
+
+MessageReaction.belongsTo(User, {
+  foreignKey: 'user_id',
+  as: 'user'
+});
+
+User.hasMany(MessageReaction, {
+  foreignKey: 'user_id',
+  as: 'message_reactions',
+  onDelete: 'CASCADE'
+});
+
+// Associations Stories
+User.hasMany(Story, {
+  foreignKey: 'user_id',
+  as: 'stories',
+  onDelete: 'CASCADE'
+});
+
+Story.belongsTo(User, {
+  foreignKey: 'user_id',
+  as: 'author'
+});
+
+Story.hasMany(StoryView, {
+  foreignKey: 'story_id',
+  as: 'views',
+  onDelete: 'CASCADE'
+});
+
+StoryView.belongsTo(Story, {
+  foreignKey: 'story_id',
+  as: 'story'
+});
+
+StoryView.belongsTo(User, {
+  foreignKey: 'viewer_id',
+  as: 'viewer'
+});
+
+User.hasMany(StoryView, {
+  foreignKey: 'viewer_id',
+  as: 'story_views',
+  onDelete: 'CASCADE'
+});
+
+// Associations Stories à la une
+User.hasMany(StoryHighlight, {
+  foreignKey: 'user_id',
+  as: 'story_highlights',
+  onDelete: 'CASCADE'
+});
+
+StoryHighlight.belongsTo(User, {
+  foreignKey: 'user_id',
+  as: 'owner'
+});
+
+StoryHighlight.hasMany(StoryHighlightItem, {
+  foreignKey: 'highlight_id',
+  as: 'items',
+  onDelete: 'CASCADE'
+});
+
+StoryHighlightItem.belongsTo(StoryHighlight, {
+  foreignKey: 'highlight_id',
+  as: 'highlight'
+});
+
+StoryHighlightItem.belongsTo(Story, {
+  foreignKey: 'story_id',
+  as: 'story'
+});
+
+Story.hasMany(StoryHighlightItem, {
+  foreignKey: 'story_id',
+  as: 'highlight_items',
+  onDelete: 'CASCADE'
 });
 
 // Fonction pour tester la connexion à la base de données
@@ -773,6 +917,318 @@ async function ensureUsersBannerColumn() {
   }
 }
 
+/**
+ * Personnalisation de profil premium : le modèle déclare la colonne mais
+ * sync({ alter: false }) ne l'ajoute pas sur une table users déjà créée.
+ */
+async function ensureUsersProfileCustomizationColumn() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'users'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_customization JSONB NOT NULL DEFAULT '{}'::jsonb;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureUsersProfileCustomizationColumn:', e.message);
+    throw e;
+  }
+}
+
+/**
+ * Monnaies communautaires : `creator_id` / `is_user_created` sont exposés par le
+ * modèle mais sync({ alter: false }) ne les crée pas sur la table existante.
+ * NF et EUR restent à creator_id NULL — ce sont des monnaies système.
+ */
+async function ensureVirtualCurrencyCreatorColumns() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'virtual_currencies'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TABLE virtual_currencies
+        ADD COLUMN IF NOT EXISTS creator_id UUID NULL REFERENCES users(id) ON DELETE SET NULL;
+    `);
+    await sequelize.query(`
+      ALTER TABLE virtual_currencies
+        ADD COLUMN IF NOT EXISTS is_user_created BOOLEAN NOT NULL DEFAULT FALSE;
+    `);
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS virtual_currencies_creator_id_idx
+        ON virtual_currencies (creator_id);
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureVirtualCurrencyCreatorColumns:', e.message);
+    throw e;
+  }
+}
+
+/**
+ * Compteur dénormalisé des likes de stories. `story_views.reaction` reste la
+ * source par utilisateur ; ce compteur évite un COUNT pour chaque story du fil.
+ */
+async function ensureStoryLikesCountColumn() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT
+        to_regclass('public.stories') IS NOT NULL AS stories_exists,
+        to_regclass('public.story_views') IS NOT NULL AS views_exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.stories_exists) return;
+    await sequelize.query(`
+      ALTER TABLE stories
+        ADD COLUMN IF NOT EXISTS likes_count INTEGER NOT NULL DEFAULT 0;
+    `);
+    if (tables.views_exists) {
+      await sequelize.query(`
+        UPDATE stories s
+        SET likes_count = reactions.total
+        FROM (
+          SELECT story_id, COUNT(*)::integer AS total
+          FROM story_views
+          WHERE reaction = 'like'
+          GROUP BY story_id
+        ) reactions
+        WHERE reactions.story_id = s.id
+          AND s.likes_count <> reactions.total;
+      `);
+    }
+  } catch (e) {
+    logger.error('[schema] ensureStoryLikesCountColumn:', e.message);
+    throw e;
+  }
+}
+
+/** Comptes privés : le modèle expose `is_private_account` mais sync({ alter: false }) ne crée pas la colonne. */
+async function ensureUsersPrivacyColumn() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'users'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_private_account BOOLEAN NOT NULL DEFAULT false;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureUsersPrivacyColumn:', e.message);
+    throw e;
+  }
+}
+
+/**
+ * Comptes privés : `UserFollow.status` gagne la valeur `pending` (demande de
+ * suivi non encore approuvée). `ALTER TYPE ... ADD VALUE` ne peut pas être
+ * dans le même bloc de transaction qu'une requête qui l'utilise déjà, mais
+ * en requête isolée (comme ici) ça passe sans souci sur PG12+.
+ */
+async function ensureUserFollowsPendingStatus() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'user_follows'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TYPE "enum_user_follows_status" ADD VALUE IF NOT EXISTS 'pending';
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureUserFollowsPendingStatus:', e.message);
+    throw e;
+  }
+}
+
+/**
+ * Messages vocaux et images : `message_type` gagne 'image'/'audio' côté
+ * modèle, mais `sync({ alter: false })` ne rattrape jamais un ENUM Postgres
+ * déjà créé en prod — sans ceci, `Message.create({ message_type: 'image' })`
+ * échoue avec "invalid input value for enum".
+ */
+async function ensureMessagesMediaTypes() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'messages'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TYPE "enum_messages_message_type" ADD VALUE IF NOT EXISTS 'image';
+      ALTER TYPE "enum_messages_message_type" ADD VALUE IF NOT EXISTS 'audio';
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureMessagesMediaTypes:', e.message);
+    throw e;
+  }
+}
+
+/**
+ * Revue communautaire : colonnes ajoutées après la création initiale des tables
+ * — `sync({alter:false})` ne les aurait jamais posées tout seul. Toutes en
+ * TEXT/JSONB brut plutôt qu'en vrai type ENUM Postgres : plus simple à ajouter
+ * à une table qui existe déjà, et la validation des valeurs se fait côté modèle.
+ *
+ * `severity_answers` n'est plus alimentée depuis que le questionnaire de
+ * gravité a disparu (le palier est choisi par un modèle arbitre, voir
+ * `communityReviewAdjudicator`). Elle reste créée et conservée : les lignes
+ * écrites avant le changement portent des réponses réelles, et les effacer
+ * détruirait la traçabilité des sanctions déjà exécutées.
+ */
+async function ensureCommunityReviewColumns() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'community_review_items'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) return;
+    await sequelize.query(`
+      ALTER TABLE community_review_items ADD COLUMN IF NOT EXISTS sanction            TEXT;
+      ALTER TABLE community_review_items ADD COLUMN IF NOT EXISTS adjudication_status TEXT;
+      ALTER TABLE community_review_items ADD COLUMN IF NOT EXISTS adjudication        JSONB;
+      ALTER TABLE community_review_votes ADD COLUMN IF NOT EXISTS severity_answers    JSONB;
+    `);
+    // Le balayage de rattrapage cherche les arbitrages restés en plan : sans
+    // index, il refait un seq scan sur toute la table à chaque passage.
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS community_review_items_pending_adjudication_idx
+        ON community_review_items (closed_at)
+        WHERE adjudication_status = 'pending';
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureCommunityReviewColumns:', e.message);
+    throw e;
+  }
+}
+
+/**
+ * Signalement v2 : catégorie structurée, notation côté serveur et traçabilité
+ * de l'escalade. Le modèle expose ces colonnes mais `sync({ alter: false })`
+ * ne les pose pas sur une table `reports` qui existe déjà en production.
+ * TEXT plutôt qu'ENUM Postgres pour les valeurs fermées — la taxonomie
+ * évoluera, et un ALTER TYPE par catégorie ajoutée serait ingérable.
+ */
+async function ensureReportsV2Columns() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'reports'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TABLE reports
+        ADD COLUMN IF NOT EXISTS category             TEXT,
+        ADD COLUMN IF NOT EXISTS details              TEXT,
+        ADD COLUMN IF NOT EXISTS source               TEXT,
+        ADD COLUMN IF NOT EXISTS reporter_weight      DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS weighted_score       DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS target_score         DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS auto_escalated       BOOLEAN NOT NULL DEFAULT false,
+        ADD COLUMN IF NOT EXISTS escalated_at         TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS escalation_reason    TEXT,
+        ADD COLUMN IF NOT EXISTS reporter_notified_at TIMESTAMPTZ;
+    `);
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS reports_status_priority_idx ON reports (status, priority DESC);
+      CREATE INDEX IF NOT EXISTS reports_category_idx        ON reports (category);
+      CREATE INDEX IF NOT EXISTS reports_open_target_idx     ON reports (target_id, target_type)
+        WHERE status IN ('pending', 'investigating');
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureReportsV2Columns:', e.message);
+    throw e;
+  }
+}
+
+/**
+ * « Traduction (bêta) » : le modèle Tweet déclare `translation_enabled` mais
+ * `sync({ alter: false })` ne l'ajoute pas sur une table tweets déjà créée.
+ */
+async function ensureTweetsTranslationColumn() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'tweets'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TABLE tweets
+        ADD COLUMN IF NOT EXISTS translation_enabled BOOLEAN NOT NULL DEFAULT false;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureTweetsTranslationColumn:', e.message);
+    throw e;
+  }
+}
+
+/**
+ * Langue de lecture (« Traduction bêta ») : colonne déclarée par le modèle
+ * User mais que `sync({ alter: false })` n'ajoute pas sur une table existante.
+ * Reste NULL pour les comptes actuels — c'est voulu, voir `preferred_language`
+ * dans `models/User.js`.
+ */
+async function ensureUsersPreferredLanguageColumn() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'users'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_language VARCHAR(8) NULL;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureUsersPreferredLanguageColumn:', e.message);
+    throw e;
+  }
+}
+
 // Fonction pour synchroniser la base de données
 async function syncDatabase() {
   try {
@@ -791,6 +1247,16 @@ async function syncDatabase() {
 
     await ensureUsersSubscriptionColumns();
     await ensureUsersBannerColumn();
+    await ensureUsersProfileCustomizationColumn();
+    await ensureUsersPrivacyColumn();
+    await ensureUserFollowsPendingStatus();
+    await ensureMessagesMediaTypes();
+    await ensureCommunityReviewColumns();
+    await ensureVirtualCurrencyCreatorColumns();
+    await ensureStoryLikesCountColumn();
+    await ensureReportsV2Columns();
+    await ensureTweetsTranslationColumn();
+    await ensureUsersPreferredLanguageColumn();
 
     // ÉTAPE 2: Synchroniser les modèles (créer/modifier les tables)
     logger.info('Synchronisation des modèles...');
@@ -1010,6 +1476,9 @@ module.exports = {
   Notification,
   UserFollow,
   Report: ReportModel,
+  CommunityReviewItem: CommunityReviewItemModel,
+  CommunityReviewVote: CommunityReviewVoteModel,
+  CommunityReviewAssignment: CommunityReviewAssignmentModel,
   FeedHashtagRule: FeedHashtagRuleModel,
   ModerationAction: ModerationActionModel,
   UserBehaviorData,
@@ -1031,9 +1500,16 @@ module.exports = {
   DeveloperApp,
   OAuthCode,
   OAuthToken,
+  Session,
   Conversation,
   ConversationParticipant,
   Message,
+  MessageReaction,
+  Story,
+  StoryView,
+  StoryHighlight,
+  StoryHighlightItem,
+  TweetTranslation,
   UnbanTicket: UnbanTicketModel,
   PolicierCongoContract: PolicierCongoContractModel,
   MiningRound: MiningRoundModel,

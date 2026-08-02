@@ -43,8 +43,14 @@ class User extends Model {
       subscription_tier: this.subscription_tier || 'free',
       subscription_expires_at: this.subscription_expires_at || null,
       verification_style: this.verification_style || 'default',
+      // Publique par nature : c'est elle qui habille le nom et la pastille
+      // partout où le compte apparaît (fil, recherche, suggestions,
+      // notifications). Omise ici, elle était silencieusement retirée des
+      // réponses même quand la requête SQL la chargeait bien.
+      profile_customization: this.profile_customization || {},
       role: this.role || 'user',
       moderation_permissions: this.moderation_permissions || {},
+      is_private_account: this.is_private_account || false,
       stats: this.stats,
       created_at: this.created_at,
       last_activity: this.last_activity,
@@ -67,7 +73,7 @@ class User extends Model {
         is_active: true,
         is_suspended: false
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'stats', 'is_ios_native'],
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'stats', 'is_ios_native', 'profile_customization'],
       limit,
       order: [['created_at', 'DESC']]
     });
@@ -80,7 +86,7 @@ class User extends Model {
         is_active: true,
         is_suspended: false 
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'stats', 'is_ios_native'],
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'stats', 'is_ios_native', 'profile_customization'],
       order: [['stats', 'DESC']],
       limit
     });
@@ -192,6 +198,12 @@ const userSchema = {
   },
   
   premium: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+
+  /** Compte privé : les tweets/le profil ne sont visibles qu'aux abonnés acceptés (statut `active` sur UserFollow). Ne pas confondre avec `Tweet.is_private`. */
+  is_private_account: {
     type: DataTypes.BOOLEAN,
     defaultValue: false
   },
@@ -334,11 +346,45 @@ const userSchema = {
     }
   },
   
+  /**
+   * Langue de lecture choisie par l'utilisateur (« Traduction bêta »).
+   *
+   * `null` signifie « jamais choisie » — c'est ce qui déclenche l'écran de
+   * choix à la première connexion. Ne pas remplacer par un défaut 'fr' : on ne
+   * pourrait plus distinguer un compte qui a explicitement gardé le français
+   * d'un compte à qui la question n'a jamais été posée, et l'app reposerait la
+   * question à chaque démarrage.
+   *
+   * Distinct de `preferences.language`, qui concerne la langue de l'interface.
+   */
+  preferred_language: {
+    type: DataTypes.STRING(8),
+    allowNull: true,
+    defaultValue: null
+  },
+
   // Style de badge vérifié
   verification_style: {
     type: DataTypes.ENUM('default', 'rose', 'gray', 'gold'),
     defaultValue: 'default',
     allowNull: false
+  },
+
+  /**
+   * Personnalisation de profil façon Discord (réservée Plus/Pro).
+   * Volontairement séparée de `preferences`, qui porte les réglages
+   * applicatifs (langue, notifications) et n'a pas vocation à être exposée
+   * publiquement, alors que ceci s'affiche sur le profil de tout le monde.
+   * Forme : { accent_color, secondary_color, banner_style, theme_intensity,
+   *           avatar_decoration, name_font, name_effect, name_size,
+   *           profile_effect, profile_title, about_me }
+   * Les clés sont validées côté route (`sanitizeCustomization`) : rien de ce
+   * qui arrive du client n'est stocké tel quel.
+   */
+  profile_customization: {
+    type: DataTypes.JSONB,
+    allowNull: false,
+    defaultValue: {}
   },
   
   // Nouveau champ pour détecter l'application iOS native

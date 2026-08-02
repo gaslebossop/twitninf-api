@@ -1,5 +1,33 @@
-const { DataTypes, Model } = require('sequelize');
+const { DataTypes, Model, Op } = require('sequelize');
 const logger = require('../utils/logger');
+
+// Applique `delta` (+1/-1) aux compteurs `following`/`followers` des deux
+// côtés d'une relation de suivi. Partagé par les hooks afterCreate (suivi
+// direct sur compte public), afterUpdate (demande acceptée) et afterDestroy
+// (désabonnement/refus) — seuls les follows `active` doivent l'appeler.
+async function bumpFollowStats(follow, delta) {
+  const follower = await follow.sequelize.models.User.findByPk(follow.follower_id);
+  if (follower) {
+    const currentStats = follower.stats || {};
+    await follower.update({
+      stats: {
+        ...currentStats,
+        following: Math.max(0, (currentStats.following || 0) + delta)
+      }
+    });
+  }
+
+  const following = await follow.sequelize.models.User.findByPk(follow.following_id);
+  if (following) {
+    const currentStats = following.stats || {};
+    await following.update({
+      stats: {
+        ...currentStats,
+        followers: Math.max(0, (currentStats.followers || 0) + delta)
+      }
+    });
+  }
+}
 
 class UserFollow extends Model {
   // Méthode statique pour vérifier si un utilisateur suit un autre
@@ -7,7 +35,8 @@ class UserFollow extends Model {
     const follow = await this.findOne({
       where: {
         follower_id: followerId,
-        following_id: followingId
+        following_id: followingId,
+        status: 'active'
       }
     });
     return !!follow;
@@ -24,7 +53,7 @@ class UserFollow extends Model {
     const includeOptions = includeUser ? [{
       model: this.sequelize.models.User,
       as: 'following',
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'stats'],
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'stats', 'profile_customization'],
       where: { 
         is_active: true,
         is_suspended: false
@@ -32,7 +61,7 @@ class UserFollow extends Model {
     }] : [];
 
     return this.findAll({
-      where: { follower_id: userId },
+      where: { follower_id: userId, status: 'active' },
       include: includeOptions,
       order: [['created_at', 'DESC']],
       limit,
@@ -51,7 +80,7 @@ class UserFollow extends Model {
     const includeOptions = includeUser ? [{
       model: this.sequelize.models.User,
       as: 'follower',
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'stats'],
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'stats', 'profile_customization'],
       where: { 
         is_active: true,
         is_suspended: false
@@ -59,7 +88,7 @@ class UserFollow extends Model {
     }] : [];
 
     return this.findAll({
-      where: { following_id: userId },
+      where: { following_id: userId, status: 'active' },
       include: includeOptions,
       order: [['created_at', 'DESC']],
       limit,
@@ -70,20 +99,22 @@ class UserFollow extends Model {
   // Méthode statique pour compter les utilisateurs suivis
   static async countFollowing(userId) {
     return this.count({
-      where: { follower_id: userId }
+      where: { follower_id: userId, status: 'active' }
     });
   }
 
   // Méthode statique pour compter les followers
   static async countFollowers(userId) {
     return this.count({
-      where: { following_id: userId }
+      where: { following_id: userId, status: 'active' }
     });
   }
 
   // Méthode statique pour obtenir les suggestions de suivi
   static async getFollowSuggestions(userId, limit = 10) {
-    // Utilisateurs que l'utilisateur ne suit pas encore
+    // Utilisateurs que l'utilisateur ne suit pas encore. On prend TOUS les
+    // liens, pas seulement les `active` : une demande déjà en attente ne doit
+    // pas être re-suggérée comme un compte qu'on ne connaît pas.
     const following = await this.findAll({
       where: { follower_id: userId },
       attributes: ['following_id']
@@ -94,12 +125,20 @@ class UserFollow extends Model {
 
     return this.sequelize.models.User.findAll({
       where: {
-        id: { [this.sequelize.Op.notIn]: followingIds },
+        // `this.sequelize.Op` n'existe pas en Sequelize v6 : GET
+        // /api/users/suggestions plantait (500) à chaque appel.
+        id: { [Op.notIn]: followingIds },
         is_active: true,
         is_suspended: false,
+        // Un compte privé ne se recommande pas. Il a demandé à n'être visible
+        // que de ses abonnés : le pousser à des inconnus, c'est exactement ce
+        // qu'il a refusé. Et comme cette liste ne contient QUE des comptes non
+        // suivis, aucun compte privé n'a sa place ici — pas besoin de croiser
+        // avec le statut de suivi.
+        is_private_account: false,
         verified: true // Priorité aux comptes vérifiés
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'stats'],
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'stats', 'profile_customization'],
       order: [
         ['verified', 'DESC'],
         ['stats.followers', 'DESC'],
@@ -113,11 +152,11 @@ class UserFollow extends Model {
   static async getMutualFollowers(userId, otherUserId) {
     const [userFollowing, otherFollowing] = await Promise.all([
       this.findAll({
-        where: { follower_id: userId },
+        where: { follower_id: userId, status: 'active' },
         attributes: ['following_id']
       }),
       this.findAll({
-        where: { follower_id: otherUserId },
+        where: { follower_id: otherUserId, status: 'active' },
         attributes: ['following_id']
       })
     ]);
@@ -131,11 +170,11 @@ class UserFollow extends Model {
 
     return this.sequelize.models.User.findAll({
       where: {
-        id: { [this.sequelize.Op.in]: mutualIds },
+        id: { [Op.in]: mutualIds },
         is_active: true,
         is_suspended: false
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium'],
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'profile_customization'],
       order: [['username', 'ASC']]
     });
   }
@@ -169,9 +208,10 @@ const userFollowSchema = {
     }
   },
 
-  // Statut de la relation
+  // Statut de la relation. `pending` = demande de suivi en attente
+  // d'approbation (compte privé), pas encore comptée dans les stats.
   status: {
-    type: DataTypes.ENUM('active', 'blocked', 'muted'),
+    type: DataTypes.ENUM('active', 'pending', 'blocked', 'muted'),
     defaultValue: 'active'
   },
 
@@ -228,33 +268,14 @@ const modelOptions = {
 
   // Hooks
   hooks: {
+    // Un follow `pending` (compte privé, demande non acceptée) ne doit ni
+    // compter dans les stats abonnés/abonnements, ni déclencher la notif
+    // "vous suit désormais" — seul un statut `active` doit le faire.
     afterCreate: async (follow) => {
+      if (follow.status !== 'active') return;
       try {
-        // Mettre à jour le compteur de following de l'utilisateur qui suit
-        const follower = await follow.sequelize.models.User.findByPk(follow.follower_id);
-        if (follower) {
-          const currentStats = follower.stats || {};
-          await follower.update({
-            stats: {
-              ...currentStats,
-              following: (currentStats.following || 0) + 1
-            }
-          });
-        }
+        await bumpFollowStats(follow, +1);
 
-        // Mettre à jour le compteur de followers de l'utilisateur suivi
-        const following = await follow.sequelize.models.User.findByPk(follow.following_id);
-        if (following) {
-          const currentStats = following.stats || {};
-          await following.update({
-            stats: {
-              ...currentStats,
-              followers: (currentStats.followers || 0) + 1
-            }
-          });
-        }
-
-        // Créer une notification de suivi (si le modèle existe)
         try {
           if (follow.sequelize.models.Notification && follow.sequelize.models.Notification.createFollowNotification) {
             await follow.sequelize.models.Notification.createFollowNotification(
@@ -272,32 +293,37 @@ const modelOptions = {
       }
     },
 
-    afterDestroy: async (follow) => {
+    // Transition `pending` → `active` (demande de suivi acceptée) : c'est
+    // seulement à ce moment-là que le suivi doit compter dans les stats.
+    afterUpdate: async (follow) => {
+      if (!follow.changed('status')) return;
+      if (follow.status !== 'active' || follow.previous('status') !== 'pending') return;
       try {
-        // Décrémenter le compteur de following de l'utilisateur qui suivait
-        const follower = await follow.sequelize.models.User.findByPk(follow.follower_id);
-        if (follower) {
-          const currentStats = follower.stats || {};
-          await follower.update({
-            stats: {
-              ...currentStats,
-              following: Math.max(0, (currentStats.following || 0) - 1)
-            }
-          });
+        await bumpFollowStats(follow, +1);
+
+        try {
+          if (follow.sequelize.models.Notification && follow.sequelize.models.Notification.createFollowAcceptNotification) {
+            await follow.sequelize.models.Notification.createFollowAcceptNotification(
+              follow.following_id,
+              follow.follower_id
+            );
+          }
+        } catch (notificationError) {
+          logger.warn('Impossible de créer la notification d\'acceptation de suivi:', notificationError.message);
         }
 
-        // Décrémenter le compteur de followers de l'utilisateur qui était suivi
-        const following = await follow.sequelize.models.User.findByPk(follow.following_id);
-        if (following) {
-          const currentStats = following.stats || {};
-          await following.update({
-            stats: {
-              ...currentStats,
-              followers: Math.max(0, (currentStats.followers || 0) - 1)
-            }
-          });
-        }
+        logger.info(`Demande de suivi acceptée: ${follow.following_id} a accepté ${follow.follower_id}`);
+      } catch (error) {
+        logger.error('Erreur lors de l\'acceptation du suivi:', error);
+      }
+    },
 
+    afterDestroy: async (follow) => {
+      // Annuler/refuser une demande `pending` ne doit décrémenter aucun
+      // compteur : elle n'a jamais été comptée à la création.
+      if (follow.status !== 'active') return;
+      try {
+        await bumpFollowStats(follow, -1);
         logger.info(`Suivi supprimé: utilisateur ${follow.follower_id} ne suit plus ${follow.following_id}`);
       } catch (error) {
         logger.error('Erreur lors de la suppression du suivi:', error);

@@ -104,7 +104,12 @@ const updateProfileValidation = [
   body('preferences')
     .optional()
     .isObject()
-    .withMessage('Préférences invalides')
+    .withMessage('Préférences invalides'),
+
+  body('is_private_account')
+    .optional()
+    .isBoolean()
+    .withMessage('is_private_account doit être un booléen')
 ];
 
 const changePasswordValidation = [
@@ -226,6 +231,10 @@ router.get('/profile', authController.getProfile); // Route alternative
 router.put('/profile', updateProfileValidation, authController.updateProfile);
 router.put('/change-password', changePasswordValidation, authController.changePassword);
 router.get('/verify-auth', authController.verifyAuth);
+
+// Appareils connectés — liste et révocation à distance
+router.get('/sessions', authController.listSessions);
+router.delete('/sessions/:id', authController.revokeSession);
 
 // Routes premium (nécessitent un compte premium)
 router.get('/premium-features', requirePremium, (req, res) => {

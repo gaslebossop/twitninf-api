@@ -113,6 +113,21 @@ class VirtualCurrency {
         allowNull: false,
         defaultValue: '#FF6B35',
         comment: 'Couleur de la cryptomonnaie (hex)'
+      },
+      creatorId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        references: {
+          model: 'users',
+          key: 'id'
+        },
+        comment: 'Créateur si monnaie communautaire ; NULL pour NF et EUR (monnaies système)'
+      },
+      isUserCreated: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+        comment: 'Monnaie créée par un utilisateur (payante) plutôt que par la plateforme'
       }
     }, {
       tableName: 'virtual_currencies',

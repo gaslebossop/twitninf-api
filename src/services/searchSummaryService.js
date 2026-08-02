@@ -5,16 +5,10 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 const { User, Tweet } = require('../models');
 
-const GEMINI_KEYS = [
-  'AIzaSyD--8mAE-Wwr6em-iJNZFpfaR8JX-p3CO0',
-  'AIzaSyAWqaeqcKXy5eGv5XwAcSmpfEnUlUXV7AM',
-  'AIzaSyAym2vUwH85VbgX2MzQJ3rULYfsCcY_XIE',
-  'AIzaSyBEat6WA9Kx0-PAsY3vNdwSqEOPMVF9GSc',
-  'AIzaSyBvBnqQvezndbMdisr8j1GAwF183xEIwvs',
-  'AIzaSyAetk-R-AllglFwWclFsrVLm7Q1AQFdKlE',
-  'AIzaSyDf0cgSNzBCgJLzOtb05wPsk7fMO5UtMUo',
-  'AIzaSyCYOfKUVUkToCeHTvRuyfatgrTUipq0YDk'
-];
+// La liste vivait ici en dur, dupliquée avec celle de la modération : une clé
+// révoquée n'était corrigée que d'un côté. Elle a déménagé dans
+// `config/geminiKeys`, seule source désormais.
+const { KEYS: GEMINI_KEYS } = require('../config/geminiKeys');
 const SEARCH_SUMMARY_USE_MEGALLM = true;
 const SEARCH_SUMMARY_MEGALLM_MODEL =  'gpt-5.4';
 

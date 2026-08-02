@@ -13,7 +13,7 @@ class TweetLike extends Model {
     const includeOptions = includeUser ? [{
       model: this.sequelize.models.User,
       as: 'user',
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium']
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'profile_customization']
     }] : [];
 
     return this.findAll({
@@ -39,7 +39,7 @@ class TweetLike extends Model {
       include: [{
         model: this.sequelize.models.User,
         as: 'author',
-        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium']
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'profile_customization']
       }]
     }] : [];
 
@@ -68,6 +68,48 @@ class TweetLike extends Model {
     return this.count({
       where: { tweet_id: tweetId }
     });
+  }
+
+  /**
+   * Compte les likes de PLUSIEURS tweets en une seule requête.
+   *
+   * Remplace un appel à `countTweetLikes` par tweet : sur le détail d'un
+   * tweet, ses dix réponses déclenchaient dix requêtes là où un GROUP BY
+   * suffit. Renvoie une Map<tweetId, nombre> ; un tweet sans aucun like est
+   * absent du résultat SQL, l'appelant doit donc lire `map.get(id) || 0`.
+   */
+  static async countLikesForTweets(tweetIds = []) {
+    const ids = [...new Set(tweetIds.map(String))].filter(Boolean);
+    if (ids.length === 0) return new Map();
+
+    const rows = await this.findAll({
+      where: { tweet_id: ids },
+      attributes: [
+        'tweet_id',
+        [this.sequelize.fn('COUNT', this.sequelize.col('id')), 'count'],
+      ],
+      group: ['tweet_id'],
+      raw: true,
+    });
+
+    return new Map(rows.map((r) => [String(r.tweet_id), Number(r.count) || 0]));
+  }
+
+  /**
+   * Parmi `tweetIds`, ceux que `userId` a likés. Une requête au lieu d'une
+   * par tweet. Renvoie un Set d'identifiants (en chaîne).
+   */
+  static async likedTweetIdsForUser(userId, tweetIds = []) {
+    const ids = [...new Set(tweetIds.map(String))].filter(Boolean);
+    if (!userId || ids.length === 0) return new Set();
+
+    const rows = await this.findAll({
+      where: { user_id: userId, tweet_id: ids },
+      attributes: ['tweet_id'],
+      raw: true,
+    });
+
+    return new Set(rows.map((r) => String(r.tweet_id)));
   }
 
   // Méthode statique pour compter les tweets likés par un utilisateur

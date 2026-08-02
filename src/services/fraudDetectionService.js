@@ -7,6 +7,7 @@ const QUEUES = {
   login:       'fraud:queue:login',
   transaction: 'fraud:queue:transaction',
   request:     'fraud:queue:request',
+  authorize:   'fraud:queue:authorize_transaction',
 };
 
 const BLOCKED_IP_PREFIX = 'fraud:blocked:ip:';
@@ -15,6 +16,9 @@ const BLOCKED_IP_PREFIX = 'fraud:blocked:ip:';
 // Timeout appliqué CÔTÉ REDIS (BLPOP) → la connexion se libère seule, pas de
 // blocage orphelin côté Node. 0.25s = budget de latence sur le login.
 const TIMEOUT_S = 0.25;
+// Purchases are fail-closed and may need database-derived graph analysis before
+// Rust answers. This budget is intentionally separate from navigation/login.
+const AUTHORIZATION_TIMEOUT_S = 2;
 
 // Nombre de connexions de lecture dédiées au BLPOP. Un BLPOP bloque sa connexion ;
 // un petit pool round-robin évite le head-of-line blocking quand plusieurs
@@ -30,15 +34,19 @@ class FraudDetectionService {
     this._rr = 0; // index round-robin
     this._ready = false;
     this._connecting = false;
+    this._redisConfig = {};
+    this._reconnectTimer = null;
+    this._retryDelayMs = 1000;
   }
 
   async connect(redisConfig = {}) {
+    this._redisConfig = { ...this._redisConfig, ...redisConfig };
     if (this._ready || this._connecting) return;
     this._connecting = true;
 
-    const password = redisConfig.password || process.env.REDIS_PASSWORD || null;
+    const password = this._redisConfig.password || process.env.REDIS_PASSWORD || null;
     const auth = password ? `:${password}@` : '';
-    const url = `redis://${auth}${redisConfig.host || '127.0.0.1'}:${redisConfig.port || 6379}`;
+    const url = `redis://${auth}${this._redisConfig.host || '127.0.0.1'}:${this._redisConfig.port || 6379}`;
 
     try {
       // 1 connexion d'écriture (LPUSH/GET) + un pool de lecteurs (BLPOP).
@@ -55,18 +63,47 @@ class FraudDetectionService {
 
       await Promise.all([this._pub.connect(), ...this._readers.map((r) => r.connect())]);
       this._ready = true;
+      this._retryDelayMs = 1000;
+      if (this._reconnectTimer) {
+        clearTimeout(this._reconnectTimer);
+        this._reconnectTimer = null;
+      }
       logger.info(`[fraud] FraudDetectionService connected to Redis (${READER_POOL_SIZE} readers)`);
     } catch (e) {
       logger.warn('[fraud] Could not connect to Redis — fraud checks disabled:', e.message);
       this._ready = false;
+      const clients = [this._pub, ...this._readers].filter(Boolean);
+      for (const client of clients) {
+        try {
+          if (client.isOpen) client.disconnect();
+        } catch {
+          // Best effort: a partially opened client can already be closed.
+        }
+      }
+      this._pub = null;
+      this._readers = [];
+      this._scheduleReconnect();
     } finally {
       this._connecting = false;
     }
   }
 
+  _scheduleReconnect() {
+    if (this._reconnectTimer || this._ready) return;
+    const delay = this._retryDelayMs;
+    this._retryDelayMs = Math.min(this._retryDelayMs * 2, 30000);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this.connect(this._redisConfig).catch((error) => {
+        logger.warn('[fraud] Redis reconnect failed:', error.message);
+      });
+    }, delay);
+    this._reconnectTimer.unref?.();
+  }
+
   // ─── Fast IP block check (O(1), no round-trip to Rust) ──────────────────────
   async isIpBlocked(ip) {
-    if (!this._ready) return false;
+    if (!this.isReady()) return false;
     try {
       const val = await this._pub.get(`${BLOCKED_IP_PREFIX}${ip}`);
       return val === '1';
@@ -80,7 +117,7 @@ class FraudDetectionService {
   // du verdict en synchrone — Rust met à jour la réputation/blocklist IP, qui sera
   // consultée (O(1)) à la requête suivante. Rust met le résultat en expire 5s.
   _fireAndForget(queueKey, payload) {
-    if (!this._ready) return;
+    if (!this.isReady()) return;
     const correlationId = uuidv4();
     const envelope = JSON.stringify({ correlation_id: correlationId, payload });
     this._pub.lPush(queueKey, envelope).catch((e) =>
@@ -89,8 +126,14 @@ class FraudDetectionService {
   }
 
   // ─── Core: push to queue, wait for result via BLPOP ─────────────────────────
-  async _sendAndWait(queueKey, payload) {
-    if (!this._ready || this._readers.length === 0) return null;
+  async _sendAndWait(queueKey, payload, timeoutSeconds = TIMEOUT_S) {
+    if (!this.isReady() || this._readers.length === 0) {
+      if (!this._pub?.isOpen) {
+        this._ready = false;
+        this._scheduleReconnect();
+      }
+      return null;
+    }
 
     const correlationId = uuidv4();
     const resultKey = `fraud:result:${correlationId}`;
@@ -106,7 +149,7 @@ class FraudDetectionService {
 
       // Attend le résultat avec un timeout CÔTÉ REDIS : la connexion se libère
       // automatiquement si Rust ne répond pas à temps (fail-open, pas d'orphelin).
-      const result = await this._reader_blpop(reader, resultKey, TIMEOUT_S);
+      const result = await this._reader_blpop(reader, resultKey, timeoutSeconds);
 
       if (!result) {
         logger.debug(`[fraud] timeout waiting for result on ${resultKey}`);
@@ -183,6 +226,14 @@ class FraudDetectionService {
   }
 
   /**
+   * Strong transaction authorization. Unlike the legacy analysis calls this is
+   * fail-closed: null means the caller must not mutate a wallet.
+   */
+  async authorizeTransaction(payload) {
+    return this._sendAndWait(QUEUES.authorize, payload, AUTHORIZATION_TIMEOUT_S);
+  }
+
+  /**
    * Analyse an API request (fire-and-forget — chemin haute fréquence).
    * Le verdict n'est pas attendu : Rust met à jour la réputation/blocklist IP,
    * consultée en O(1) à la requête suivante via isIpBlocked().
@@ -206,7 +257,14 @@ class FraudDetectionService {
   }
 
   // ─── Health check ─────────────────────────────────────────────────────────
-  isReady() { return this._ready; }
+  isReady() {
+    return Boolean(
+      this._ready
+      && this._pub?.isReady
+      && this._readers.length === READER_POOL_SIZE
+      && this._readers.every((reader) => reader.isReady)
+    );
+  }
 }
 
 // Singleton

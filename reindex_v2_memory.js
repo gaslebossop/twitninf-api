@@ -1,5 +1,6 @@
 const { Pool } = require('pg');
 const { createLocalEmbedQuery } = require('./src/services/policiercongo/policiercongoV2Embeddings');
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const logger = console;
 
 const DB_CONFIG = {
@@ -7,7 +8,7 @@ const DB_CONFIG = {
   port: 5432,
   database: "twitninf",
   user: "admin",
-  password: "myytree88",
+  password: process.env.DB_PASSWORD,
   ssl: false
 };
 

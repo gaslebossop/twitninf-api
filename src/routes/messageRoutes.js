@@ -1,13 +1,54 @@
 const express = require('express');
 const { Op } = require('sequelize');
 const router = express.Router();
+const multer = require('multer');
+const sharp = require('sharp');
+const fs = require('fs');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
-const { sequelize, User, UserFollow, Conversation, ConversationParticipant, Message } = require('../models');
+const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
+const {
+  sequelize,
+  User,
+  UserFollow,
+  Conversation,
+  ConversationParticipant,
+  Message,
+  MessageReaction,
+  Story,
+  Notification
+} = require('../models');
 const { POLICE_ACCOUNT_ID } = require('../services/policiercongo/config');
 const { geminiIntelligence } = require('../services/policiercongo');
 const { runPolicierCongoV2Turn, TRIGGER_TYPES } = require('../services/policiercongo/policiercongov3/compatibilityBridge');
 const contractService = require('../services/policiercongo/contractService');
+
+const MESSAGES_DIR = path.join(__dirname, '../public/messages');
+const mediaUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 30 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!/^(image|audio)\//.test(file.mimetype || '')) {
+      return cb(new Error('Seules les images et les messages vocaux sont autorisés'));
+    }
+    cb(null, true);
+  }
+});
+
+/** Barre de réactions rapides façon Instagram DM — un emoji hors de cette liste est refusé. */
+const ALLOWED_REACTION_EMOJIS = ['❤️', '😂', '😮', '😢', '😡', '👍'];
+
+function serializeReaction(reaction) {
+  const plain = typeof reaction.toJSON === 'function' ? reaction.toJSON() : reaction;
+  return {
+    id: String(plain.id),
+    emoji: plain.emoji,
+    user_id: String(plain.user_id),
+    username: plain.user?.username
+  };
+}
 
 async function requireMembership(conversationId, userId) {
   return ConversationParticipant.findOne({
@@ -39,6 +80,56 @@ function sameId(a, b) {
   return String(a || '') === String(b || '');
 }
 
+async function createMessageNotifications({
+  conversationId,
+  senderId,
+  message,
+  recipientIds,
+  storyMetadata = null
+}) {
+  try {
+    const recipients = Array.from(
+      new Set((recipientIds || []).map((id) => String(id || '')).filter((id) => id && !sameId(id, senderId)))
+    );
+    if (!recipients.length) return;
+
+    const sender = await User.findByPk(senderId, { attributes: ['username', 'full_name'] });
+    const senderName = sender?.username ? `@${sender.username}` : sender?.full_name || 'Quelqu’un';
+    const isStoryReply = storyMetadata?.source === 'story_reply';
+    const preview = String(message?.content || '').slice(0, 180);
+
+    await Promise.all(recipients.map((recipientId) => Notification.createNotification({
+      recipient_id: recipientId,
+      sender_id: senderId,
+      type: isStoryReply ? 'reply' : 'system',
+      title: isStoryReply
+        ? `${senderName} a répondu à votre story`
+        : `Nouveau message de ${senderName}`,
+      message: preview || (isStoryReply ? 'Nouvelle réponse à votre story' : 'Nouveau message'),
+      priority: 'high',
+      content: {
+        entity_type: isStoryReply ? 'story_reply' : 'message',
+        conversation_id: String(conversationId),
+        message_id: String(message?.id || ''),
+        preview,
+        ...(isStoryReply ? {
+          story_id: storyMetadata.story_id || null,
+          story_media_url: storyMetadata.story_media_url || null,
+          story_thumbnail_url: storyMetadata.story_thumbnail_url || null,
+          story_media_type: storyMetadata.story_media_type || 'image',
+          story_caption: storyMetadata.story_caption || null
+        } : {})
+      },
+      metadata: {
+        source: 'messages',
+        conversation_id: String(conversationId)
+      }
+    })));
+  } catch (error) {
+    logger.warn('Notification de message non envoyée (non bloquant):', error?.message || error);
+  }
+}
+
 function getGroupInvitationForUser(conv, userId) {
   const meta = conv?.metadata || {};
   const groupInvites = meta.group_invitations || {};
@@ -61,9 +152,58 @@ function hasGroupOwnerRights(participant) {
   return String(participant?.role || '') === 'owner';
 }
 
+/**
+ * Un compte privé accepte-t-il d'être contacté par cet expéditeur ?
+ *
+ * Sur un compte privé, l'abonnement EST le consentement : tant qu'il n'a pas
+ * accepté la demande, il n'a rien accepté du tout, et lui laisser arriver une
+ * invitation de message revient à contourner le réglage par une autre porte.
+ *
+ * ⚠ Cette règle passe AVANT le laissez-passer des comptes certifiés. Une
+ * certification dit « ce compte est bien qui il prétend être », pas « ce compte
+ * peut écrire à qui il veut » : sinon n'importe quel compte certifié gardait un
+ * canal direct vers un compte fermé, ce qui vide le réglage de son sens
+ * précisément face aux comptes les plus suivis.
+ *
+ * Seul le compte système de modération reste toujours joignable — il doit
+ * pouvoir notifier n'importe qui.
+ *
+ * @returns {Promise<{ allowed: boolean, reason?: string }>}
+ */
+async function canContactPrivateRecipient(senderId, recipientId) {
+  if (recipientId === POLICE_ACCOUNT_ID || senderId === POLICE_ACCOUNT_ID) {
+    return { allowed: true };
+  }
+
+  const recipient = await User.findByPk(recipientId, {
+    attributes: ['id', 'is_private_account'],
+  });
+  if (!recipient?.is_private_account) return { allowed: true };
+
+  // `isFollowing` ne compte que les liens `active` : une demande encore en
+  // attente n'ouvre rien, c'est tout l'intérêt d'un compte privé.
+  const accepted = await UserFollow.isFollowing(senderId, recipientId);
+  if (accepted) return { allowed: true };
+
+  return {
+    allowed: false,
+    reason: "Ce compte est privé : il doit accepter votre demande d'abonnement avant que vous puissiez lui écrire",
+  };
+}
+
 async function canOpenDirectWithoutInvitation(senderId, recipientId) {
   if (!senderId || !recipientId) return false;
   if (recipientId === POLICE_ACCOUNT_ID || senderId === POLICE_ACCOUNT_ID) return true;
+
+  // Compte privé : seul un abonné accepté peut ouvrir une conversation, et il
+  // l'ouvre directement — l'acceptation de la demande vaut déjà consentement,
+  // lui imposer en plus une invitation à valider serait redondant.
+  const recipient = await User.findByPk(recipientId, {
+    attributes: ['id', 'is_private_account'],
+  });
+  if (recipient?.is_private_account) {
+    return await UserFollow.isFollowing(senderId, recipientId);
+  }
 
   const sender = await User.findByPk(senderId, { attributes: ['id', 'verified'] });
   if (sender?.verified) return true; // Compte certifie: DM libre
@@ -94,10 +234,27 @@ function getPendingReplyForwardInstruction(conversation, senderId, senderUser, i
   ].join('\n');
 }
 
-async function maybeAutoReplyFromPolicier(conversationId, senderId, incomingContent, io = null) {
+// Dans un groupe, PolicierCongo ne doit répondre que quand on s'adresse
+// réellement à lui — pas à chaque message échangé entre humains. En DM
+// (conversation directe avec lui), en revanche, chaque message LUI est
+// destiné : il doit continuer à répondre systématiquement, comme un
+// assistant en tête-à-tête.
+function isPolicierAddressedInGroup(content) {
+  const text = String(content || '');
+  if (/@policiercongo\b/i.test(text)) return true;
+  if (/\/admin\b/i.test(text)) return true;
+  if (contractService.isCreateContractCommand(text)) return true;
+  return false;
+}
+
+async function maybeAutoReplyFromPolicier(conversationId, senderId, incomingContent, io = null, conversationType = null) {
   let runToken = null;
   try {
     if (!conversationId || !senderId || senderId === POLICE_ACCOUNT_ID) return;
+
+    if (conversationType === 'group' && !isPolicierAddressedInGroup(incomingContent)) {
+      return;
+    }
 
     const policeMembership = await ConversationParticipant.findOne({
       where: { conversation_id: conversationId, user_id: POLICE_ACCOUNT_ID }
@@ -369,7 +526,7 @@ router.get('/conversations', authenticateToken, denySuspended, async (req, res) 
             {
               model: ConversationParticipant,
               as: 'participants',
-              include: [{ model: User, as: 'user', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style'] }]
+              include: [{ model: User, as: 'user', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization'] }]
             },
             {
               model: Message,
@@ -420,11 +577,12 @@ router.get('/conversations', authenticateToken, denySuspended, async (req, res) 
         last_message: lastMessage ? {
           id: lastMessage.id,
           content: lastMessage.content,
-          created_at: lastMessage.created_at,
-          sender: lastMessage.sender
+          created_at: lastMessage.createdAt,
+          sender: lastMessage.sender,
+          metadata: lastMessage.metadata || {}
         } : null,
         last_read_at: m.last_read_at,
-        updated_at: conv.updated_at
+        updated_at: conv.updatedAt
       };
     }).filter(Boolean);
 
@@ -441,16 +599,57 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
     const currentUserId = req.user.id;
     const otherUserId = req.params.userId;
     const content = String(req.body?.content || '').trim();
-    if (!content) return res.status(400).json({ success: false, message: 'Message vide' });
+    if (!content) {
+      await tx.rollback();
+      return res.status(400).json({ success: false, message: 'Message vide' });
+    }
     if (!req.user?.verified && content.length > 3000) {
+      await tx.rollback();
       return res.status(400).json({ success: false, message: 'Message trop long (max 3000 caractères)' });
     }
-    if (currentUserId === otherUserId) return res.status(400).json({ success: false, message: 'Conversation invalide' });
+    if (currentUserId === otherUserId) {
+      await tx.rollback();
+      return res.status(400).json({ success: false, message: 'Conversation invalide' });
+    }
 
     const otherUser = await User.findByPk(otherUserId, { transaction: tx });
     if (!otherUser) {
       await tx.rollback();
       return res.status(404).json({ success: false, message: 'Utilisateur introuvable' });
+    }
+
+    // Compte privé : refus SEC, pas une invitation en attente. Une invitation
+    // reste un message qui arrive chez la personne — c'est exactement ce
+    // qu'elle a fermé en passant son compte en privé.
+    const privateGate = await canContactPrivateRecipient(currentUserId, otherUserId);
+    if (!privateGate.allowed) {
+      await tx.rollback();
+      return res.status(403).json({ success: false, message: privateGate.reason });
+    }
+
+    let messageMetadata = {};
+    let messagePreview = content;
+    const storyId = String(req.body?.story_id || req.body?.storyId || '').trim();
+    if (storyId) {
+      const repliedStory = await Story.findOne({
+        where: { id: storyId, expires_at: { [Op.gt]: new Date() } },
+        transaction: tx
+      });
+      if (!repliedStory || !sameId(repliedStory.user_id, otherUserId)) {
+        await tx.rollback();
+        return res.status(404).json({ success: false, message: 'Story introuvable ou expirée' });
+      }
+      messageMetadata = {
+        source: 'story_reply',
+        story_id: String(repliedStory.id),
+        story_author_id: String(repliedStory.user_id),
+        story_media_url: repliedStory.media_url,
+        story_thumbnail_url: repliedStory.thumbnail_url || null,
+        story_media_type: repliedStory.media_type || 'image',
+        story_caption: repliedStory.caption || null,
+        story_created_at: repliedStory.created_at || repliedStory.createdAt || null
+      };
+      messagePreview = `A répondu à votre story : ${content}`;
     }
 
     const existing = await findExactDirectConversation(currentUserId, otherUserId, tx);
@@ -468,7 +667,7 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
           invitation_status: 'pending',
           invitation_from: currentUserId,
           invitation_to: otherUserId,
-          invitation_message: content
+          invitation_message: messagePreview
         }
       }, { transaction: tx });
       await ConversationParticipant.bulkCreate([
@@ -488,7 +687,7 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
           invitation_status: 'pending',
           invitation_from: currentUserId,
           invitation_to: otherUserId,
-          invitation_message: content,
+          invitation_message: messagePreview,
           invitation_responded_at: null
         },
         updated_at: new Date()
@@ -498,7 +697,7 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
         status: 'pending',
         from: currentUserId,
         to: otherUserId,
-        message: content,
+        message: messagePreview,
         responded_at: null
       };
     }
@@ -526,7 +725,8 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
         conversation_id: conversation.id,
         sender_id: currentUserId,
         content,
-        message_type: 'text'
+        message_type: 'text',
+        metadata: messageMetadata
       }, { transaction: tx });
 
       await conversation.update({
@@ -535,7 +735,7 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
           invitation_status: 'pending',
           invitation_from: currentUserId,
           invitation_to: otherUserId,
-          invitation_message: content
+          invitation_message: messagePreview
         },
         updated_at: new Date()
       }, { transaction: tx, silent: true });
@@ -557,6 +757,13 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
           invitation_status: 'pending'
         });
       }
+      setImmediate(() => createMessageNotifications({
+        conversationId: conversation.id,
+        senderId: currentUserId,
+        message: pendingMessage,
+        recipientIds: [otherUserId],
+        storyMetadata: messageMetadata
+      }));
       return res.status(202).json({
         success: true,
         invitation_required: true,
@@ -570,7 +777,8 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
       conversation_id: conversation.id,
       sender_id: currentUserId,
       content,
-      message_type: 'text'
+      message_type: 'text',
+      metadata: messageMetadata
     }, { transaction: tx });
 
     await Conversation.update(
@@ -589,8 +797,17 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
       io.to(`user_${otherUserId}`).emit('conversation:update', { conversation_id: conversation.id });
       io.to(`user_${currentUserId}`).emit('conversation:update', { conversation_id: conversation.id });
     }
+    setImmediate(() => createMessageNotifications({
+      conversationId: conversation.id,
+      senderId: currentUserId,
+      message,
+      recipientIds: [otherUserId],
+      storyMetadata: messageMetadata
+    }));
     setImmediate(() => {
-      maybeAutoReplyFromPolicier(conversation.id, currentUserId, content, io);
+      // Cette route ne crée/utilise que des conversations directes : le bot
+      // répond à chaque message, comme prévu pour un DM.
+      maybeAutoReplyFromPolicier(conversation.id, currentUserId, content, io, 'direct');
     });
     return res.status(201).json({ success: true, conversation_id: conversation.id, message });
   } catch (error) {
@@ -692,7 +909,7 @@ router.get('/conversations/:conversationId', authenticateToken, denySuspended, a
       include: [{
         model: ConversationParticipant,
         as: 'participants',
-        include: [{ model: User, as: 'user', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style'] }]
+        include: [{ model: User, as: 'user', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization'] }]
       }]
     });
     if (!conv) return res.status(404).json({ success: false, message: 'Conversation introuvable' });
@@ -956,7 +1173,7 @@ router.get('/conversations/:conversationId/participants', authenticateToken, den
       include: [{
         model: ConversationParticipant,
         as: 'participants',
-        include: [{ model: User, as: 'user', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style'] }]
+        include: [{ model: User, as: 'user', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization'] }]
       }]
     });
     if (!conversation || conversation.type !== 'group') {
@@ -1230,17 +1447,223 @@ router.get('/conversations/:conversationId/messages', authenticateToken, denySus
 
     const messages = await Message.findAll({
       where: { conversation_id: conversationId },
-      include: [{ model: User, as: 'sender', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style'] }],
+      include: [
+        { model: User, as: 'sender', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization'] },
+        { model: MessageReaction, as: 'reactions', include: [{ model: User, as: 'user', attributes: ['id', 'username'] }] }
+      ],
       order: [['created_at', 'DESC']],
       limit
     });
 
-    return res.json({ success: true, messages: messages.reverse() });
+    const serialized = messages.map((m) => {
+      const plain = m.toJSON();
+      plain.reactions = (plain.reactions || []).map(serializeReaction);
+      return plain;
+    });
+
+    return res.json({ success: true, messages: serialized.reverse() });
   } catch (error) {
     logger.error('❌ Erreur get messages:', error);
     return res.status(500).json({ success: false, message: 'Erreur serveur' });
   }
 });
+
+async function loadMessageForReaction(messageId, userId) {
+  const message = await Message.findByPk(messageId);
+  if (!message) return { ok: false, status: 404, message: 'Message introuvable' };
+  const membership = await requireMembership(message.conversation_id, userId);
+  if (!membership) return { ok: false, status: 403, message: 'Accès refusé' };
+  return { ok: true, message };
+}
+
+async function reactionsFor(messageId) {
+  const reactions = await MessageReaction.findAll({
+    where: { message_id: messageId },
+    include: [{ model: User, as: 'user', attributes: ['id', 'username'] }]
+  });
+  return reactions.map(serializeReaction);
+}
+
+/**
+ * POST /:messageId/reactions
+ * Pose (ou remplace) la réaction de l'utilisateur courant sur un message —
+ * un seul emoji par personne et par message, comme Instagram/WhatsApp.
+ */
+router.post('/:messageId/reactions', authenticateToken, denySuspended, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const messageId = req.params.messageId;
+    const emoji = String(req.body?.emoji || '').trim();
+    if (!ALLOWED_REACTION_EMOJIS.includes(emoji)) {
+      return res.status(400).json({ success: false, message: 'Emoji non supporté' });
+    }
+
+    const gate = await loadMessageForReaction(messageId, userId);
+    if (!gate.ok) return res.status(gate.status).json({ success: false, message: gate.message });
+
+    // `findOrCreate` + `update` explicite plutôt qu'un `upsert()` Sequelize :
+    // sur Postgres, `upsert()` cible la clé primaire (id, UUID généré à
+    // chaque appel) et non notre contrainte unique (message_id, user_id) —
+    // il aurait donc empilé une nouvelle ligne à chaque changement d'emoji
+    // au lieu de remplacer la réaction existante.
+    const [reaction, created] = await MessageReaction.findOrCreate({
+      where: { message_id: messageId, user_id: userId },
+      defaults: { message_id: messageId, user_id: userId, emoji }
+    });
+    if (!created && reaction.emoji !== emoji) {
+      await reaction.update({ emoji });
+    }
+
+    const reactions = await reactionsFor(messageId);
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`conversation_${gate.message.conversation_id}`).emit('message:reaction', {
+        conversation_id: gate.message.conversation_id,
+        message_id: messageId,
+        reactions
+      });
+    }
+
+    return res.json({ success: true, reactions });
+  } catch (error) {
+    logger.error('❌ Erreur ajout réaction:', error);
+    return res.status(500).json({ success: false, message: 'Erreur serveur' });
+  }
+});
+
+/**
+ * DELETE /:messageId/reactions
+ * Retire la réaction de l'utilisateur courant sur un message.
+ */
+router.delete('/:messageId/reactions', authenticateToken, denySuspended, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const messageId = req.params.messageId;
+
+    const gate = await loadMessageForReaction(messageId, userId);
+    if (!gate.ok) return res.status(gate.status).json({ success: false, message: gate.message });
+
+    await MessageReaction.destroy({ where: { message_id: messageId, user_id: userId } });
+
+    const reactions = await reactionsFor(messageId);
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`conversation_${gate.message.conversation_id}`).emit('message:reaction', {
+        conversation_id: gate.message.conversation_id,
+        message_id: messageId,
+        reactions
+      });
+    }
+
+    return res.json({ success: true, reactions });
+  } catch (error) {
+    logger.error('❌ Erreur suppression réaction:', error);
+    return res.status(500).json({ success: false, message: 'Erreur serveur' });
+  }
+});
+
+/**
+ * Contrôles d'accès partagés par l'envoi d'un message texte et l'envoi d'une
+ * pièce jointe (image/audio) : appartenance à la conversation, blocage compte
+ * privé (re-vérifié à chaque envoi, voir commentaire historique ci-dessous),
+ * et statut d'invitation direct/groupe.
+ *
+ * Compte privé : le contrôle doit être refait ICI et pas seulement à
+ * l'ouverture de la conversation. Une conversation déjà créée reste
+ * joignable par son identifiant — et surtout, le consentement peut avoir
+ * été RETIRÉ depuis (retrait d'abonné, ou passage du compte en privé après
+ * coup). Sans ce contrôle, le blocage se contournait en écrivant dans un fil
+ * ouvert avant le changement.
+ */
+async function assertCanSendMessage(conversationId, userId) {
+  const [membership, conv] = await Promise.all([
+    requireMembership(conversationId, userId),
+    Conversation.findByPk(conversationId)
+  ]);
+  if (!membership) return { ok: false, status: 403, message: 'Accès refusé' };
+
+  if (conv?.type === 'direct') {
+    const otherParticipant = await ConversationParticipant.findOne({
+      where: { conversation_id: conversationId, user_id: { [Op.ne]: userId } },
+      attributes: ['user_id'],
+    });
+    if (otherParticipant) {
+      const privateGate = await canContactPrivateRecipient(userId, String(otherParticipant.user_id));
+      if (!privateGate.allowed) {
+        return { ok: false, status: 403, message: privateGate.reason };
+      }
+    }
+  }
+
+  const invitation = getInvitationMeta(conv);
+  const groupInvitation = conv?.type === 'group' ? getGroupInvitationForUser(conv, userId) : null;
+  if (conv?.type === 'direct' && invitation.status === 'declined') {
+    return { ok: false, status: 403, message: 'Invitation refusee. Renvoie une nouvelle invitation.' };
+  }
+  if (conv?.type === 'direct' && invitation.status === 'pending') {
+    // Avant acceptation, seul l'initiateur peut envoyer (max 2 messages)
+    if (!sameId(invitation.from, userId)) {
+      return { ok: false, status: 403, message: 'Invitation non acceptee' };
+    }
+    const pendingCount = await Message.count({
+      where: { conversation_id: conversationId, sender_id: userId }
+    });
+    if (pendingCount >= 2) {
+      return { ok: false, status: 429, message: 'Limite atteinte: 2 messages max avant acceptation' };
+    }
+  }
+  if (conv?.type === 'group' && groupInvitation?.status === 'pending') {
+    return { ok: false, status: 403, message: 'Invitation groupe non acceptee' };
+  }
+  if (conv?.type === 'group' && groupInvitation?.status === 'declined') {
+    return { ok: false, status: 403, message: 'Invitation groupe refusee' };
+  }
+
+  return { ok: true, conv };
+}
+
+/**
+ * Fan-out socket + notifications après création d'un message (texte ou pièce
+ * jointe). Ne doit pas retarder l'accusé de réception HTTP au client qui
+ * vient d'envoyer le message — d'où le `setImmediate` non attendu.
+ */
+function broadcastNewMessage(conversationId, userId, message, io, conv, autoReplyContent) {
+  setImmediate(async () => {
+    let members = [];
+    try {
+      members = await ConversationParticipant.findAll({
+        where: { conversation_id: conversationId },
+        attributes: ['user_id']
+      });
+      if (io) {
+        io.to(`conversation_${conversationId}`).emit('message:new', {
+          conversation_id: conversationId,
+          conversationId,
+          message
+        });
+        members.forEach((m) => {
+          io.to(`user_${m.user_id}`).emit('conversation:update', { conversation_id: conversationId });
+        });
+      }
+      await createMessageNotifications({
+        conversationId,
+        senderId: userId,
+        message,
+        recipientIds: members.map((member) => member.user_id)
+      });
+    } catch (fanoutError) {
+      logger.warn('Fan-out message incomplet (non bloquant):', fanoutError?.message || fanoutError);
+    }
+    // Route partagée direct/groupe : en groupe, `maybeAutoReplyFromPolicier`
+    // n'agit que si le message l'adresse explicitement (voir
+    // `isPolicierAddressedInGroup`) — sans ça, il répondait à chaque message
+    // de n'importe quel membre du groupe, y compris ceux qui ne s'adressaient
+    // pas à lui.
+    maybeAutoReplyFromPolicier(conversationId, userId, autoReplyContent, io, conv?.type);
+  });
+}
 
 router.post('/conversations/:conversationId/messages', authenticateToken, denySuspended, async (req, res) => {
   try {
@@ -1252,38 +1675,8 @@ router.post('/conversations/:conversationId/messages', authenticateToken, denySu
       return res.status(400).json({ success: false, message: 'Message trop long (max 3000 caractères)' });
     }
 
-    const [membership, conv] = await Promise.all([
-      requireMembership(conversationId, userId),
-      Conversation.findByPk(conversationId)
-    ]);
-    if (!membership) return res.status(403).json({ success: false, message: 'Accès refusé' });
-
-    const invitation = getInvitationMeta(conv);
-    const groupInvitation = conv?.type === 'group' ? getGroupInvitationForUser(conv, userId) : null;
-    if (conv?.type === 'direct' && invitation.status === 'declined') {
-      return res.status(403).json({ success: false, message: 'Invitation refusee. Renvoie une nouvelle invitation.' });
-    }
-    if (conv?.type === 'direct' && invitation.status === 'pending') {
-      // Avant acceptation, seul l'initiateur peut envoyer (max 2 messages)
-      if (!sameId(invitation.from, userId)) {
-        return res.status(403).json({ success: false, message: 'Invitation non acceptee' });
-      }
-      const pendingCount = await Message.count({
-        where: { conversation_id: conversationId, sender_id: userId }
-      });
-      if (pendingCount >= 2) {
-        return res.status(429).json({
-          success: false,
-          message: 'Limite atteinte: 2 messages max avant acceptation'
-        });
-      }
-    }
-    if (conv?.type === 'group' && groupInvitation?.status === 'pending') {
-      return res.status(403).json({ success: false, message: 'Invitation groupe non acceptee' });
-    }
-    if (conv?.type === 'group' && groupInvitation?.status === 'declined') {
-      return res.status(403).json({ success: false, message: 'Invitation groupe refusee' });
-    }
+    const gate = await assertCanSendMessage(conversationId, userId);
+    if (!gate.ok) return res.status(gate.status).json({ success: false, message: gate.message });
 
     const [message] = await Promise.all([
       Message.create({
@@ -1299,26 +1692,7 @@ router.post('/conversations/:conversationId/messages', authenticateToken, denySu
     ]);
 
     const io = req.app.get('io');
-
-    // Le fan-out socket ne doit pas retarder l'accusé de réception HTTP au
-    // client qui vient d'envoyer le message.
-    setImmediate(async () => {
-      if (io) {
-        io.to(`conversation_${conversationId}`).emit('message:new', {
-          conversation_id: conversationId,
-          conversationId,
-          message
-        });
-        const members = await ConversationParticipant.findAll({
-          where: { conversation_id: conversationId },
-          attributes: ['user_id']
-        });
-        members.forEach((m) => {
-          io.to(`user_${m.user_id}`).emit('conversation:update', { conversation_id: conversationId });
-        });
-      }
-      maybeAutoReplyFromPolicier(conversationId, userId, content, io);
-    });
+    broadcastNewMessage(conversationId, userId, message, io, gate.conv, content);
 
     return res.status(201).json({ success: true, message });
   } catch (error) {
@@ -1326,6 +1700,100 @@ router.post('/conversations/:conversationId/messages', authenticateToken, denySu
     return res.status(500).json({ success: false, message: 'Erreur serveur' });
   }
 });
+
+/**
+ * POST /conversations/:conversationId/messages/attachment
+ * Envoie une pièce jointe (image ou message vocal) — champ fichier `media`,
+ * `duration_ms` optionnel (audio uniquement). Mêmes contrôles d'accès que
+ * l'envoi de texte (voir `assertCanSendMessage`).
+ */
+router.post(
+  '/conversations/:conversationId/messages/attachment',
+  authenticateToken,
+  denySuspended,
+  mediaUpload.single('media'),
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const conversationId = req.params.conversationId;
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: 'Fichier manquant (champ "media")' });
+      }
+
+      const isAudio = /^audio\//.test(req.file.mimetype || '');
+      const isImage = /^image\//.test(req.file.mimetype || '');
+      if (!isAudio && !isImage) {
+        return res.status(400).json({ success: false, message: 'Type de fichier non supporté' });
+      }
+
+      const gate = await assertCanSendMessage(conversationId, userId);
+      if (!gate.ok) return res.status(gate.status).json({ success: false, message: gate.message });
+
+      fs.mkdirSync(MESSAGES_DIR, { recursive: true });
+
+      const extension = isAudio
+        ? (path.extname(req.file.originalname || '').toLowerCase() || '.m4a')
+        : '.jpg';
+      const filename = `msg-${isAudio ? 'audio' : 'image'}-${userId}-${Date.now()}-${uuidv4().slice(0, 8)}${extension}`;
+      const outputPath = path.join(MESSAGES_DIR, filename);
+
+      if (isAudio) {
+        fs.writeFileSync(outputPath, req.file.buffer);
+      } else {
+        await sharp(req.file.buffer)
+          .rotate()
+          .resize(1600, 1600, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 85 })
+          .toFile(outputPath);
+      }
+
+      const attachmentUrl = buildStaticMediaPublicUrl('messages', filename);
+      const content = isAudio ? '🎤 Message vocal' : '📷 Photo';
+      const metadata = {
+        attachment_url: attachmentUrl,
+        attachment_type: isAudio ? 'audio' : 'image',
+        mime_type: req.file.mimetype
+      };
+      if (isAudio) {
+        metadata.duration_ms = Math.max(0, parseInt(req.body?.duration_ms, 10) || 0);
+        if (typeof req.body?.waveform === 'string') {
+          try {
+            const parsedWaveform = JSON.parse(req.body.waveform);
+            if (Array.isArray(parsedWaveform)) {
+              metadata.waveform = parsedWaveform
+                .slice(0, 64)
+                .map((v) => Math.max(0, Math.min(1, Number(v) || 0)));
+            }
+          } catch {
+            // Waveform malformée : on garde le message vocal sans visualisation.
+          }
+        }
+      }
+
+      const [message] = await Promise.all([
+        Message.create({
+          conversation_id: conversationId,
+          sender_id: userId,
+          content,
+          message_type: isAudio ? 'audio' : 'image',
+          metadata
+        }),
+        Conversation.update(
+          { updated_at: new Date() },
+          { where: { id: conversationId }, silent: true }
+        )
+      ]);
+
+      const io = req.app.get('io');
+      broadcastNewMessage(conversationId, userId, message, io, gate.conv, content);
+
+      return res.status(201).json({ success: true, message });
+    } catch (error) {
+      logger.error('❌ Erreur send message (media):', error);
+      return res.status(500).json({ success: false, message: 'Erreur serveur' });
+    }
+  }
+);
 
 router.post('/conversations/:conversationId/read', authenticateToken, denySuspended, async (req, res) => {
   try {
@@ -1377,7 +1845,7 @@ router.get('/invitations', authenticateToken, denySuspended, async (req, res) =>
         include: [{
           model: ConversationParticipant,
           as: 'participants',
-          include: [{ model: User, as: 'user', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style'] }]
+          include: [{ model: User, as: 'user', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization'] }]
         }]
       }]
     });
@@ -1393,7 +1861,7 @@ router.get('/invitations', authenticateToken, denySuspended, async (req, res) =>
         from_user_id: inv.from,
         message: inv.message,
         participants: (conv.participants || []).map((p) => p.user).filter(Boolean),
-        created_at: conv.created_at
+        created_at: conv.createdAt
       }));
 
     const groupInvitations = memberships
@@ -1407,7 +1875,7 @@ router.get('/invitations', authenticateToken, denySuspended, async (req, res) =>
         from_user_id: inv.invited_by,
         message: `Invitation au groupe "${conv.title || 'Groupe'}"`,
         participants: (conv.participants || []).map((p) => p.user).filter(Boolean),
-        created_at: conv.created_at
+        created_at: conv.createdAt
       }));
 
     const invitations = [...directInvitations, ...groupInvitations];
@@ -1486,4 +1954,5 @@ router.post('/conversations/:conversationId/invitation/respond', authenticateTok
 });
 
 module.exports = router;
-
+// Exposé pour les tests unitaires (comportement du gate de mention en groupe).
+module.exports.isPolicierAddressedInGroup = isPolicierAddressedInGroup;

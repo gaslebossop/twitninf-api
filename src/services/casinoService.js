@@ -211,7 +211,7 @@ class CasinoService {
         userId,
         currencyId,
         bet,
-        { description: `Casino roue ${wheelMode.label} - mise ${bet} NF`, itemType: 'casino', itemId: 'wheel', metadata: { game: 'wheel', mode: modeId, segment: segment.label, multiplier } },
+        { description: `Casino roue ${wheelMode.label} - mise ${bet} NF`, itemType: 'casino', itemId: 'wheel', riskExemption: EconomyLedger.CASINO_RISK_EXEMPTION, metadata: { game: 'wheel', mode: modeId, segment: segment.label, multiplier } },
         dbTransaction
       );
 
@@ -284,7 +284,7 @@ class CasinoService {
         userId,
         currencyId,
         bet,
-        { description: `Casino dés — mise ${bet} NF (${chance}% de chance)`, itemType: 'casino', itemId: 'dice', metadata: { game: 'dice', winChance: chance, multiplier } },
+        { description: `Casino dés — mise ${bet} NF (${chance}% de chance)`, itemType: 'casino', itemId: 'dice', riskExemption: EconomyLedger.CASINO_RISK_EXEMPTION, metadata: { game: 'dice', winChance: chance, multiplier } },
         dbTransaction
       );
 
@@ -352,7 +352,7 @@ class CasinoService {
         userId,
         currencyId,
         bet,
-        { description: `Casino pile ou face — mise ${bet} NF sur ${pick}`, itemType: 'casino', itemId: 'coinflip', metadata: { game: 'coinflip', choice: pick, outcome } },
+        { description: `Casino pile ou face — mise ${bet} NF sur ${pick}`, itemType: 'casino', itemId: 'coinflip', riskExemption: EconomyLedger.CASINO_RISK_EXEMPTION, metadata: { game: 'coinflip', choice: pick, outcome } },
         dbTransaction
       );
 
@@ -412,7 +412,7 @@ class CasinoService {
         userId,
         currencyId,
         bet,
-        { description: `Casino machine a sous — mise ${bet} NF`, itemType: 'casino', itemId: 'slots', metadata: { game: 'slots', reels: reels.map(r => r.id) } },
+        { description: `Casino machine a sous — mise ${bet} NF`, itemType: 'casino', itemId: 'slots', riskExemption: EconomyLedger.CASINO_RISK_EXEMPTION, metadata: { game: 'slots', reels: reels.map(r => r.id) } },
         dbTransaction
       );
 

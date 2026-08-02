@@ -1,0 +1,1725 @@
+const express = require('express');
+const { param, query, validationResult } = require('express-validator');
+const router = express.Router();
+
+// Import des modèles et services
+const { User, UserFollow, Tweet, TweetLike, TweetRetweet, Notification, sequelize } = require('../models');
+const { Op } = require('sequelize');
+const multer = require('multer');
+const sharp = require('sharp');
+const fs = require('fs');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
+const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
+const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
+const BanService = require('../services/banService');
+const logger = require('../utils/logger');
+const ctrTracker = require('../services/ctrTracker');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
+const {
+  TIER,
+  TIER_PRICES_EUR,
+  DEFAULT_DURATION_DAYS,
+  nfAmountForEur,
+} = require('../constants/subscriptionTiers');
+const { getPlatformCurrency } = require('../economy/platformCurrency');
+const {
+  maybeExpireSubscription,
+  isSubscriptionActive,
+  computeNewExpiry,
+  normalizePurchasableTier,
+} = require('../utils/subscriptionHelpers');
+
+const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
+
+// Middleware de validation des erreurs
+const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
+      success: false,
+      message: 'Données invalides',
+      errors: errors.array()
+    });
+  }
+  next();
+};
+
+/**
+ * Tarifs des abonnements convertis au cours du NF du moment.
+ *
+ * Source unique de vérité : c'est ce que les clients affichent ET ce qui est
+ * débité. Si le cours est indisponible, aucun ancien montant fixe n'est
+ * renvoyé et l'achat reste bloqué.
+ */
+async function resolveSubscriptionPricing(transaction) {
+  const currency = await getPlatformCurrency({ transaction });
+  const nfPriceEur = Number(currency?.currentPrice) || null;
+
+  const forTier = (tier) => {
+    const eur = TIER_PRICES_EUR[tier];
+    const nf = nfAmountForEur(eur, nfPriceEur);
+    return { eur, nf: nf ?? 0, live: nf != null };
+  };
+
+  const plus = forTier(TIER.PLUS);
+  const pro = forTier(TIER.PRO);
+  const upgradeEur = Math.max(0, TIER_PRICES_EUR[TIER.PRO] - TIER_PRICES_EUR[TIER.PLUS]);
+  const upgradeNf = nfAmountForEur(upgradeEur, nfPriceEur);
+
+  return {
+    currency_id: currency?.id || null,
+    currency_symbol: currency?.symbol || 'NF',
+    nf_price_eur: nfPriceEur,
+    duration_days: DEFAULT_DURATION_DAYS,
+    plus,
+    pro,
+    upgrade: {
+      eur: upgradeEur,
+      nf: upgradeNf ?? 0,
+      live: upgradeNf != null,
+    },
+  };
+}
+
+/**
+ * Achat ou prolongation d'abonnement payant (Plus / Pro), débité en NF au
+ * cours du moment pour un prix en euros constant.
+ * @param {string|null} explicitTier — si défini (ex. 'plus'), ignore req.body.tier
+ */
+async function handleSubscriptionPurchase(req, res, explicitTier) {
+  const transaction = await sequelize.transaction();
+
+  try {
+    const tier = explicitTier != null
+      ? normalizePurchasableTier(explicitTier)
+      : normalizePurchasableTier(req.body.tier);
+
+    if (!tier) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Palier invalide. Utilisez « plus » ou « pro ».'
+      });
+    }
+
+    const duration = req.body.duration;
+    const userId = req.user.id;
+    const NewEconomyService = require('../services/newEconomyService');
+
+    const user = await User.findByPk(userId, { transaction, lock: true });
+    if (!user) {
+      await transaction.rollback();
+      return res.status(404).json({
+        success: false,
+        message: 'Utilisateur non trouvé'
+      });
+    }
+
+    await maybeExpireSubscription(user, transaction);
+    await user.reload({ transaction, lock: true });
+
+    const active = isSubscriptionActive(user);
+
+    if (active && user.subscription_tier === TIER.PRO && tier === TIER.PLUS) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Vous avez déjà un abonnement Pro. Le palier Plus n\'est pas disponible.'
+      });
+    }
+
+    const pricing = await resolveSubscriptionPricing(transaction);
+    const currencyId = pricing.currency_id;
+    if (!currencyId) {
+      await transaction.rollback();
+      return res.status(503).json({
+        success: false,
+        message: 'Le portefeuille NF est momentanément indisponible.'
+      });
+    }
+    if (!pricing[tier].live) {
+      await transaction.rollback();
+      return res.status(503).json({
+        success: false,
+        message: 'Le cours du NF est momentanément indisponible. Réessayez dans quelques instants : aucun achat ne sera facturé à un ancien prix fixe.'
+      });
+    }
+    let price = pricing[tier].nf;
+    let priceEur = pricing[tier].eur;
+    let itemId = `subscription_${tier}_${DEFAULT_DURATION_DAYS}d`;
+    const durationDays = Math.max(1, parseInt(duration, 10) || DEFAULT_DURATION_DAYS);
+    let description = `Abonnement ${tier === TIER.PLUS ? 'Plus' : 'Pro'} (${durationDays} j.)`;
+
+    if (active && user.subscription_tier === TIER.PLUS && tier === TIER.PRO) {
+      if (!pricing.upgrade.live) {
+        await transaction.rollback();
+        return res.status(503).json({
+          success: false,
+          message: 'Le cours du NF est momentanément indisponible. La mise à niveau ne peut pas être calculée.'
+        });
+      }
+      price = pricing.upgrade.nf;
+      priceEur = pricing.upgrade.eur;
+      itemId = 'subscription_upgrade_plus_to_pro';
+      description = `Mise à niveau Plus → Pro (${priceEur} €)`;
+      if (price <= 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Montant de mise à niveau invalide.'
+        });
+      }
+    }
+
+    await NewEconomyService.ensureWalletsForUser(userId, transaction);
+
+    let userWallet;
+    try {
+      userWallet = await NewEconomyService.getUserWallet(currencyId, userId, transaction);
+    } catch (walletError) {
+      console.error('❌ [SUB] Erreur récupération wallet:', walletError);
+      await transaction.rollback();
+      return res.status(500).json({
+        success: false,
+        message: 'Impossible de vérifier votre solde'
+      });
+    }
+
+    if (userWallet.wallet.balance < price) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Solde insuffisant. Vous avez ${userWallet.wallet.balance} NF, il en faut ${price} NF (${priceEur} €).`,
+        data: {
+          current_balance: userWallet.wallet.balance,
+          required_amount: price,
+          required_amount_eur: priceEur,
+          missing_amount: price - userWallet.wallet.balance
+        }
+      });
+    }
+
+    let spendResult;
+    try {
+      spendResult = await NewEconomyService.spendCoins(
+        userId,
+        currencyId,
+        price,
+        'subscription_purchase',
+        itemId,
+        description,
+        transaction
+      );
+    } catch (spendError) {
+      console.error('❌ [SUB] Erreur transaction NF:', spendError);
+      await transaction.rollback();
+      const isRiskError = transactionAuthorizationService.constructor.isRiskError(spendError);
+      return res.status(isRiskError ? spendError.httpStatus : 500).json({
+        success: false,
+        message: isRiskError
+          ? spendError.message
+          : 'Erreur lors de la transaction. Vos NF n\'ont pas été débités.',
+        code: isRiskError ? spendError.code : undefined
+      });
+    }
+
+    const paymentTransactionId =
+      spendResult?.transaction?.transactionHash ||
+      spendResult?.transactionHash ||
+      spendResult?.transaction?.id;
+    if (!paymentTransactionId) {
+      await transaction.rollback();
+      return res.status(500).json({
+        success: false,
+        message: 'Le paiement NF n’a pas pu être confirmé. Aucun abonnement n’a été activé.'
+      });
+    }
+
+    let nextExpiry;
+    if (active && user.subscription_tier === TIER.PLUS && tier === TIER.PRO) {
+      nextExpiry = user.subscription_expires_at
+        ? new Date(user.subscription_expires_at)
+        : computeNewExpiry(user, durationDays);
+    } else {
+      nextExpiry = computeNewExpiry(user, durationDays);
+    }
+
+    await user.update(
+      {
+        subscription_tier: tier,
+        subscription_expires_at: nextExpiry,
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+
+    await transaction.commit();
+
+    res.json({
+      success: true,
+      message: tier === TIER.PRO ? 'Abonnement Pro activé !' : 'Abonnement Plus activé !',
+      data: {
+        premium: true,
+        subscription_tier: tier,
+        subscription_expires_at: nextExpiry,
+        duration_days: durationDays,
+        payment_confirmed: true,
+        transaction_id: paymentTransactionId,
+        amount_spent: price,
+        amount_spent_eur: priceEur,
+        currency_symbol: pricing.currency_symbol,
+        remaining_balance: spendResult.remainingBalance
+      }
+    });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Erreur lors de l\'achat d\'abonnement:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de l\'achat de l\'abonnement'
+    });
+  }
+}
+
+// ========================================
+// ROUTES PUBLIQUES (sans authentification)
+// ========================================
+
+/**
+ * GET /api/users/suggestions
+ * Obtenir des suggestions d'utilisateurs à suivre
+ */
+router.get('/suggestions', [
+  authenticateToken,
+  denySuspended,
+  query('limit').optional().isInt({ min: 1, max: 20 }).withMessage('La limite doit être entre 1 et 20'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { limit = 10 } = req.query;
+    const userId = req.user.id;
+
+    const suggestions = await UserFollow.getFollowSuggestions(userId, parseInt(limit));
+
+    res.json({
+      success: true,
+      message: 'Suggestions d\'utilisateurs récupérées avec succès',
+      data: { suggestions }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des suggestions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * GET /api/users/profile/:username
+ * Obtenir le profil public d'un utilisateur par son username
+ */
+router.get('/profile/:username', [
+  param('username').isLength({ min: 1, max: 30 }).withMessage('Username doit être entre 1 et 30 caractères'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { username } = req.params;
+    
+    const user = await User.findOne({
+      where: { 
+        username: username,
+        is_active: true,
+        is_suspended: false
+      },
+      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium', 'subscription_tier', 'verification_style', 'stats', 'profile_customization', 'created_at', 'last_activity']
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Profil introuvable'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Profil utilisateur récupéré avec succès',
+      data: { user }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la récupération du profil utilisateur par username:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * GET /api/users/profile/authenticated/:username
+ * Obtenir le profil d'un utilisateur par son username (authentifié),
+ * en incluant des informations de relation (ex: isFollowing)
+ */
+router.get('/profile/authenticated/:username', [
+  authenticateToken,
+  checkUserBanReadOnly,
+  param('username').isLength({ min: 1, max: 30 }).withMessage('Username doit être entre 1 et 30 caractères'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { username } = req.params;
+    const currentUserId = req.user.id;
+
+    const user = await User.findOne({
+      where: {
+        username: username,
+        is_active: true,
+        is_suspended: false
+      },
+      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'verified', 'premium', 'subscription_tier', 'verification_style', 'stats', 'profile_customization', 'is_private_account', 'created_at', 'last_activity']
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Profil introuvable'
+      });
+    }
+
+    // 📊 Track profile view pour l'algorithme Rust
+    if (currentUserId && user.id !== currentUserId) {
+      ctrTracker.trackProfileView(currentUserId, user.id).catch(err => {
+        logger.warn(`CTR tracking error: ${err.message}`);
+      });
+    }
+
+    // Déterminer la relation de suivi si l'utilisateur courant n'est pas le même
+    let isFollowing = false;
+    let followStatus = null;
+    if (currentUserId && user.id !== currentUserId) {
+      const existingFollow = await UserFollow.findOne({
+        where: { follower_id: currentUserId, following_id: user.id },
+        attributes: ['status']
+      });
+      followStatus = existingFollow?.status || null;
+      isFollowing = followStatus === 'active';
+    }
+
+    res.json({
+      success: true,
+      message: 'Profil utilisateur (auth) récupéré avec succès',
+      data: { user, isFollowing, followStatus }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la récupération du profil utilisateur (auth):', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * GET /api/users/subscription-pricing
+ * Prix Premium fixe en euros et équivalent NF calculé au cours du moment.
+ * Cette route doit rester AVANT `/:id`, sinon Express traite
+ * "subscription-pricing" comme un identifiant utilisateur.
+ */
+router.get('/subscription-pricing', authenticateToken, async (req, res) => {
+  try {
+    return res.json({ success: true, data: await resolveSubscriptionPricing() });
+  } catch (error) {
+    logger.error('Erreur subscription-pricing:', error);
+    return res.status(503).json({ success: false, message: 'Le cours du NF est momentanément indisponible.' });
+  }
+});
+
+/**
+ * GET /api/users/follow-requests
+ * Demandes de suivi reçues, en attente d'approbation (compte privé).
+ * Cette route doit rester AVANT `/:id`, même raison que subscription-pricing.
+ */
+router.get('/follow-requests', authenticateToken, async (req, res) => {
+  try {
+    const requests = await UserFollow.findAll({
+      where: { following_id: req.user.id, status: 'pending' },
+      include: [{
+        model: User,
+        as: 'follower',
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'profile_customization']
+      }],
+      order: [['created_at', 'DESC']]
+    });
+
+    res.json({ success: true, message: 'Demandes de suivi récupérées avec succès', data: { requests } });
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des demandes de suivi:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * PUT /api/users/follow-requests/:followId/accept
+ * Accepter une demande de suivi reçue.
+ */
+router.put('/follow-requests/:followId/accept', [
+  authenticateToken,
+  param('followId').isUUID().withMessage('ID de demande invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const request = await UserFollow.findOne({
+      where: { id: req.params.followId, following_id: req.user.id, status: 'pending' }
+    });
+
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Demande de suivi introuvable' });
+    }
+
+    await request.update({ status: 'active' });
+
+    res.json({ success: true, message: 'Demande de suivi acceptée', data: { follow: request } });
+  } catch (error) {
+    logger.error('Erreur lors de l\'acceptation de la demande de suivi:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * PUT /api/users/follow-requests/:followId/reject
+ * Refuser (supprimer) une demande de suivi reçue.
+ */
+router.put('/follow-requests/:followId/reject', [
+  authenticateToken,
+  param('followId').isUUID().withMessage('ID de demande invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const request = await UserFollow.findOne({
+      where: { id: req.params.followId, following_id: req.user.id, status: 'pending' }
+    });
+
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Demande de suivi introuvable' });
+    }
+
+    await request.destroy();
+
+    res.json({ success: true, message: 'Demande de suivi refusée' });
+  } catch (error) {
+    logger.error('Erreur lors du refus de la demande de suivi:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * DELETE /api/users/followers/:followerId
+ * Retirer quelqu'un de SES propres abonnés.
+ *
+ * L'inverse de `DELETE /:id/follow` : là, on décide de ne plus suivre ; ici, on
+ * décide que quelqu'un ne nous suit plus. C'est le geste qui manquait pour
+ * qu'un compte privé serve à quelque chose une fois qu'on a accepté quelqu'un
+ * par erreur — sans lui, il fallait passer le compte en public, retirer, et
+ * repasser en privé.
+ *
+ * Le lien est SUPPRIMÉ, pas repassé en `pending` : une demande en attente est
+ * quelque chose que la personne a formulé, la fabriquer à sa place lui ferait
+ * croire qu'elle a redemandé. Elle repart donc de zéro et devra refaire la
+ * démarche — qui retombera en `pending` si le compte est toujours privé.
+ */
+router.delete('/followers/:followerId', [
+  authenticateToken,
+  denySuspended,
+  param('followerId').isUUID().withMessage('ID d\'utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const ownerId = req.user.id;
+    const followerId = req.params.followerId;
+
+    if (String(ownerId) === String(followerId)) {
+      return res.status(400).json({ success: false, message: 'Opération invalide' });
+    }
+
+    // On ne retire QUE des liens qui pointent vers soi : impossible de casser
+    // l'abonnement de deux tiers, même en devinant leurs identifiants.
+    const follow = await UserFollow.findOne({
+      where: { follower_id: followerId, following_id: ownerId }
+    });
+
+    if (!follow) {
+      return res.status(404).json({
+        success: false,
+        message: 'Cette personne ne fait pas partie de vos abonnés'
+      });
+    }
+
+    // `destroy` déclenche le hook qui décrémente les compteurs des deux côtés —
+    // et uniquement pour un lien `active`, donc retirer une demande encore en
+    // attente ne fait pas tomber le compteur d'abonnés en négatif.
+    await follow.destroy();
+
+    // Le graphe du moteur de similarité doit oublier l'arête, sinon il
+    // continue de recommander comme si la personne suivait toujours.
+    try {
+      const similarity = require('../services/similarity');
+      similarity.onUnfollow(followerId, ownerId);
+
+      const videoRecommendationService = require('../services/videoRecommendationService');
+      videoRecommendationService.onFollow(followerId, ownerId, false);
+    } catch (e) { /* non-critique */ }
+
+    res.json({
+      success: true,
+      message: 'Abonné retiré',
+      data: { removed_follower_id: String(followerId) }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors du retrait d\'un abonné:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * GET /api/users/:id
+ * Obtenir le profil public d'un utilisateur par son ID
+ */
+router.get('/:id', [
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const user = await User.findOne({
+      where: { 
+        id: id,
+        is_active: true,
+        is_suspended: false
+      },
+      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium', 'verification_style', 'stats', 'profile_customization', 'is_private_account', 'created_at', 'last_activity']
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Profil introuvable'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Profil utilisateur récupéré avec succès',
+      data: { user }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la récupération du profil utilisateur:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * GET /api/users/:id/tweets
+ * Obtenir les tweets d'un utilisateur
+ */
+/**
+ * Enrichit une liste de tweets avec compteurs (likes/retweets/replies) et
+ * statut d'interaction de l'utilisateur courant, en batch (une requête par
+ * métrique pour toute la page) au lieu d'une requête par tweet.
+ */
+async function hydrateTweetStats(tweets, currentUserId) {
+  const tweetIds = tweets.map((t) => t.id);
+  if (tweetIds.length === 0) return [];
+
+  const [likeCounts, retweetCounts, replyCounts, likedRows, retweetedRows] = await Promise.all([
+    TweetLike.findAll({
+      where: { tweet_id: tweetIds },
+      attributes: ['tweet_id', [sequelize.fn('COUNT', sequelize.col('id')), 'count']],
+      group: ['tweet_id'],
+      raw: true
+    }),
+    TweetRetweet.findAll({
+      where: { tweet_id: tweetIds },
+      attributes: ['tweet_id', [sequelize.fn('COUNT', sequelize.col('id')), 'count']],
+      group: ['tweet_id'],
+      raw: true
+    }),
+    Tweet.findAll({
+      where: { parent_tweet_id: tweetIds },
+      attributes: ['parent_tweet_id', [sequelize.fn('COUNT', sequelize.col('id')), 'count']],
+      group: ['parent_tweet_id'],
+      raw: true
+    }),
+    currentUserId
+      ? TweetLike.findAll({ where: { tweet_id: tweetIds, user_id: currentUserId }, attributes: ['tweet_id'], raw: true })
+      : [],
+    currentUserId
+      ? TweetRetweet.findAll({ where: { tweet_id: tweetIds, user_id: currentUserId }, attributes: ['tweet_id'], raw: true })
+      : []
+  ]);
+
+  const likeCountMap = new Map(likeCounts.map((r) => [r.tweet_id, parseInt(r.count, 10)]));
+  const retweetCountMap = new Map(retweetCounts.map((r) => [r.tweet_id, parseInt(r.count, 10)]));
+  const replyCountMap = new Map(replyCounts.map((r) => [r.parent_tweet_id, parseInt(r.count, 10)]));
+  const likedSet = new Set(likedRows.map((r) => r.tweet_id));
+  const retweetedSet = new Set(retweetedRows.map((r) => r.tweet_id));
+
+  return tweets.map((tweet) => ({
+    ...tweet.toJSON(),
+    stats: {
+      likes: likeCountMap.get(tweet.id) || 0,
+      retweets: retweetCountMap.get(tweet.id) || 0,
+      replies: replyCountMap.get(tweet.id) || 0,
+      views: tweet.view_count || 0
+    },
+    user_interaction: {
+      is_liked: likedSet.has(tweet.id),
+      is_retweeted: retweetedSet.has(tweet.id)
+    }
+  }));
+}
+
+router.get('/:id/tweets', [
+  authenticateToken,
+  checkUserBanReadOnly,
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
+  query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
+  query('type').optional().isIn(['all', 'tweets', 'replies', 'retweets']).withMessage('Type de tweet invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { limit = 20, offset = 0, type = 'all' } = req.query;
+
+    // Vérifier que l'utilisateur existe
+    const user = await User.findOne({
+      where: { 
+        id: id,
+        is_active: true,
+        is_suspended: false
+      },
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'is_private_account', 'profile_customization']
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Profil introuvable'
+      });
+    }
+
+    // Utilisateur authentifié via middleware
+    const currentUserId = req.user.id;
+
+    // Compte privé : personne d'autre que le propriétaire ou un abonné
+    // accepté (`active`) ne voit les tweets. Le client déduit l'état
+    // "verrouillé" de `user.is_private_account` + son statut de suivi.
+    if (user.is_private_account && String(currentUserId) !== String(id)) {
+      const isFollower = await UserFollow.isFollowing(currentUserId, id);
+      if (!isFollower) {
+        return res.json({
+          success: true,
+          message: 'Tweets de l\'utilisateur récupérés avec succès',
+          data: {
+            user,
+            tweets: [],
+            pagination: { total: 0, limit: parseInt(limit), offset: parseInt(offset), hasMore: false }
+          }
+        });
+      }
+    }
+
+    let tweets = [];
+    let totalCount = 0;
+
+    if (type === 'retweets') {
+      // Récupérer les retweets via la table TweetRetweet
+      const retweets = await TweetRetweet.findAll({
+        where: { user_id: id },
+        include: [{
+          model: Tweet,
+          as: 'tweet',
+          include: [{
+            model: User,
+            as: 'author',
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
+          }]
+        }],
+        order: [['created_at', 'DESC']],
+        limit: parseInt(limit),
+        offset: parseInt(offset)
+      });
+
+      totalCount = await TweetRetweet.count({ where: { user_id: id } });
+
+      // Mapper vers les tweets enrichis (stats/interactions en batch, pas de N+1)
+      tweets = await hydrateTweetStats(retweets.map((rt) => rt.tweet), currentUserId);
+    } else {
+      // Tweets et réponses (et éventuellement all)
+      const whereClause = { user_id: id, is_private: false, moderation_status: 'approved' };
+      if (type === 'replies') {
+        whereClause.parent_tweet_id = { [Op.ne]: null };
+        whereClause.is_retweet = false;
+        whereClause.is_quote = false;
+      } else if (type === 'tweets') {
+        whereClause.parent_tweet_id = null;
+        whereClause.is_retweet = false;
+        whereClause.is_quote = false;
+      }
+
+      const rawTweets = await Tweet.findAll({
+        where: whereClause,
+        include: [{
+          model: User,
+          as: 'author',
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
+        }],
+        order: [['created_at', 'DESC']],
+        limit: parseInt(limit),
+        offset: parseInt(offset)
+      });
+
+      totalCount = await Tweet.count({ where: whereClause });
+
+      tweets = await hydrateTweetStats(rawTweets, currentUserId);
+    }
+
+    res.json({
+      success: true,
+      message: 'Tweets de l\'utilisateur récupérés avec succès',
+      data: {
+        user,
+        tweets,
+        pagination: {
+          total: totalCount,
+          limit: parseInt(limit),
+          offset: parseInt(offset),
+          hasMore: offset + tweets.length < totalCount
+        }
+      }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des tweets de l\'utilisateur:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * GET /api/users/:id/followers
+ * Obtenir les followers d'un utilisateur
+ */
+router.get('/:id/followers', [
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
+  query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { limit = 20, offset = 0 } = req.query;
+
+    // Vérifier que l'utilisateur existe
+    const user = await User.findByPk(id, {
+      where: { is_active: true },
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Utilisateur non trouvé'
+      });
+    }
+
+    const followers = await UserFollow.getFollowers(id, {
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+      includeUser: true
+    });
+
+    // Compter le total
+    const totalCount = await UserFollow.countFollowers(id);
+
+    res.json({
+      success: true,
+      message: 'Followers récupérés avec succès',
+      data: {
+        user,
+        followers: followers.map(f => f.follower),
+        pagination: {
+          total: totalCount,
+          limit: parseInt(limit),
+          offset: parseInt(offset),
+          hasMore: offset + followers.length < totalCount
+        }
+      }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des followers:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * GET /api/users/:id/following
+ * Obtenir les utilisateurs suivis par un utilisateur
+ */
+router.get('/:id/following', [
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
+  query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { limit = 20, offset = 0 } = req.query;
+
+    // Vérifier que l'utilisateur existe
+    const user = await User.findByPk(id, {
+      where: { is_active: true },
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Utilisateur non trouvé'
+      });
+    }
+
+    const following = await UserFollow.getFollowing(id, {
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+      includeUser: true
+    });
+
+    // Compter le total
+    const totalCount = await UserFollow.countFollowing(id);
+
+    res.json({
+      success: true,
+      message: 'Utilisateurs suivis récupérés avec succès',
+      data: {
+        user,
+        following: following.map(f => f.following),
+        pagination: {
+          total: totalCount,
+          limit: parseInt(limit),
+          offset: parseInt(offset),
+          hasMore: offset + following.length < totalCount
+        }
+      }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des utilisateurs suivis:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+// ========================================
+// ROUTES PROTÉGÉES (avec authentification)
+// ========================================
+
+/**
+ * POST /api/users/:id/follow
+ * S'abonner à un utilisateur
+ */
+router.post('/:id/follow', [
+  authenticateToken,
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const followerId = req.user.id;
+    const followingId = req.params.id;
+
+    // Vérifier que l'utilisateur ne suit pas lui-même
+    if (followerId === followingId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vous ne pouvez pas vous suivre vous-même'
+      });
+    }
+
+    // Vérifier que l'utilisateur à suivre existe
+    const userToFollow = await User.findByPk(followingId, {
+      where: { is_active: true }
+    });
+
+    if (!userToFollow) {
+      return res.status(404).json({
+        success: false,
+        message: 'Utilisateur à suivre non trouvé'
+      });
+    }
+
+    // Vérifier si l'utilisateur suit déjà
+    const existingFollow = await UserFollow.findOne({
+      where: {
+        follower_id: followerId,
+        following_id: followingId
+      }
+    });
+
+    if (existingFollow) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vous suivez déjà cet utilisateur'
+      });
+    }
+
+    // Compte privé : la demande reste en attente jusqu'à approbation par la
+    // cible, elle ne compte pas encore comme un suivi (cf. hooks UserFollow).
+    const targetStatus = userToFollow.is_private_account ? 'pending' : 'active';
+
+    // Créer le suivi
+    const follow = await UserFollow.create({
+      follower_id: followerId,
+      following_id: followingId,
+      status: targetStatus,
+      metadata: {
+        source: req.userPlatform || 'unknown',
+        device: req.headers['user-agent'] || 'unknown',
+        ip_address: req.ip
+      }
+    });
+
+    if (targetStatus === 'pending') {
+      try {
+        await Notification.createFollowRequestNotification(followerId, followingId);
+      } catch (e) { /* non-critique */ }
+    } else {
+      // 🔗 Mettre à jour le graphe social du moteur de similarité en temps réel
+      try {
+        const similarity = require('../services/similarity');
+        similarity.onFollow(followerId, followingId);
+
+        // 🎬 [VideoReco] New video engine follow
+        const videoRecommendationService = require('../services/videoRecommendationService');
+        videoRecommendationService.onFollow(followerId, followingId, true);
+      } catch (e) { /* non-critique */ }
+    }
+
+    res.status(201).json({
+      success: true,
+      message: targetStatus === 'pending' ? 'Demande de suivi envoyée' : 'Abonnement créé avec succès',
+      data: { follow, status: targetStatus }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la création de l\'abonnement:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * DELETE /api/users/:id/follow
+ * Se désabonner d'un utilisateur
+ */
+router.delete('/:id/follow', [
+  authenticateToken,
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const followerId = req.user.id;
+    const followingId = req.params.id;
+
+    // Vérifier que l'utilisateur ne se désabonne pas de lui-même
+    if (followerId === followingId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Opération invalide'
+      });
+    }
+
+    // Vérifier si l'utilisateur suit déjà
+    const existingFollow = await UserFollow.findOne({
+      where: {
+        follower_id: followerId,
+        following_id: followingId
+      }
+    });
+
+    if (!existingFollow) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vous ne suivez pas cet utilisateur'
+      });
+    }
+
+    // Supprimer le suivi
+    await existingFollow.destroy();
+
+    // 🔗 Mettre à jour le graphe social du moteur de similarité en temps réel
+    try {
+      const similarity = require('../services/similarity');
+      similarity.onUnfollow(followerId, followingId);
+
+      // 🎬 [VideoReco] New video engine unfollow
+      const videoRecommendationService = require('../services/videoRecommendationService');
+      videoRecommendationService.onFollow(followerId, followingId, false);
+    } catch (e) { /* non-critique */ }
+
+    res.json({
+      success: true,
+      message: 'Désabonnement effectué avec succès'
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la suppression de l\'abonnement:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * POST /api/users/me/avatar
+ * Importer une image d'avatar, la stocker et mettre à jour l'URL de profil
+ */
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) {
+      return cb(new Error('Seules les images sont autorisées'));
+    }
+    cb(null, true);
+  }
+});
+
+router.post('/me/avatar', [
+  authenticateToken,
+  upload.single('avatar')
+], async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Fichier avatar manquant (champ "avatar")' });
+    }
+
+    const userId = req.user.id;
+    const avatarsDir = path.join(__dirname, '../public/avatars');
+    fs.mkdirSync(avatarsDir, { recursive: true });
+
+    const filename = `${userId}-${Date.now()}-${uuidv4().slice(0,8)}.jpg`;
+    const outputPath = path.join(avatarsDir, filename);
+
+    // Traitement image: carré 256x256, couverture, JPEG qualité 85
+    await sharp(req.file.buffer)
+      .rotate()
+      .resize(256, 256, { fit: 'cover', withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toFile(outputPath);
+
+    const publicUrl = buildStaticMediaPublicUrl('avatars', filename);
+
+    // Mettre à jour l'utilisateur
+    const user = await User.findByPk(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+    }
+    user.avatar = publicUrl;
+    logger.info(`Avatar DB URL: ${publicUrl}`);
+    await user.save();
+
+    return res.status(201).json({
+      success: true,
+      message: 'Avatar mis à jour avec succès',
+      data: { url: publicUrl }
+    });
+  } catch (error) {
+    logger.error('Erreur upload avatar:', error);
+    return res.status(500).json({ success: false, message: 'Erreur lors de l\'upload de l\'avatar' });
+  }
+});
+
+/**
+ * POST /api/users/me/banner
+ * Bannière profil (image large), stockée et URL enregistrée sur l'utilisateur
+ */
+router.post('/me/banner', [
+  authenticateToken,
+  upload.single('banner')
+], async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Fichier bannière manquant (champ "banner")' });
+    }
+
+    const userId = req.user.id;
+    const bannersDir = path.join(__dirname, '../public/banners');
+    fs.mkdirSync(bannersDir, { recursive: true });
+
+    const filename = `banner-${userId}-${Date.now()}-${uuidv4().slice(0, 8)}.jpg`;
+    const outputPath = path.join(bannersDir, filename);
+
+    await sharp(req.file.buffer)
+      .rotate()
+      .resize(1500, 500, { fit: 'cover', withoutEnlargement: false })
+      .jpeg({ quality: 82 })
+      .toFile(outputPath);
+
+    const publicUrl = buildStaticMediaPublicUrl('banners', filename);
+
+    const user = await User.findByPk(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+    }
+    user.banner = publicUrl;
+    logger.info(`Banner DB URL: ${publicUrl}`);
+    await user.save();
+
+    return res.status(201).json({
+      success: true,
+      message: 'Bannière mise à jour avec succès',
+      data: { url: publicUrl }
+    });
+  } catch (error) {
+    logger.error('Erreur upload bannière:', error);
+    return res.status(500).json({ success: false, message: 'Erreur lors de l\'upload de la bannière' });
+  }
+});
+
+/**
+ * GET /api/users/:id/follow-status
+ * Vérifier le statut de suivi entre deux utilisateurs
+ */
+router.get('/:id/follow-status', [
+  authenticateToken,
+  param('id').notEmpty().withMessage('ID d\'utilisateur requis'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const followerId = req.user.id;
+    const followingId = req.params.id;
+
+    // Statut brut de la relation (`active`, `pending`, ou absente) : la
+    // demande de suivi sur un compte privé n'est pas encore "isFollowing".
+    const existingFollow = await UserFollow.findOne({
+      where: { follower_id: followerId, following_id: followingId },
+      attributes: ['status']
+    });
+    const status = existingFollow?.status || null;
+
+    res.json({
+      success: true,
+      message: 'Statut de suivi récupéré avec succès',
+      data: { isFollowing: status === 'active', status }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la vérification du statut de suivi:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+// ========================================
+// ROUTES D'ADMINISTRATION DES BANS
+// ========================================
+
+/**
+ * POST /api/users/:id/suspend
+ * Suspendre un utilisateur (admin seulement)
+ */
+router.post('/:id/suspend', [
+  authenticateToken,
+  checkUserBanStrict, // Vérifier que l'admin n'est pas banni
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason, duration_days = 7 } = req.body;
+    const adminId = req.user.id;
+
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        message: 'Raison de suspension requise'
+      });
+    }
+
+    const result = await BanService.suspendUser(id, reason, duration_days, adminId);
+
+    res.json({
+      success: true,
+      message: 'Utilisateur suspendu avec succès',
+      data: result
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la suspension:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la suspension'
+    });
+  }
+});
+
+/**
+ * POST /api/users/:id/unsuspend
+ * Lever la suspension d'un utilisateur (admin seulement)
+ */
+router.post('/:id/unsuspend', [
+  authenticateToken,
+  checkUserBanStrict,
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const adminId = req.user.id;
+
+    const result = await BanService.unsuspendUser(id, adminId);
+
+    res.json({
+      success: true,
+      message: 'Suspension levée avec succès',
+      data: result
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la levée de suspension:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la levée de suspension'
+    });
+  }
+});
+
+/**
+ * POST /api/users/:id/ban
+ * Ajouter un ban à un utilisateur (admin seulement)
+ */
+router.post('/:id/ban', [
+  authenticateToken,
+  checkUserBanStrict,
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    const adminId = req.user.id;
+
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        message: 'Raison du ban requise'
+      });
+    }
+
+    const result = await BanService.addBan(id, reason, adminId);
+
+    res.json({
+      success: true,
+      message: 'Ban ajouté avec succès',
+      data: result
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de l\'ajout du ban:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de l\'ajout du ban'
+    });
+  }
+});
+
+/**
+ * POST /api/users/:id/unban
+ * Réduire le nombre de bans d'un utilisateur (admin seulement)
+ */
+router.post('/:id/unban', [
+  authenticateToken,
+  checkUserBanStrict,
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const adminId = req.user.id;
+
+    const result = await BanService.reduceBan(id, adminId);
+
+    res.json({
+      success: true,
+      message: 'Ban réduit avec succès',
+      data: result
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la réduction du ban:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la réduction du ban'
+    });
+  }
+});
+
+/**
+ * GET /api/users/:id/ban-history
+ * Obtenir l'historique des bans d'un utilisateur
+ */
+router.get('/:id/ban-history', [
+  authenticateToken,
+  checkUserBanReadOnly,
+  param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const history = await BanService.getBanHistory(id);
+
+    res.json({
+      success: true,
+      message: 'Historique des bans récupéré avec succès',
+      data: history
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la récupération de l\'historique des bans:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la récupération de l\'historique des bans'
+    });
+  }
+});
+
+/**
+ * POST /api/users/purchase-subscription
+ * Acheter ou prolonger un abonnement payant (body.tier: « plus » | « pro »).
+ */
+router.post('/purchase-subscription', [
+  authenticateToken,
+  denySuspended
+], async (req, res) => handleSubscriptionPurchase(req, res, null));
+
+/**
+ * POST /api/users/purchase-premium
+ * Rétrocompatibilité : achète le palier Plus (équivalent ancien « premium » d’entrée de gamme).
+ */
+router.post('/purchase-premium', [
+  authenticateToken,
+  denySuspended
+], async (req, res) => handleSubscriptionPurchase(req, res, TIER.PLUS));
+
+/* ── Personnalisation de profil premium (façon Discord) ─────────────────── */
+
+/** Palettes proposées : on ne stocke que des couleurs validées, jamais du CSS libre. */
+const PROFILE_BANNER_STYLES = ['none', 'gradient', 'glow', 'mesh', 'stripes'];
+const PROFILE_AVATAR_DECORATIONS = ['none', 'ring', 'crown', 'petals', 'circuit', 'flames', 'stars'];
+/** Force du thème de profil : le même dégradé, plus ou moins poussé. */
+const PROFILE_THEME_INTENSITIES = ['soft', 'normal', 'vivid'];
+/**
+ * Nom affiché : police + traitement animé (palier Pro).
+ * Le vocabulaire des polices est celui que le client mobile sait déjà résoudre
+ * (`utils/profileDisplayNamePrefs`) — il était jusqu'ici stocké sur l'appareil,
+ * donc invisible pour les visiteurs.
+ */
+const PROFILE_NAME_FONTS = ['system', 'display', 'editorial', 'serif', 'mono', 'compact'];
+const PROFILE_NAME_EFFECTS = ['none', 'gradient', 'shimmer', 'glow', 'certified'];
+
+/**
+ * « Certifié » ne se paie pas : il reprend la couleur du badge de vérification
+ * et ne s'ouvre qu'aux comptes `verified`. C'est le seul habillage adossé à la
+ * certification plutôt qu'au palier d'abonnement — un compte Pro non certifié
+ * n'y a pas droit, un compte certifié gratuit y a droit.
+ */
+const CERTIFIED_NAME_EFFECT = 'certified';
+/** Ambiance animée peinte EN FOND du profil, jamais par-dessus (palier Pro). */
+const PROFILE_EFFECTS = ['none', 'sparkles', 'embers', 'bubbles', 'snow'];
+/** Titre libre affiché sous le pseudo — court, sinon il concurrence la bio. */
+const PROFILE_TITLE_MAX = 40;
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+/** Palier minimum pour personnaliser : Plus. Pro débloque les décorations. */
+function customizationTier(user) {
+  const tier = String(user?.subscription_tier || TIER.FREE);
+  if (tier === TIER.PRO || tier === TIER.PLUS) return tier;
+  // `premium` est l'ancien drapeau : il vaut Pro pour les comptes historiques.
+  return user?.premium ? TIER.PRO : TIER.FREE;
+}
+
+function sanitizeCustomization(input, tier, { verified = false } = {}) {
+  const source = input && typeof input === 'object' ? input : {};
+  const output = {};
+  // Un compte certifié gratuit passe la porte de la route pour son seul effet
+  // de nom : tout le reste reste payant, d'où ce garde-fou champ par champ.
+  const paid = tier !== TIER.FREE;
+
+  if (paid && typeof source.accent_color === 'string' && HEX_COLOR.test(source.accent_color.trim())) {
+    output.accent_color = source.accent_color.trim().toLowerCase();
+  }
+  if (paid && typeof source.secondary_color === 'string' && HEX_COLOR.test(source.secondary_color.trim())) {
+    output.secondary_color = source.secondary_color.trim().toLowerCase();
+  }
+  if (paid && PROFILE_BANNER_STYLES.includes(source.banner_style)) {
+    output.banner_style = source.banner_style;
+  }
+  if (paid && PROFILE_THEME_INTENSITIES.includes(source.theme_intensity)) {
+    output.theme_intensity = source.theme_intensity;
+  }
+  // Les décorations d'avatar sont l'avantage exclusif du palier Pro.
+  if (PROFILE_AVATAR_DECORATIONS.includes(source.avatar_decoration)) {
+    output.avatar_decoration = tier === TIER.PRO ? source.avatar_decoration : 'none';
+  }
+  // Même règle pour les deux habillages animés arrivés ensuite : ils sont la
+  // contrepartie visible du palier Pro, un compte Plus les voit mais ne les
+  // enregistre pas.
+  if (PROFILE_NAME_FONTS.includes(source.name_font)) {
+    output.name_font = tier === TIER.PRO ? source.name_font : 'system';
+  }
+  if (PROFILE_NAME_EFFECTS.includes(source.name_effect)) {
+    // Deux droits différents selon l'effet : « Certifié » suit le badge, les
+    // autres suivent le palier payant.
+    const allowed = source.name_effect === CERTIFIED_NAME_EFFECT
+      ? verified
+      : tier === TIER.PRO;
+    output.name_effect = allowed ? source.name_effect : 'none';
+  }
+  if (PROFILE_EFFECTS.includes(source.profile_effect)) {
+    output.profile_effect = tier === TIER.PRO ? source.profile_effect : 'none';
+  }
+  if (paid && typeof source.profile_title === 'string') {
+    const title = source.profile_title.trim().replace(/\s+/g, ' ').slice(0, PROFILE_TITLE_MAX);
+    if (title) output.profile_title = title;
+  }
+  if (paid && typeof source.about_me === 'string') {
+    const about = source.about_me.trim().slice(0, 300);
+    if (about) output.about_me = about;
+  }
+  return output;
+}
+
+/**
+ * GET /api/users/me/profile-customization
+ * Renvoie la personnalisation courante et ce que le palier autorise.
+ */
+router.get('/me/profile-customization', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id, {
+      attributes: ['id', 'premium', 'subscription_tier', 'verified', 'verification_style', 'profile_customization']
+    });
+    if (!user) return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+
+    const tier = customizationTier(user);
+    return res.json({
+      success: true,
+      data: {
+        customization: user.profile_customization || {},
+        tier,
+        can_customize: tier !== TIER.FREE,
+        can_use_decorations: tier === TIER.PRO,
+        // Droit adossé à la certification, pas à l'abonnement.
+        can_use_certified_name: !!user.verified,
+        verification_style: user.verification_style || 'default',
+        options: {
+          banner_styles: PROFILE_BANNER_STYLES,
+          theme_intensities: PROFILE_THEME_INTENSITIES,
+          avatar_decorations: PROFILE_AVATAR_DECORATIONS,
+          name_fonts: PROFILE_NAME_FONTS,
+          name_effects: PROFILE_NAME_EFFECTS,
+          profile_effects: PROFILE_EFFECTS,
+          profile_title_max: PROFILE_TITLE_MAX
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Erreur lecture personnalisation profil:', error);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * PUT /api/users/me/profile-customization
+ * Enregistre couleurs / style de bannière / décoration / à propos.
+ */
+router.put('/me/profile-customization', [authenticateToken, denySuspended], async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id);
+    if (!user) return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+
+    const tier = customizationTier(user);
+    // La certification ouvre à elle seule l'effet de nom « Certifié » : un compte
+    // certifié gratuit doit pouvoir l'enregistrer. `sanitizeCustomization`
+    // écarte ensuite tout le reste, qui demande bien un abonnement.
+    if (tier === TIER.FREE && !user.verified) {
+      return res.status(403).json({
+        success: false,
+        message: 'La personnalisation de profil est réservée aux abonnements Plus et Pro',
+        code: 'SUBSCRIPTION_REQUIRED'
+      });
+    }
+
+    const customization = sanitizeCustomization(req.body?.customization ?? req.body, tier, {
+      verified: !!user.verified,
+    });
+    user.profile_customization = customization;
+    // `profile_customization` est un JSONB muté par assignation : sans ce
+    // `changed`, Sequelize ne détecte pas toujours la modification et le save
+    // repart sans rien écrire.
+    user.changed('profile_customization', true);
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: 'Personnalisation enregistrée',
+      data: { customization, tier }
+    });
+  } catch (error) {
+    logger.error('Erreur sauvegarde personnalisation profil:', error);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * POST /api/users/:id/block
+ * Bloquer un utilisateur
+ */
+router.post('/:id/block', [
+  authenticateToken,
+  denySuspended,
+  param('id').isUUID().withMessage('ID utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id: blockedUserId } = req.params;
+    const currentUserId = req.user.id;
+
+    // Vérifier qu'on ne se bloque pas soi-même
+    if (currentUserId === blockedUserId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vous ne pouvez pas vous bloquer vous-même'
+      });
+    }
+
+    // Vérifier que l'utilisateur à bloquer existe
+    const userToBlock = await User.findByPk(blockedUserId);
+    if (!userToBlock) {
+      return res.status(404).json({
+        success: false,
+        message: 'Utilisateur non trouvé'
+      });
+    }
+
+    // Stocker le block dans Redis pour performance
+    // Clé: user:blocked:{userId} = SET d'user IDs bloqués
+    const blockKey = `user:blocked:${currentUserId}`;
+
+    // 📊 Track block pour l'algorithme Rust
+    ctrTracker.trackBlock(currentUserId, blockedUserId).catch(err => {
+      logger.warn(`CTR tracking error: ${err.message}`);
+    });
+
+    // Si l'utilisateur était suivi, le retirer du follow
+    const following = await UserFollow.findOne({
+      where: {
+        follower_id: currentUserId,
+        following_id: blockedUserId
+      }
+    });
+
+    if (following) {
+      await following.destroy();
+    }
+
+    logger.info(`Utilisateur ${currentUserId} a bloqué ${blockedUserId}`);
+
+    res.json({
+      success: true,
+      message: 'Utilisateur bloqué avec succès',
+      data: {
+        blocked_user_id: blockedUserId,
+        blocked: true
+      }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors du blocage:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * POST /api/users/:id/unblock
+ * Débloquer un utilisateur
+ */
+router.post('/:id/unblock', [
+  authenticateToken,
+  denySuspended,
+  param('id').isUUID().withMessage('ID utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const { id: unblockedUserId } = req.params;
+    const currentUserId = req.user.id;
+
+    // Vérifier que l'utilisateur à débloquer existe
+    const userToUnblock = await User.findByPk(unblockedUserId);
+    if (!userToUnblock) {
+      return res.status(404).json({
+        success: false,
+        message: 'Utilisateur non trouvé'
+      });
+    }
+
+    // Supprimer du blocage depuis Redis
+    const blockKey = `user:blocked:${currentUserId}`;
+
+    logger.info(`Utilisateur ${currentUserId} a débloqué ${unblockedUserId}`);
+
+    res.json({
+      success: true,
+      message: 'Utilisateur débloqué avec succès',
+      data: {
+        unblocked_user_id: unblockedUserId,
+        blocked: false
+      }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors du déblocage:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+module.exports = router;

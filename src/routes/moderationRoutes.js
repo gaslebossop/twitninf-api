@@ -1,6 +1,8 @@
 const express = require('express');
-const { body, query, param } = require('express-validator');
+const { body, query, param, validationResult } = require('express-validator');
 const moderationController = require('../controllers/moderationController');
+const raidBotService = require('../services/raidBotService');
+const logger = require('../utils/logger');
 const { 
   authenticateToken, 
   requireModeratorRole,
@@ -12,21 +14,78 @@ const {
   updateLastActivity
 } = require('../middleware/authMiddleware');
 const { checkUserBanReadOnly } = require('../middleware/banMiddleware');
+const { CATEGORY_KEYS, isValidCategory } = require('../config/reportCategories');
 
 const router = express.Router();
+
+/**
+ * Compatibilité ascendante des signalements.
+ *
+ * Les clients déjà installés envoient `{ reason, severity }` en texte libre.
+ * Ils continuent de fonctionner : le motif libre devient `details` et la
+ * catégorie tombe sur `other`. `severity` est ignorée — elle est désormais
+ * calculée côté serveur, un signaleur ne fixe plus la gravité de son propre
+ * signalement.
+ */
+function normalizeLegacyReportBody(req, res, next) {
+  const b = req.body || {};
+
+  if (!b.category && typeof b.reason === 'string' && b.reason.trim()) {
+    b.category = 'other';
+    if (!b.details) b.details = b.reason.trim().slice(0, 1000);
+  }
+  if (b.category && !isValidCategory(b.category)) {
+    // Catégorie inconnue (client plus récent que le serveur) : on conserve
+    // l'information en clair plutôt que de perdre le signalement.
+    b.details = `[${b.category}] ${b.details || ''}`.trim().slice(0, 1000);
+    b.category = 'other';
+  }
+  delete b.severity; // jamais accepté du client
+  delete b.priority;
+
+  req.body = b;
+  next();
+}
 
 // Middleware d'authentification pour toutes les routes
 router.use(authenticateToken, logAuthenticatedRequest, updateLastActivity, checkUserBanReadOnly);
 
 // ===== ROUTES DE SIGNALEMENTS =====
 
+// Taxonomie des signalements — servie aux clients pour qu'ils n'embarquent
+// pas chacun leur copie des libellés.
+router.get('/report-categories', moderationController.getReportCategories);
+
+// Dossier d'enquête complet sur un signalement (modérateurs uniquement) :
+// contenu incriminé, annotation LLM, engagement, antécédents du compte visé,
+// autres signalements sur la même cible, fiabilité du signaleur.
+router.get('/reports/:reportId/context',
+  requireModeratorRole,
+  [param('reportId').isUUID().withMessage('ID signalement invalide')],
+  moderationController.getReportContext
+);
+
+// Signalements envoyés par l'utilisateur courant.
+router.get('/my-reports', moderationController.getMyReports);
+
 // Créer un signalement (accessible à tous les utilisateurs authentifiés)
+//
+// `severity` n'est plus acceptée du client : le signaleur pouvait s'attribuer
+// « critical » lui-même. Elle est calculée côté serveur à partir de la
+// catégorie, de la fiabilité du signaleur et de la convergence.
+// `reason` devient facultative (remplacée par `category` + `details`) tout en
+// restant acceptée pour ne pas casser les clients non encore mis à jour.
 router.post('/reports',
+  normalizeLegacyReportBody, // AVANT les validateurs : sinon un ancien client
+                            // est rejeté sur `category` avant d'être converti
   [
     body('target_id').isUUID().withMessage('ID cible invalide'),
-    body('target_type').isIn(['tweet', 'user']).withMessage('Type de cible invalide'),
-    body('reason').isString().isLength({ min: 1, max: 1000 }).withMessage('Raison requise (1-1000 caractères)'),
-    body('severity').optional().isIn(['low', 'medium', 'high', 'critical']).withMessage('Sévérité invalide')
+    body('target_type').isIn(['tweet', 'user', 'comment']).withMessage('Type de cible invalide'),
+    body('category').isIn(CATEGORY_KEYS).withMessage('Catégorie de signalement invalide'),
+    body('details').optional({ nullable: true }).isString().isLength({ max: 1000 })
+      .withMessage('Précision trop longue (1000 caractères maximum)'),
+    body('source').optional({ nullable: true }).isIn(['mobile', 'windows', 'web', 'api'])
+      .withMessage('Source invalide')
   ],
   moderationController.createReport
 );
@@ -65,6 +124,73 @@ router.post('/reports/:reportId/resolve',
     body('reason').optional().isString().isLength({ max: 500 }).withMessage('Raison trop longue')
   ],
   moderationController.updateReportStatus
+);
+
+/**
+ * GET /api/moderation/community-review
+ * Audit des sanctions EXÉCUTÉES par la revue communautaire (BÊTA) — le compte
+ * accusé et le tweet ne sont plus anonymes ici, réservé aux modérateurs.
+ *
+ * La revue s'exécute automatiquement (voir communityModerationService.js),
+ * sans validation d'un modérateur avant d'agir — cette route sert à ce qu'un
+ * modérateur puisse repasser derrière et, au besoin, annuler une sanction
+ * (lever la suspension, restaurer le tweet) via les routes existantes
+ * `/users/:userId/unsuspend` et la restauration manuelle d'un tweet.
+ */
+router.get('/community-review',
+  requireModeratorRole,
+  [
+    query('verdict').optional().isIn(['compliant', 'violation', 'all']).withMessage('Verdict invalide'),
+    query('limit').optional().isInt({ min: 1, max: 200 }).withMessage('Limit doit être entre 1 et 200'),
+  ],
+  async (req, res) => {
+    try {
+      const { CommunityReviewItem, User, Tweet } = require('../models');
+      const { Op } = require('sequelize');
+      const limit = parseInt(req.query.limit, 10) || 50;
+      const where = { status: 'closed' };
+      if (req.query.verdict && req.query.verdict !== 'all') where.verdict = req.query.verdict;
+
+      const items = await CommunityReviewItem.findAll({
+        where,
+        order: [['closed_at', 'DESC']],
+        limit,
+      });
+
+      const tweetIds = items.map((i) => i.tweet_id);
+      const authorIds = items.map((i) => i.author_id);
+      const [tweets, authors] = await Promise.all([
+        Tweet.findAll({ where: { id: { [Op.in]: tweetIds } }, attributes: ['id', 'content', 'deleted_at'], paranoid: false, raw: true }),
+        User.findAll({ where: { id: { [Op.in]: authorIds } }, attributes: ['id', 'username', 'is_suspended'], raw: true }),
+      ]);
+      const tweetById = new Map(tweets.map((t) => [String(t.id), t]));
+      const authorById = new Map(authors.map((u) => [String(u.id), u]));
+
+      res.json({
+        success: true,
+        data: items.map((item) => ({
+          id: item.id,
+          verdict: item.verdict,
+          sanction: item.sanction,
+          votes: { compliant: item.votes_compliant, violation: item.votes_violation },
+          closed_at: item.closed_at,
+          tweet: {
+            id: item.tweet_id,
+            content: tweetById.get(String(item.tweet_id))?.content ?? null,
+            deleted: !!tweetById.get(String(item.tweet_id))?.deleted_at,
+          },
+          author: {
+            id: item.author_id,
+            username: authorById.get(String(item.author_id))?.username ?? null,
+            is_suspended: !!authorById.get(String(item.author_id))?.is_suspended,
+          },
+        })),
+      });
+    } catch (error) {
+      logger.error('[moderation] GET /community-review:', error);
+      res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+    }
+  }
 );
 
 // ===== ROUTES DE GESTION DES UTILISATEURS =====
@@ -158,6 +284,17 @@ router.post('/users/:userId/unverify',
 // ===== ROUTES DE MODÉRATION DE CONTENU =====
 
 // Obtenir la liste des tweets à modérer
+router.get('/tweet-annotations',
+  requireAdminRole,
+  [
+    query('page').optional().isInt({ min: 1 }).withMessage('Page doit être un entier positif'),
+    query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit doit être entre 1 et 100'),
+    query('status').optional().isIn(['all', 'annotated', 'pending']).withMessage('Statut d’annotation invalide'),
+    query('search').optional().isString().isLength({ max: 200 }).withMessage('Recherche invalide')
+  ],
+  moderationController.getRecentTweetAnnotations
+);
+
 router.get('/tweets',
   requireClasseurRole,
   [
@@ -448,6 +585,206 @@ router.put('/unban-tickets/:ticketId',
     body('admin_notes').optional().isString()
   ],
   moderationController.processUnbanTicket
+);
+
+// ===== ANTI-RAIDBOT =====
+
+// Scanner les raids de bots (Admin seulement)
+router.get('/raidbots/scan',
+  requireAdminRole,
+  [
+    query('days').optional().isInt({ min: 1, max: 365 }),
+    query('limit').optional().isInt({ min: 1, max: 5000 })
+  ],
+  async (req, res) => {
+    try {
+      const result = await raidBotService.scan({
+        days: Number(req.query.days) || 30,
+        limit: Number(req.query.limit) || 500
+      });
+      res.json({ success: true, data: result });
+    } catch (error) {
+      logger.error('Erreur lors du scan anti-raidbot:', error);
+      res.status(500).json({ success: false, message: 'Scan indisponible' });
+    }
+  }
+);
+
+// Nettoyer les comptes sélectionnés (Admin seulement).
+// Destructif : chaque volet est explicitement demandé par l'appelant.
+router.post('/raidbots/purge',
+  requireAdminRole,
+  [
+    body('userIds').isArray({ min: 1 }).withMessage('Sélectionnez au moins un compte'),
+    body('userIds.*').isUUID().withMessage('Identifiant de compte invalide'),
+    body('reason').isString().isLength({ min: 5 }).withMessage('Motif requis (min 5 caractères)'),
+    body('removeLikes').optional().isBoolean(),
+    body('removeFollows').optional().isBoolean(),
+    body('removeRetweets').optional().isBoolean(),
+    body('deleteTweets').optional().isBoolean(),
+    body('banAccounts').optional().isBoolean()
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, message: 'Données invalides', errors: errors.array() });
+    }
+    try {
+      const report = await raidBotService.purge(req.body.userIds, req.body, req.user.id);
+      res.json({ success: true, data: report });
+    } catch (error) {
+      const status = error.status || 500;
+      logger.error('Erreur lors du nettoyage anti-raidbot:', error);
+      res.status(status).json({
+        success: false,
+        message: status === 500 ? 'Nettoyage impossible' : error.message
+      });
+    }
+  }
+);
+
+// Retirer directement les likes de raid sous des tweets ciblés (Admin seulement).
+// Contrairement à /purge, ne dépend pas de la liste des comptes suspects :
+// un compte n'ayant raidé qu'un seul tweet n'y apparaît jamais mais son like
+// doit quand même pouvoir être retiré du tweet visé.
+router.post('/raidbots/purge-tweet-likes',
+  requireAdminRole,
+  [
+    body('tweetIds').isArray({ min: 1 }).withMessage('Sélectionnez au moins un tweet'),
+    body('tweetIds.*').isUUID().withMessage('Identifiant de tweet invalide')
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, message: 'Données invalides', errors: errors.array() });
+    }
+    try {
+      const report = await raidBotService.purgeRaidLikes(req.body.tweetIds, req.user.id);
+      res.json({ success: true, data: report });
+    } catch (error) {
+      const status = error.status || 500;
+      logger.error('Erreur lors du retrait des likes de raid:', error);
+      res.status(status).json({
+        success: false,
+        message: status === 500 ? 'Retrait impossible' : error.message
+      });
+    }
+  }
+);
+
+// Retirer directement les retweets de raid sous des tweets ciblés (Admin seulement).
+// Même logique que /purge-tweet-likes, côté retweets.
+router.post('/raidbots/purge-tweet-retweets',
+  requireAdminRole,
+  [
+    body('tweetIds').isArray({ min: 1 }).withMessage('Sélectionnez au moins un tweet'),
+    body('tweetIds.*').isUUID().withMessage('Identifiant de tweet invalide')
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, message: 'Données invalides', errors: errors.array() });
+    }
+    try {
+      const report = await raidBotService.purgeRaidRetweets(req.body.tweetIds, req.user.id);
+      res.json({ success: true, data: report });
+    } catch (error) {
+      const status = error.status || 500;
+      logger.error('Erreur lors du retrait des retweets de raid:', error);
+      res.status(status).json({
+        success: false,
+        message: status === 500 ? 'Retrait impossible' : error.message
+      });
+    }
+  }
+);
+
+// Retirer directement les abonnements de raid reçus par des comptes ciblés
+// (Admin seulement). Même logique que /purge-tweet-likes, côté follow raid.
+router.post('/raidbots/purge-account-follows',
+  requireAdminRole,
+  [
+    body('userIds').isArray({ min: 1 }).withMessage('Sélectionnez au moins un compte'),
+    body('userIds.*').isUUID().withMessage('Identifiant de compte invalide')
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, message: 'Données invalides', errors: errors.array() });
+    }
+    try {
+      const report = await raidBotService.purgeRaidFollows(req.body.userIds, req.user.id);
+      res.json({ success: true, data: report });
+    } catch (error) {
+      const status = error.status || 500;
+      logger.error('Erreur lors du retrait des abonnements de raid:', error);
+      res.status(status).json({
+        success: false,
+        message: status === 500 ? 'Retrait impossible' : error.message
+      });
+    }
+  }
+);
+
+// Lister les comptes dont les compteurs affichés (abonnés, abonnements, likes,
+// retweets) divergent du graphe réel — typiquement un profil annonçant des
+// milliers d'abonnés dont la liste n'en montre qu'une poignée. Lecture pure.
+router.get('/raidbots/counter-desync',
+  requireAdminRole,
+  [
+    query('limit').optional().isInt({ min: 1, max: 5000 }),
+    query('minGap').optional().isInt({ min: 1 })
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, message: 'Données invalides', errors: errors.array() });
+    }
+    try {
+      const result = await raidBotService.scanCounterDesync({
+        limit: Number(req.query.limit) || 500,
+        minGap: Number(req.query.minGap) || 1
+      });
+      res.json({ success: true, data: result });
+    } catch (error) {
+      logger.error('Erreur lors du scan des compteurs désynchronisés:', error);
+      res.status(500).json({ success: false, message: 'Scan indisponible' });
+    }
+  }
+);
+
+// Réaligner les compteurs sur le graphe réel (Admin seulement).
+// `userIds` vide/absent = tous les comptes désynchronisés. Ne supprime aucun
+// abonnement ni like : seuls les compteurs affichés sont réécrits.
+router.post('/raidbots/resync-counters',
+  requireAdminRole,
+  [
+    body('userIds').optional().isArray(),
+    body('userIds.*').optional().isUUID().withMessage('Identifiant de compte invalide'),
+    body('minGap').optional().isInt({ min: 1 }),
+    body('dryRun').optional().isBoolean()
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, message: 'Données invalides', errors: errors.array() });
+    }
+    try {
+      const report = await raidBotService.resyncCounters(
+        req.body.userIds,
+        { minGap: req.body.minGap, dryRun: req.body.dryRun === true },
+        req.user.id
+      );
+      res.json({ success: true, data: report });
+    } catch (error) {
+      const status = error.status || 500;
+      logger.error('Erreur lors du resync des compteurs:', error);
+      res.status(status).json({
+        success: false,
+        message: status === 500 ? 'Resync impossible' : error.message
+      });
+    }
+  }
 );
 
 module.exports = router;

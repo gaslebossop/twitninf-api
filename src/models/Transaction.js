@@ -47,7 +47,12 @@ class Transaction {
         comment: 'Montant de la transaction'
       },
       amountInEur: {
-        type: DataTypes.DECIMAL(10, 4),
+        // DECIMAL(10,4) plafonnait à 999 999,9999 : un virement d'un gros
+        // montant (ou d'une monnaie chère) dépassait ce plafond et faisait
+        // échouer l'INSERT en « numeric field overflow », ce qui avortait la
+        // transaction et annulait tout le virement. Même capacité que
+        // `amount`, dont cette valeur est dérivée.
+        type: DataTypes.DECIMAL(20, 8),
         allowNull: false,
         comment: 'Valeur en euros au moment de la transaction'
       },
@@ -63,7 +68,10 @@ class Transaction {
         comment: 'Statut de la transaction'
       },
       fee: {
-        type: DataTypes.DECIMAL(10, 4),
+        // Exprimé dans les unités de la monnaie (pas en euros) : sur une
+        // monnaie communautaire à gros volume, la commission dépassait elle
+        // aussi l'ancien DECIMAL(10,4). Aligné sur `amount`.
+        type: DataTypes.DECIMAL(20, 8),
         allowNull: false,
         defaultValue: 0,
         comment: 'Frais de transaction'

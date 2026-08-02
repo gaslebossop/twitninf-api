@@ -13,7 +13,7 @@ class TweetRetweet extends Model {
     const includeOptions = includeUser ? [{
       model: this.sequelize.models.User,
       as: 'user',
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium']
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'profile_customization']
     }] : [];
 
     return this.findAll({
@@ -39,7 +39,7 @@ class TweetRetweet extends Model {
       include: [{
         model: this.sequelize.models.User,
         as: 'author',
-        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium']
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'profile_customization']
       }]
     }] : [];
 
@@ -68,6 +68,42 @@ class TweetRetweet extends Model {
     return this.count({
       where: { tweet_id: tweetId }
     });
+  }
+
+  /**
+   * Compte les retweets de PLUSIEURS tweets en une seule requête.
+   * Pendant de `TweetLike.countLikesForTweets` — même contrat : un tweet sans
+   * retweet est absent du résultat, lire `map.get(id) || 0`.
+   */
+  static async countRetweetsForTweets(tweetIds = []) {
+    const ids = [...new Set(tweetIds.map(String))].filter(Boolean);
+    if (ids.length === 0) return new Map();
+
+    const rows = await this.findAll({
+      where: { tweet_id: ids },
+      attributes: [
+        'tweet_id',
+        [this.sequelize.fn('COUNT', this.sequelize.col('id')), 'count'],
+      ],
+      group: ['tweet_id'],
+      raw: true,
+    });
+
+    return new Map(rows.map((r) => [String(r.tweet_id), Number(r.count) || 0]));
+  }
+
+  /** Parmi `tweetIds`, ceux que `userId` a retweetés. Une seule requête. */
+  static async retweetedTweetIdsForUser(userId, tweetIds = []) {
+    const ids = [...new Set(tweetIds.map(String))].filter(Boolean);
+    if (!userId || ids.length === 0) return new Set();
+
+    const rows = await this.findAll({
+      where: { user_id: userId, tweet_id: ids },
+      attributes: ['tweet_id'],
+      raw: true,
+    });
+
+    return new Set(rows.map((r) => String(r.tweet_id)));
   }
 
   // Méthode statique pour compter les retweets d'un utilisateur

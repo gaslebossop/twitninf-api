@@ -1,6 +1,6 @@
 const { createLocalEmbedQuery, cosineSimilarity } = require('./policiercongo/policiercongoV2Embeddings');
 const logger = require('../utils/logger');
-const { Tweet } = require('../models');
+const { Tweet, User } = require('../models');
 const fs = require('fs').promises;
 const path = require('path');
 
@@ -160,7 +160,22 @@ class SemanticSimilarityService {
 
             // 4. Récupérer les objets Tweet complets depuis la DB
             const resultTweets = await Tweet.findAll({
-                where: { id: topResults.map(r => r.id) }
+                where: { id: topResults.map(r => r.id) },
+                include: [{
+                    model: User,
+                    as: 'author',
+                    attributes: [
+                        'id',
+                        'username',
+                        'full_name',
+                        'avatar',
+                        'verified',
+                        'verification_style',
+                        'premium',
+                        'subscription_tier',
+                        'profile_customization'
+                    ]
+                }]
             });
 
             // Garder l'ordre de score

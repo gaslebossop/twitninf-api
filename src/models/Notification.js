@@ -32,7 +32,7 @@ class Notification extends Model {
       includeOptions.push({
         model: this.sequelize.models.User,
         as: 'sender',
-        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium']
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
       });
     }
 
@@ -44,7 +44,7 @@ class Notification extends Model {
         include: [{
           model: this.sequelize.models.User,
           as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified']
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'profile_customization']
         }]
       });
     }
@@ -108,6 +108,10 @@ class Notification extends Model {
               notification_id: notification.id,
               tweet_id: record.tweet_id || null,
               sender_id: record.sender_id || null,
+              entity_type: record.content?.entity_type || null,
+              story_id: record.content?.story_id || null,
+              conversation_id: record.content?.conversation_id || null,
+              message_id: record.content?.message_id || null,
             }
           };
           await axios.post('https://exp.host/--/api/v2/push/send', payload, {
@@ -187,6 +191,40 @@ class Notification extends Model {
       type: 'follow',
       title: `${senderName} vous suit maintenant`,
       message: 'Nouveau suivi'
+    });
+  }
+
+  // Compte privé : demande de suivi en attente d'approbation. Réutilise le
+  // type `follow` (pas de nouvelle valeur d'ENUM à migrer) et se distingue
+  // via `metadata.kind` pour le tri/affichage côté client.
+  static async createFollowRequestNotification(requesterId, targetUserId) {
+    if (requesterId === targetUserId) return null;
+    const User = this.sequelize.models.User;
+    const sender = await User.findByPk(requesterId, { attributes: ['username'] });
+    const senderName = sender?.username ? `@${sender.username}` : 'Quelqu\'un';
+    return this.createNotification({
+      recipient_id: targetUserId,
+      sender_id: requesterId,
+      type: 'follow',
+      title: `${senderName} a demandé à vous suivre`,
+      message: 'Demande de suivi',
+      metadata: { kind: 'follow_request' }
+    });
+  }
+
+  // Compte privé : notifie le demandeur que sa demande a été acceptée.
+  static async createFollowAcceptNotification(accepterId, requesterId) {
+    if (accepterId === requesterId) return null;
+    const User = this.sequelize.models.User;
+    const sender = await User.findByPk(accepterId, { attributes: ['username'] });
+    const senderName = sender?.username ? `@${sender.username}` : 'Quelqu\'un';
+    return this.createNotification({
+      recipient_id: requesterId,
+      sender_id: accepterId,
+      type: 'follow',
+      title: `${senderName} a accepté votre demande de suivi`,
+      message: 'Demande acceptée',
+      metadata: { kind: 'follow_accept' }
     });
   }
 

@@ -16,6 +16,8 @@ router.get('/stats', EconomyAdminController.getGlobalStats);
 
 // Détection de fraude (scan rétrospectif transferts/minage/casino/achats)
 router.get('/fraud-scan', EconomyAdminController.fraudScan);
+// File temps réel des wallets surveillés/restreints/gelés par le moteur Rust.
+router.get('/fraud-cases', EconomyAdminController.fraudCases);
 // Traçage de la circulation des NF depuis un compte suspect (graphe de transferts)
 router.get('/fraud-trace/:userId', EconomyAdminController.fraudTrace);
 // Retrait de NF frauduleux de l'économie (vers la trésorerie, hors circulation utilisateur)

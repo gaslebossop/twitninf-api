@@ -32,6 +32,20 @@ const MIN_REWARD_TWC = 0.01;
 const P2P_TRANSFER_FEE_RATE = 0.20;
 
 /**
+ * Frais réduits pour les abonnés actifs (Plus et Pro).
+ *
+ * Contrairement aux avantages cosmétiques de l'abonnement, celui-ci se
+ * re-consomme : il est ressenti à chaque virement, pas une seule fois à la
+ * souscription. C'est ce qui en fait un argument de RENOUVELLEMENT — l'offre
+ * étant sans reconduction automatique, un avantage livré une fois pour toutes
+ * ne pèse rien au bout de 30 jours.
+ *
+ * Le palier retenu est celui de l'EXPÉDITEUR : c'est lui qui paie la
+ * commission, le destinataire n'a rien à voir dans l'affaire.
+ */
+const P2P_TRANSFER_FEE_RATE_SUBSCRIBER = 0.10;
+
+/**
  * Minage (app Windows) : preuve de travail partagée entre tous les mineurs
  * (premier arrivé, premier servi), seule source de création monétaire non
  * adossée à un achat réel. Récompense = base × 4^(difficulté − 4).
@@ -92,6 +106,27 @@ const CASINO_MAX_WIN_CHANCE = 70; // %
  */
 const CASINO_WHEEL_MAX_WIN_SCALE = 1.15;
 
+/**
+ * Détecteur de fraude P2P (p2pFraudDetector.js) — seuils des signaux calculés
+ * sur le graphe réel des transferts en base (voir ce fichier pour le détail
+ * de chaque signal). Remplace `checkTransaction` (pensé pour les paiements
+ * carte) sur la route de virement entre utilisateurs.
+ */
+const P2P_VELOCITY_WINDOW_MIN = 10;       // fenêtre de vélocité
+const P2P_VELOCITY_REVIEW_COUNT = 5;      // virements sortants dans la fenêtre → review
+const P2P_VELOCITY_BLOCK_COUNT = 12;      // virements sortants dans la fenêtre → block
+const P2P_SAME_RECIPIENT_WINDOW_MIN = 60; // fenêtre pour la répétition vers un même destinataire
+const P2P_SAME_RECIPIENT_MAX_COUNT = 4;   // virements vers le même destinataire dans la fenêtre → flag
+const P2P_FANIN_WINDOW_MIN = 60;          // fenêtre pour la détection de compte "mule"
+const P2P_FANIN_MAX_SENDERS = 5;          // expéditeurs distincts vers un même destinataire → flag
+const P2P_CIRCULAR_WINDOW_HOURS = 24;     // fenêtre pour détecter un aller-retour A→B→A
+const P2P_CIRCULAR_AMOUNT_TOLERANCE = 0.2; // écart relatif max entre les deux sens pour matcher "comparable"
+const P2P_NEW_RECIPIENT_BALANCE_RATIO = 0.5; // part du solde envoyée à un tout nouveau destinataire → flag
+const P2P_DRAIN_BALANCE_RATIO = 0.9;      // part du solde vidée par ce virement → signal de drain
+const P2P_DRAIN_HISTORICAL_MULTIPLE = 3;  // multiple du plus gros virement historique pour confirmer l'anomalie
+const P2P_BLOCK_SCORE = 70;               // score ≥ → virement bloqué
+const P2P_REVIEW_SCORE = 35;              // score ≥ → virement autorisé mais flaggé pour revue
+
 module.exports = {
   TREASURY_USER_ID,
   REFERENCE_PRICE_EUR,
@@ -101,6 +136,7 @@ module.exports = {
   MIN_SPEND_TWC,
   MIN_REWARD_TWC,
   P2P_TRANSFER_FEE_RATE,
+  P2P_TRANSFER_FEE_RATE_SUBSCRIBER,
   MINING_BASE_REWARD_TWC,
   MINING_DAILY_WIN_LIMIT,
   MINING_DILUTION_PER_BASE_REWARD,
@@ -115,5 +151,19 @@ module.exports = {
   CASINO_MAX_BET_TWC,
   CASINO_MIN_WIN_CHANCE,
   CASINO_MAX_WIN_CHANCE,
-  CASINO_WHEEL_MAX_WIN_SCALE
+  CASINO_WHEEL_MAX_WIN_SCALE,
+  P2P_VELOCITY_WINDOW_MIN,
+  P2P_VELOCITY_REVIEW_COUNT,
+  P2P_VELOCITY_BLOCK_COUNT,
+  P2P_SAME_RECIPIENT_WINDOW_MIN,
+  P2P_SAME_RECIPIENT_MAX_COUNT,
+  P2P_FANIN_WINDOW_MIN,
+  P2P_FANIN_MAX_SENDERS,
+  P2P_CIRCULAR_WINDOW_HOURS,
+  P2P_CIRCULAR_AMOUNT_TOLERANCE,
+  P2P_NEW_RECIPIENT_BALANCE_RATIO,
+  P2P_DRAIN_BALANCE_RATIO,
+  P2P_DRAIN_HISTORICAL_MULTIPLE,
+  P2P_BLOCK_SCORE,
+  P2P_REVIEW_SCORE
 };

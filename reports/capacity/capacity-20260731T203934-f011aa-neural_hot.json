@@ -1,0 +1,425 @@
+{
+  "ok": true,
+  "run_id": "capacity-20260731T203934-f011aa",
+  "generated_at": "2026-07-31T18:50:05.088Z",
+  "generator": {
+    "host": "http://127.0.0.1:3001",
+    "same_server": true,
+    "token_pool": 50
+  },
+  "profile": "neural_hot",
+  "dataset": {
+    "users": 105000,
+    "tweets": 21000
+  },
+  "preflight": {
+    "status": 200,
+    "body": "{\"success\":true,\"data\":{\"healthy\":true,\"db\":\"ok\",\"redis\":\"ok\",\"latencyMs\":2,\"version\":\"1.0.0\",\"uptimeSecs\":189705}}"
+  },
+  "configuration": {
+    "concurrency_steps": [
+      5,
+      10,
+      20,
+      40,
+      80,
+      120,
+      180,
+      260
+    ],
+    "step_seconds": 10,
+    "timeout_ms": 10000,
+    "sla_p95_ms": 1000,
+    "sla_p99_ms": 2000,
+    "hard_p95_ms": 5000,
+    "hard_error_rate": 0.05
+  },
+  "started_at": "2026-07-31T18:48:40.876Z",
+  "ended_at": "2026-07-31T18:50:05.088Z",
+  "duration_seconds": 84.21,
+  "stop_reason": null,
+  "pm2_before": {
+    "pid": 986533,
+    "status": "online",
+    "restarts": 59,
+    "rss_mb": 900.7,
+    "cpu_percent": 0.3
+  },
+  "pm2_after": {
+    "pid": 986533,
+    "status": "online",
+    "restarts": 59,
+    "rss_mb": 1156.4,
+    "cpu_percent": 0
+  },
+  "cache_cleanup_before": {
+    "deleted_keys": 0,
+    "deleted_pending_impressions": 0,
+    "matched_keys": 0
+  },
+  "prewarm": {
+    "requests": 50,
+    "success": 50,
+    "errors": 0,
+    "error_rate": 0,
+    "rps": 2.3,
+    "p50_ms": 3975.82,
+    "p95_ms": 5576.48,
+    "p99_ms": 5589.91,
+    "max_ms": 5589.91,
+    "statuses": {
+      "200": 50
+    },
+    "endpoints": {
+      "neural_hot": {
+        "requests": 50,
+        "rps": 2.3,
+        "error_rate": 0,
+        "p50_ms": 3975.82,
+        "p95_ms": 5576.48,
+        "p99_ms": 5589.91,
+        "engine_p95_ms": 3930,
+        "cache_hit_rate": 0
+      }
+    }
+  },
+  "cache_cleanup_after": {
+    "deleted_keys": 992,
+    "deleted_pending_impressions": 892,
+    "matched_keys": 992
+  },
+  "steps": [
+    {
+      "concurrency": 5,
+      "duration_ms": 10450,
+      "requests": 235,
+      "success": 235,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 22.49,
+      "p50_ms": 19.52,
+      "p95_ms": 2265.2,
+      "p99_ms": 2416.02,
+      "max_ms": 2526.57,
+      "statuses": {
+        "200": 235
+      },
+      "endpoints": {
+        "neural_hot": {
+          "requests": 235,
+          "rps": 22.49,
+          "error_rate": 0,
+          "p50_ms": 19.52,
+          "p95_ms": 2265.2,
+          "p99_ms": 2416.02,
+          "engine_p95_ms": 2243,
+          "cache_hit_rate": 0.91489
+        }
+      },
+      "system": {
+        "samples": 11,
+        "max_load_1m": 4.76,
+        "min_mem_available_mb": 8767.1,
+        "max_api_cpu_percent": 7.8,
+        "max_api_rss_mb": 960.7,
+        "max_postgres_backends": 22,
+        "max_postgres_active": 6,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 2.32
+      }
+    },
+    {
+      "concurrency": 10,
+      "duration_ms": 10043,
+      "requests": 2711,
+      "success": 2711,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 269.94,
+      "p50_ms": 34.64,
+      "p95_ms": 56.54,
+      "p99_ms": 77.84,
+      "max_ms": 105.28,
+      "statuses": {
+        "200": 2711
+      },
+      "endpoints": {
+        "neural_hot": {
+          "requests": 2711,
+          "rps": 269.94,
+          "error_rate": 0,
+          "p50_ms": 34.64,
+          "p95_ms": 56.54,
+          "p99_ms": 77.84,
+          "engine_p95_ms": 2,
+          "cache_hit_rate": 1
+        }
+      },
+      "system": {
+        "samples": 11,
+        "max_load_1m": 4.76,
+        "min_mem_available_mb": 8612.3,
+        "max_api_cpu_percent": 8.3,
+        "max_api_rss_mb": 1047.8,
+        "max_postgres_backends": 22,
+        "max_postgres_active": 5,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 2.32
+      }
+    },
+    {
+      "concurrency": 20,
+      "duration_ms": 10053,
+      "requests": 2904,
+      "success": 2904,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 288.87,
+      "p50_ms": 65.28,
+      "p95_ms": 103,
+      "p99_ms": 126.89,
+      "max_ms": 156.57,
+      "statuses": {
+        "200": 2904
+      },
+      "endpoints": {
+        "neural_hot": {
+          "requests": 2904,
+          "rps": 288.87,
+          "error_rate": 0,
+          "p50_ms": 65.28,
+          "p95_ms": 103,
+          "p99_ms": 126.89,
+          "engine_p95_ms": 3,
+          "cache_hit_rate": 1
+        }
+      },
+      "system": {
+        "samples": 11,
+        "max_load_1m": 4.65,
+        "min_mem_available_mb": 8600,
+        "max_api_cpu_percent": 8.9,
+        "max_api_rss_mb": 1062,
+        "max_postgres_backends": 22,
+        "max_postgres_active": 6,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 2.32
+      }
+    },
+    {
+      "concurrency": 40,
+      "duration_ms": 10073,
+      "requests": 3199,
+      "success": 3199,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 317.58,
+      "p50_ms": 123.69,
+      "p95_ms": 164.89,
+      "p99_ms": 199.27,
+      "max_ms": 348.8,
+      "statuses": {
+        "200": 3199
+      },
+      "endpoints": {
+        "neural_hot": {
+          "requests": 3199,
+          "rps": 317.58,
+          "error_rate": 0,
+          "p50_ms": 123.69,
+          "p95_ms": 164.89,
+          "p99_ms": 199.27,
+          "engine_p95_ms": 2,
+          "cache_hit_rate": 1
+        }
+      },
+      "system": {
+        "samples": 11,
+        "max_load_1m": 4.71,
+        "min_mem_available_mb": 8610.7,
+        "max_api_cpu_percent": 9.4,
+        "max_api_rss_mb": 1084.9,
+        "max_postgres_backends": 22,
+        "max_postgres_active": 5,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 2.32
+      }
+    },
+    {
+      "concurrency": 80,
+      "duration_ms": 10252,
+      "requests": 3179,
+      "success": 3179,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 310.09,
+      "p50_ms": 243.81,
+      "p95_ms": 362.29,
+      "p99_ms": 420.93,
+      "max_ms": 701.81,
+      "statuses": {
+        "200": 3179
+      },
+      "endpoints": {
+        "neural_hot": {
+          "requests": 3179,
+          "rps": 310.09,
+          "error_rate": 0,
+          "p50_ms": 243.81,
+          "p95_ms": 362.29,
+          "p99_ms": 420.93,
+          "engine_p95_ms": 1,
+          "cache_hit_rate": 1
+        }
+      },
+      "system": {
+        "samples": 11,
+        "max_load_1m": 4.93,
+        "min_mem_available_mb": 8560.7,
+        "max_api_cpu_percent": 10,
+        "max_api_rss_mb": 1087.1,
+        "max_postgres_backends": 22,
+        "max_postgres_active": 7,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 2.32
+      }
+    },
+    {
+      "concurrency": 120,
+      "duration_ms": 10236,
+      "requests": 3312,
+      "success": 3312,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 323.56,
+      "p50_ms": 360.49,
+      "p95_ms": 458.84,
+      "p99_ms": 532.57,
+      "max_ms": 690.92,
+      "statuses": {
+        "200": 3312
+      },
+      "endpoints": {
+        "neural_hot": {
+          "requests": 3312,
+          "rps": 323.56,
+          "error_rate": 0,
+          "p50_ms": 360.49,
+          "p95_ms": 458.84,
+          "p99_ms": 532.57,
+          "engine_p95_ms": 1,
+          "cache_hit_rate": 1
+        }
+      },
+      "system": {
+        "samples": 11,
+        "max_load_1m": 6.24,
+        "min_mem_available_mb": 8531.5,
+        "max_api_cpu_percent": 10.6,
+        "max_api_rss_mb": 1095.8,
+        "max_postgres_backends": 22,
+        "max_postgres_active": 7,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 2.32
+      }
+    },
+    {
+      "concurrency": 180,
+      "duration_ms": 10326,
+      "requests": 3272,
+      "success": 3272,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 316.87,
+      "p50_ms": 538.42,
+      "p95_ms": 727.99,
+      "p99_ms": 1374.69,
+      "max_ms": 2423.7,
+      "statuses": {
+        "200": 3272
+      },
+      "endpoints": {
+        "neural_hot": {
+          "requests": 3272,
+          "rps": 316.87,
+          "error_rate": 0,
+          "p50_ms": 538.42,
+          "p95_ms": 727.99,
+          "p99_ms": 1374.69,
+          "engine_p95_ms": 1,
+          "cache_hit_rate": 1
+        }
+      },
+      "system": {
+        "samples": 11,
+        "max_load_1m": 6.3,
+        "min_mem_available_mb": 8531.8,
+        "max_api_cpu_percent": 11.2,
+        "max_api_rss_mb": 1116.1,
+        "max_postgres_backends": 22,
+        "max_postgres_active": 9,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 2.32
+      }
+    },
+    {
+      "concurrency": 260,
+      "duration_ms": 10389,
+      "requests": 3287,
+      "success": 3287,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 316.39,
+      "p50_ms": 805.2,
+      "p95_ms": 1094.95,
+      "p99_ms": 1490.71,
+      "max_ms": 1583.38,
+      "statuses": {
+        "200": 3287
+      },
+      "endpoints": {
+        "neural_hot": {
+          "requests": 3287,
+          "rps": 316.39,
+          "error_rate": 0,
+          "p50_ms": 805.2,
+          "p95_ms": 1094.95,
+          "p99_ms": 1490.71,
+          "engine_p95_ms": 2,
+          "cache_hit_rate": 1
+        }
+      },
+      "system": {
+        "samples": 11,
+        "max_load_1m": 6.15,
+        "min_mem_available_mb": 8511.3,
+        "max_api_cpu_percent": 11.8,
+        "max_api_rss_mb": 1157.1,
+        "max_postgres_backends": 22,
+        "max_postgres_active": 8,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 2.32
+      }
+    }
+  ],
+  "capacity_estimate": {
+    "sustainable_rps": 323.56,
+    "safe_rps_30pct_headroom": 226.49,
+    "sustainable_concurrency": 120,
+    "sla": {
+      "max_error_rate": 0.01,
+      "p95_ms": 1000,
+      "p99_ms": 2000
+    },
+    "estimated_simultaneous_active_users": {
+      "light_one_request_per_30s": 6794,
+      "typical_one_request_per_12s": 2717,
+      "heavy_one_request_per_5s": 1132
+    }
+  },
+  "limitations": [
+    "Le generateur tourne sur le meme VPS : resultat volontairement conservateur.",
+    "Cette estimation porte sur HTTP/API et NeuralRank, pas sur les connexions Socket.IO inactives.",
+    "Les interactions sociales sont pre-semees en base ; la charge soutenue reste en lecture pour ne pas polluer le modele CTR."
+  ]
+}

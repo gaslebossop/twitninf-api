@@ -1,48 +1,37 @@
-const { Sequelize } = require('sequelize');
 const config = require('../config/config');
 const logger = require('../utils/logger');
 
-// Configuration Sequelize avec les paramètres directs
-const sequelize = new Sequelize(
-  config.database.database,
-  config.database.username,
-  config.database.password,
-  {
-    host: config.database.host,
-    port: config.database.port,
-    dialect: config.database.dialect,
-    logging: config.database.logging,
-    benchmark: config.database.benchmark,
-    define: config.database.define,
-    dialectOptions: config.database.dialectOptions,
-    pool: config.database.pool,
-    retry: config.database.retry
-  }
-);
-
-// Importer les modèles déjà initialisés depuis le nouveau système
-const { 
-  User, 
-  Tweet, 
-  TweetLike, 
-  TweetRetweet, 
-  Notification, 
+// Ce fichier créait auparavant sa PROPRE instance Sequelize (`new Sequelize(...)`),
+// distincte de celle initialisée dans `../models` avec tous les modèles et
+// associations. Résultat concret : un second pool de connexions Postgres
+// (jusqu'à `pool.max` connexions supplémentaires, doublant l'empreinte réelle
+// du process pour zéro bénéfice) sur lequel AUCUN modèle n'était enregistré —
+// `sequelize.models` y restait vide. Le cron de nettoyage des notifications
+// dans server.js (`sequelize.models.Notification.destroy(...)`) plantait donc
+// silencieusement chaque nuit (catch muet), et les ~30 fichiers économie/
+// wallet/casino qui font `require('../database').sequelize` pour ouvrir une
+// transaction, puis passent cette transaction à des modèles de `../models`
+// (donc une AUTRE instance), s'appuyaient sur un couplage fragile entre deux
+// pools distincts. Réutiliser l'unique instance déjà initialisée par
+// `../models` élimine le doublon de pool et les deux effets de bord ci-dessus,
+// sans changer l'interface exportée par ce fichier.
+const {
+  sequelize,
+  User,
+  Tweet,
+  TweetLike,
+  TweetRetweet,
+  Notification,
   UserFollow,
   testConnection: testModelsConnection,
   syncDatabase: syncModelsDatabase,
   closeConnection: closeModelsConnection
 } = require('../models');
 
-// Test de connexion
+// Test de connexion (délègue à la même instance ; conservé pour compatibilité
+// des appelants qui font `require('./database').testConnection()`).
 async function testConnection() {
-  try {
-    await sequelize.authenticate();
-    logger.info('Connexion PostgreSQL établie avec succès');
-    return true;
-  } catch (error) {
-    logger.error('Erreur de connexion PostgreSQL:', error);
-    return false;
-  }
+  return testModelsConnection();
 }
 
 // Synchronisation des modèles avec création automatique des tables

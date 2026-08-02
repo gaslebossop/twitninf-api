@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const { Op, QueryTypes } = require('sequelize');
-const { VirtualCurrency, UserWallet, Transaction } = require('../models');
+const { VirtualCurrency, UserWallet, Transaction, User } = require('../models');
 const { sequelize } = require('../database/index');
 const logger = require('../utils/logger');
 const {
@@ -11,6 +11,7 @@ const {
   MIN_REWARD_TWC,
   MIN_TRANSFER_TWC,
   P2P_TRANSFER_FEE_RATE,
+  P2P_TRANSFER_FEE_RATE_SUBSCRIBER,
   MINING_BASE_REWARD_TWC,
   MINING_DAILY_WIN_LIMIT,
   MINING_DILUTION_PER_BASE_REWARD,
@@ -19,7 +20,10 @@ const {
   EXCHANGE_PRICE_MIN_MULTIPLIER,
   EXCHANGE_PRICE_MAX_MULTIPLIER
 } = require('./constants');
-const { roundTWC, toAmount, assertPositive } = require('./money');
+const { roundTWC, roundPrice, toAmount, assertPositive } = require('./money');
+const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
+const CASINO_RISK_EXEMPTION = Symbol('casino-risk-exemption');
 
 /**
  * Grand livre : toutes les écritures passent ici (verrous pessimistes sur portefeuilles).
@@ -31,6 +35,24 @@ class EconomyLedger {
       throw new Error('Monnaie virtuelle indisponible');
     }
     return currency;
+  }
+
+  /**
+   * Cours en euros d'une monnaie, pour valoriser une écriture du ledger.
+   *
+   * `REFERENCE_PRICE_EUR` (10 €) est le prix de référence du NF, et il était
+   * appliqué tel quel à N'IMPORTE QUELLE monnaie : sur une monnaie
+   * communautaire à 0,08 €, un virement de 689 524 unités était enregistré à
+   * 6 895 249 € au lieu de ~55 162 €. En plus d'être faux, ça dépassait la
+   * capacité de `transactions.amount_in_eur` — l'INSERT partait en
+   * « numeric field overflow », ce qui avortait toute la transaction et
+   * faisait échouer le virement entier (« Erreur serveur interne » côté app).
+   * On part donc du cours réel de la monnaie concernée, et on ne retombe sur
+   * la constante que si ce cours est indisponible.
+   */
+  static async priceEurOf(currencyId, dbTransaction = null) {
+    const currency = await this.getActiveCurrency(currencyId, dbTransaction);
+    return toAmount(currency.currentPrice) || REFERENCE_PRICE_EUR;
   }
 
   static async findOrCreateWallet(userId, currencyId, dbTransaction = null) {
@@ -94,12 +116,33 @@ class EconomyLedger {
     );
   }
 
+  static async attachAndConsumeRiskAuthorization(tx, authorization, dbTransaction) {
+    const metadata = {
+      ...(tx.metadata || {}),
+      ...transactionAuthorizationService.riskMetadata(authorization)
+    };
+    await tx.update({ metadata }, { transaction: dbTransaction });
+    await transactionAuthorizationService.consume(authorization, tx.id, dbTransaction);
+  }
+
   /**
    * Achat EUR : création (mint) de TWC vers l'utilisateur.
    */
   static async mintFromPurchase(userId, currencyId, pkg, paymentMethod, dbTransaction) {
     const amount = assertPositive(pkg.totalCoins, 'Quantité de pièces');
     const priceEur = roundTWC(pkg.priceEur);
+    const riskAuthorization = await transactionAuthorizationService.authorize({
+      userId,
+      transactionKind: 'wallet_topup',
+      direction: 'inbound',
+      amount,
+      amountEur: priceEur,
+      currencyId,
+      merchantId: 'twitninf_wallet',
+      paymentMethod,
+      itemType: 'virtual_currency',
+      itemId: pkg.id
+    });
 
     const wallet = await this.lockWallet(userId, currencyId, dbTransaction);
 
@@ -123,6 +166,8 @@ class EconomyLedger {
       },
       dbTransaction
     );
+
+    await this.attachAndConsumeRiskAuthorization(tx, riskAuthorization, dbTransaction);
 
     const newBalance = roundTWC(toAmount(wallet.balance) + amount);
     await wallet.update(
@@ -148,6 +193,24 @@ class EconomyLedger {
       throw new Error(`Dépense minimale : ${MIN_SPEND_TWC} TWC`);
     }
 
+    const priceEur = await this.priceEurOf(currencyId, dbTransaction);
+    const isCasino = String(meta?.itemType || '').toLowerCase() === 'casino'
+      && meta?.riskExemption === CASINO_RISK_EXEMPTION;
+    const riskAuthorization = isCasino
+      ? { exempt: true, reason: 'casino_explicitly_excluded' }
+      : await transactionAuthorizationService.authorize({
+        userId,
+        transactionKind: 'purchase',
+        direction: 'outbound',
+        amount: spend,
+        amountEur: roundTWC(spend * priceEur),
+        currencyId,
+        counterpartyUserId: TREASURY_USER_ID,
+        merchantId: meta?.itemType || 'twitninf',
+        itemType: meta?.itemType || 'purchase',
+        itemId: meta?.itemId || null
+      });
+
     const userWallet = await this.lockWallet(userId, currencyId, dbTransaction);
     const balance = toAmount(userWallet.balance);
     if (balance < spend) {
@@ -162,7 +225,7 @@ class EconomyLedger {
         toUserId: TREASURY_USER_ID,
         currencyId,
         amount: spend,
-        amountInEur: roundTWC(spend * REFERENCE_PRICE_EUR),
+        amountInEur: roundTWC(spend * priceEur),
         type: 'TRANSFER',
         description: meta.description || 'Dépense TwitCoins',
         metadata: {
@@ -175,6 +238,8 @@ class EconomyLedger {
       },
       dbTransaction
     );
+
+    await this.attachAndConsumeRiskAuthorization(tx, riskAuthorization, dbTransaction);
 
     await userWallet.update(
       {
@@ -222,6 +287,7 @@ class EconomyLedger {
     }
 
     const userWallet = await this.lockWallet(userId, currencyId, dbTransaction);
+    const priceEur = await this.priceEurOf(currencyId, dbTransaction);
 
     const tx = await this.createTx(
       {
@@ -229,7 +295,7 @@ class EconomyLedger {
         toUserId: userId,
         currencyId,
         amount: reward,
-        amountInEur: roundTWC(reward * REFERENCE_PRICE_EUR),
+        amountInEur: roundTWC(reward * priceEur),
         type: 'REWARD',
         description: description || 'Récompense créateur',
         metadata: { ledger: 'REWARD_FROM_TREASURY' }
@@ -258,6 +324,32 @@ class EconomyLedger {
   }
 
   /**
+   * Taux de commission applicable à l'expéditeur d'un virement.
+   *
+   * Un abonnement actif (Plus ou Pro) divise la commission par deux. Le taux
+   * est résolu ICI, à l'écriture, et jamais lu depuis le client : c'est de
+   * l'argent, la remise doit être prouvée côté serveur au moment du débit.
+   *
+   * L'abonnement expiré retombe sur le taux plein sans traitement particulier —
+   * `isSubscriptionActive` compare la date d'expiration à maintenant.
+   */
+  static async p2pFeeRateFor(userId, dbTransaction = null) {
+    try {
+      const user = await User.findByPk(userId, {
+        attributes: ['id', 'subscription_tier', 'subscription_expires_at'],
+        transaction: dbTransaction
+      });
+      return isSubscriptionActive(user) ? P2P_TRANSFER_FEE_RATE_SUBSCRIBER : P2P_TRANSFER_FEE_RATE;
+    } catch (error) {
+      // Un palier illisible ne doit pas faire échouer le virement : on retombe
+      // sur le taux plein, jamais sur la remise (personne ne doit obtenir
+      // gratuitement un avantage payant à la faveur d'une erreur de lecture).
+      logger.warn(`Palier d'abonnement illisible pour ${userId}, commission au taux plein: ${error.message}`);
+      return P2P_TRANSFER_FEE_RATE;
+    }
+  }
+
+  /**
    * Transfert P2P avec frais vers la trésorerie.
    */
   static async transferP2P(fromUserId, toUserId, currencyId, amount, description, dbTransaction) {
@@ -269,8 +361,20 @@ class EconomyLedger {
       throw new Error('Transfert vers soi-même interdit');
     }
 
-    const fee = roundTWC(gross * P2P_TRANSFER_FEE_RATE);
+    const feeRate = await this.p2pFeeRateFor(fromUserId, dbTransaction);
+    const fee = roundTWC(gross * feeRate);
     const net = roundTWC(gross - fee);
+    const priceEur = await this.priceEurOf(currencyId, dbTransaction);
+    const riskAuthorization = await transactionAuthorizationService.authorize({
+      userId: fromUserId,
+      transactionKind: 'p2p_transfer',
+      direction: 'outbound',
+      amount: gross,
+      amountEur: roundTWC(gross * priceEur),
+      currencyId,
+      counterpartyUserId: toUserId,
+      merchantId: 'p2p'
+    });
 
     const fromWallet = await this.lockWallet(fromUserId, currencyId, dbTransaction);
     if (toAmount(fromWallet.balance) < gross) {
@@ -286,7 +390,7 @@ class EconomyLedger {
         toUserId,
         currencyId,
         amount: net,
-        amountInEur: roundTWC(net * REFERENCE_PRICE_EUR),
+        amountInEur: roundTWC(net * priceEur),
         type: 'TRANSFER',
         fee,
         description: description || 'Transfert TwitCoins',
@@ -294,6 +398,8 @@ class EconomyLedger {
       },
       dbTransaction
     );
+
+    await this.attachAndConsumeRiskAuthorization(tx, riskAuthorization, dbTransaction);
 
     await fromWallet.update(
       {
@@ -321,10 +427,10 @@ class EconomyLedger {
           toUserId: TREASURY_USER_ID,
           currencyId,
           amount: fee,
-          amountInEur: roundTWC(fee * REFERENCE_PRICE_EUR),
+          amountInEur: roundTWC(fee * priceEur),
           type: 'SYSTEM',
-          description: `Commission sur transfert (${(P2P_TRANSFER_FEE_RATE * 100).toFixed(0)}%)`,
-          metadata: { ledger: 'P2P_FEE', relatedTransactionId: tx.id, grossAmount: gross }
+          description: `Commission sur transfert (${(feeRate * 100).toFixed(0)}%)`,
+          metadata: { ledger: 'P2P_FEE', relatedTransactionId: tx.id, grossAmount: gross, feeRate }
         },
         dbTransaction
       );
@@ -338,7 +444,7 @@ class EconomyLedger {
       );
     }
 
-    return { tx, feeTx, fee, netAmount: net };
+    return { tx, feeTx, fee, feeRate, netAmount: net };
   }
 
   /**
@@ -370,7 +476,7 @@ class EconomyLedger {
         toUserId: userId,
         currencyId,
         amount: reward,
-        amountInEur: roundTWC(reward * REFERENCE_PRICE_EUR),
+        amountInEur: roundTWC(reward * (toAmount(currency.currentPrice) || REFERENCE_PRICE_EUR)),
         type: 'MINING',
         description: `Minage TwitCoins (app Windows) — difficulté ${difficulty}`,
         metadata: { ledger: 'MINING', difficulty, dailyCount: dailyCount + 1 }
@@ -396,7 +502,7 @@ class EconomyLedger {
       MINING_MIN_MULTIPLIER,
       Math.round(currentMultiplier * (1 - dilution) * 1e6) / 1e6
     );
-    const nextPrice = roundTWC(REFERENCE_PRICE_EUR * nextMultiplier);
+    const nextPrice = roundPrice(REFERENCE_PRICE_EUR * nextMultiplier);
     const nextSupply = roundTWC(toAmount(currency.circulatingSupply) + reward);
 
     await currency.update(
@@ -537,7 +643,7 @@ class EconomyLedger {
    * impliquée — ce n'est pas une dépense ni une récompense, juste un
    * changement d'unité sur la même valeur détenue par le même compte.
    */
-  static async exchangeCurrency(userId, fromCurrencyId, toCurrencyId, amount, rate, dbTransaction) {
+  static async exchangeCurrency(userId, fromCurrencyId, toCurrencyId, amount, rate, dbTransaction, extraMetadata = {}) {
     const debit = assertPositive(amount, 'Montant');
     if (fromCurrencyId === toCurrencyId) {
       throw new Error('Impossible d\'échanger une monnaie contre elle-même');
@@ -545,6 +651,18 @@ class EconomyLedger {
     if (!(Number(rate) > 0)) {
       throw new Error('Taux de change invalide');
     }
+    const sourcePriceEur = await this.priceEurOf(fromCurrencyId, dbTransaction);
+    const riskAuthorization = await transactionAuthorizationService.authorize({
+      userId,
+      transactionKind: 'currency_exchange',
+      direction: 'outbound',
+      amount: debit,
+      amountEur: roundTWC(debit * sourcePriceEur),
+      currencyId: fromCurrencyId,
+      merchantId: 'internal_exchange',
+      itemType: 'currency_exchange',
+      itemId: toCurrencyId
+    });
 
     const fromWallet = await this.lockWallet(userId, fromCurrencyId, dbTransaction);
     const fromBalance = toAmount(fromWallet.balance);
@@ -572,12 +690,21 @@ class EconomyLedger {
         toUserId: userId,
         currencyId: fromCurrencyId,
         amount: debit,
+        amountInEur: roundTWC(debit * sourcePriceEur),
         type: 'SYSTEM',
         description: 'Échange interne — conversion sortante',
-        metadata: { ledger: 'EXCHANGE', direction: 'out', rate: Number(rate), pairCurrencyId: toCurrencyId }
+        // `rate` est un ratio entre les DEUX monnaies de cet échange précis
+        // (ex. KOSP-par-NF sur un achat contre NF, KOSP-par-EUR sur un achat
+        // contre EUR) — pas un prix EUR absolu, et pas comparable d'un
+        // échange à l'autre si le contrepartie change. `extraMetadata` (ex.
+        // `priceEur` passé par convertUserCurrency) porte le prix EUR réel et
+        // absolu de la monnaie communautaire au moment de CET échange — c'est
+        // lui que la courbe de getCurrencyDetail doit lire, pas `rate`.
+        metadata: { ledger: 'EXCHANGE', direction: 'out', rate: Number(rate), pairCurrencyId: toCurrencyId, ...extraMetadata }
       },
       dbTransaction
     );
+    await this.attachAndConsumeRiskAuthorization(txOut, riskAuthorization, dbTransaction);
     const txIn = await this.createTx(
       {
         fromUserId: userId,
@@ -586,19 +713,27 @@ class EconomyLedger {
         amount: credit,
         type: 'SYSTEM',
         description: 'Échange interne — conversion entrante',
-        metadata: { ledger: 'EXCHANGE', direction: 'in', rate: Number(rate), pairCurrencyId: fromCurrencyId, pairTransactionId: txOut.id }
+        metadata: { ledger: 'EXCHANGE', direction: 'in', rate: Number(rate), pairCurrencyId: fromCurrencyId, pairTransactionId: txOut.id, ...extraMetadata }
       },
       dbTransaction
     );
 
-    // Impact de marché façon pool de liquidité : la monnaie vendue (from)
-    // quitte la circulation active, donc se renchérit ; la monnaie achetée
-    // (to) y entre, donc se dilue. `EconomyMetrics.refresh()` (appelé par
-    // l'appelant juste après commit) recalcule currentPrice à partir du
-    // currentMultiplier qu'on vient de déplacer — aucun autre endroit à
-    // toucher pour que le nouveau prix s'affiche.
-    await this._applyExchangePriceImpact(fromCurrencyId, debit, 'increase', dbTransaction);
-    await this._applyExchangePriceImpact(toCurrencyId, credit, 'decrease', dbTransaction);
+    // Impact de marché : la monnaie ACHETÉE (to) monte, la monnaie VENDUE
+    // (from) baisse. C'est le sens de n'importe quel marché — la demande fait
+    // monter le prix — et celui d'un pool de liquidité : l'échange retire du
+    // `to` du pool (il se raréfie, donc se renchérit) et y ajoute du `from`
+    // (il devient plus abondant, donc se déprécie).
+    //
+    // Ce sens était INVERSÉ : acheter une monnaie faisait baisser son cours et
+    // vendre le faisait monter. Le raisonnement d'origine (« la monnaie
+    // achetée entre en circulation, donc se dilue ») confond l'offre émise
+    // avec la demande : sur un marché, ce qui fixe le prix c'est la pression
+    // d'achat, pas le nombre d'unités qui changent de main. Concrètement,
+    // acheter massivement une monnaie communautaire la faisait s'effondrer,
+    // et personne ne pouvait faire monter la sienne autrement qu'en la
+    // vendant.
+    await this._applyExchangePriceImpact(fromCurrencyId, debit, 'decrease', dbTransaction);
+    await this._applyExchangePriceImpact(toCurrencyId, credit, 'increase', dbTransaction);
 
     return { txOut, txIn, debited: debit, credited: credit, fromBalance: newFromBalance, toBalance: newToBalance };
   }
@@ -609,13 +744,46 @@ class EconomyLedger {
    * à `max(offre, montant)` : sur une monnaie tout juste créée (offre nulle, ex. le
    * tout premier échange NF -> EUR), ça plafonne l'impact à EXCHANGE_PRICE_IMPACT_FACTOR
    * au lieu d'une division par (quasi) zéro qui enverrait le multiplicateur droit à sa borne.
+   *
+   * L'offre utilisée est la VRAIE circulation (somme des soldes), pas la colonne
+   * `circulatingSupply` : cette colonne n'est mise à jour que par le minage et
+   * par `EconomyMetrics.refresh()`, jamais par un échange (`exchangeCurrency`,
+   * le seul chemin des monnaies communautaires) — elle reste donc figée à
+   * l'offre initiale (1 000 000 unités) pour une monnaie qui ne vit que
+   * d'échanges.
+   *
+   * L'impact suit sqrt(montant / offre), pas une simple proportion linéaire :
+   * avec une offre initiale d'1 000 000 d'unités, un échange "normal" (ex.
+   * quelques centaines à quelques milliers d'unités, soit <0.1 % de l'offre)
+   * ne déplaçait le cours que d'une fraction de pourcent avec une formule
+   * linéaire — invisible en pratique, d'où l'impression que convertir des
+   * NF/EUR contre une monnaie communautaire n'affecte jamais son cours.
+   * sqrt() donne un poids disproportionné aux petits échanges (ex. 1 % de
+   * l'offre → 10 % de l'impact max au lieu de 1 %) sans changer le plafond :
+   * un échange qui porte sur 100 % de l'offre déplace toujours le cours d'au
+   * plus EXCHANGE_PRICE_IMPACT_FACTOR, comme avant.
    */
   static async _applyExchangePriceImpact(currencyId, amount, direction, dbTransaction) {
     if (!(amount > 0)) return;
     const currency = await this.getActiveCurrency(currencyId, dbTransaction);
-    const supply = toAmount(currency.circulatingSupply);
+
+    // L'EUR interne est un portefeuille de valeur STABLE : 1 unité = 1 €,
+    // toujours, par construction (voir economy/eurCurrency.js). Il n'a pas de
+    // marché, donc aucun échange ne doit déplacer son cours. Sans cette
+    // garde, chaque conversion NF <-> EUR poussait son multiplicateur et son
+    // prix s'est retrouvé à 0,85 € en production — tous les soldes EUR
+    // affichés valaient alors 15 % de moins que les euros qu'ils
+    // représentent, et `convertUserCurrency` (qui force à juste titre le taux
+    // à 1) se retrouvait en contradiction avec le prix stocké.
+    if (String(currency.symbol).toUpperCase() === 'EUR') return;
+
+    const [{ total }] = await sequelize.query(
+      `SELECT COALESCE(SUM(balance), 0)::float8 AS total FROM user_wallets WHERE currency_id = :currencyId`,
+      { type: QueryTypes.SELECT, replacements: { currencyId }, transaction: dbTransaction }
+    );
+    const supply = toAmount(total);
     const impactBase = Math.max(supply, amount);
-    const impact = EXCHANGE_PRICE_IMPACT_FACTOR * (amount / impactBase);
+    const impact = EXCHANGE_PRICE_IMPACT_FACTOR * Math.sqrt(amount / impactBase);
     const currentMultiplier = toAmount(currency.currentMultiplier) || 1;
     const rawMultiplier = direction === 'increase'
       ? currentMultiplier * (1 + impact)
@@ -626,35 +794,53 @@ class EconomyLedger {
     );
     const basePriceEur = toAmount(currency.basePrice) || REFERENCE_PRICE_EUR;
     await currency.update(
-      { currentMultiplier: nextMultiplier, currentPrice: roundTWC(basePriceEur * nextMultiplier) },
+      { currentMultiplier: nextMultiplier, currentPrice: roundPrice(basePriceEur * nextMultiplier) },
       { transaction: dbTransaction }
     );
   }
 
   /**
-   * Retrait de fonds jugés frauduleux : sort tout le solde courant de la
+   * Retrait de fonds jugés frauduleux : sort le montant frauduleux de la
    * circulation utilisateur vers la trésorerie (comme un débit admin, mais
-   * tagué séparément pour l'audit) — le compte fraudeur ne peut plus les
-   * dépenser, et ils ne sortent pas non plus par un mécanisme de récompense
-   * ordinaire tant qu'un admin ne les redistribue pas explicitement.
+   * tagué séparément pour l'audit) — le compte fraudeur ne peut plus le
+   * dépenser, et il ne sort pas non plus par un mécanisme de récompense
+   * ordinaire tant qu'un admin ne le redistribue pas explicitement.
+   *
+   * `amount` est le montant à retirer, PAS le solde entier du compte : cet
+   * outil servait auparavant à vider tout le portefeuille quel que soit le
+   * montant réellement identifié comme frauduleux par le scan (fraudScanService),
+   * ce qui confisquait aussi les fonds légitimes d'un compte par ailleurs
+   * flaggé pour un seul signal portant sur une petite somme. `amount` est
+   * fourni par l'appelant (typiquement `suggestedBurnAmount` du scan,
+   * éventuellement ajusté par l'admin) — jamais déduit du solde ici. On
+   * plafonne quand même à ce qui est réellement disponible : si le compte a
+   * déjà dépensé une partie des fonds visés, on ne peut retirer que ce qui
+   * reste.
    */
-  static async burnFraudulent(userId, currencyId, reason, dbTransaction) {
+  static async burnFraudulent(userId, currencyId, amount, reason, dbTransaction) {
     if (userId === TREASURY_USER_ID) {
       // Même piège que adminSetBalance : verrouiller + mettre à jour la même
       // ligne deux fois (une fois comme "compte", une fois comme "trésorerie")
       // écrase silencieusement la première écriture.
       throw new Error('Impossible de retirer les fonds de la trésorerie via cet outil');
     }
+    const requested = assertPositive(amount, 'Montant à retirer');
+
     const wallet = await this.lockWallet(userId, currencyId, dbTransaction);
     const current = toAmount(wallet.balance);
     if (current <= 0) {
       return { tx: null, amount: 0 };
     }
 
+    const toBurn = roundTWC(Math.min(requested, current));
+    if (toBurn <= 0) {
+      return { tx: null, amount: 0 };
+    }
+
     const treasuryWallet = await this.lockWallet(TREASURY_USER_ID, currencyId, dbTransaction);
-    await wallet.update({ balance: 0 }, { transaction: dbTransaction });
+    await wallet.update({ balance: roundTWC(current - toBurn) }, { transaction: dbTransaction });
     await treasuryWallet.update(
-      { balance: roundTWC(toAmount(treasuryWallet.balance) + current) },
+      { balance: roundTWC(toAmount(treasuryWallet.balance) + toBurn) },
       { transaction: dbTransaction }
     );
 
@@ -663,16 +849,17 @@ class EconomyLedger {
         fromUserId: userId,
         toUserId: TREASURY_USER_ID,
         currencyId,
-        amount: current,
+        amount: toBurn,
         type: 'SYSTEM',
         description: `[Anti-fraude] ${reason || 'Retrait de NF frauduleux'}`,
-        metadata: { ledger: 'FRAUD_BURN', reason: reason || null }
+        metadata: { ledger: 'FRAUD_BURN', reason: reason || null, requestedAmount: requested }
       },
       dbTransaction
     );
 
-    return { tx, amount: current };
+    return { tx, amount: toBurn, remainingBalance: roundTWC(current - toBurn) };
   }
 }
 
+EconomyLedger.CASINO_RISK_EXEMPTION = CASINO_RISK_EXEMPTION;
 module.exports = EconomyLedger;

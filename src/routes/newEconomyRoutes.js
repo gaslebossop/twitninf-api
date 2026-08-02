@@ -2,7 +2,6 @@ const express = require('express');
 const { body, param, query } = require('express-validator');
 const NewEconomyController = require('../controllers/newEconomyController');
 const { authenticateToken } = require('../middleware/authMiddleware');
-const { checkTransaction } = require('../middleware/fraudMiddleware');
 const router = express.Router();
 
 /**
@@ -105,7 +104,7 @@ router.post('/exchange', [
   body('amount').isFloat({ min: 0.00000001 }).withMessage('Montant invalide')
 ], NewEconomyController.exchangeCurrency);
 
-router.post('/transfer', checkTransaction, [
+router.post('/transfer', [
   body('toUserId').isUUID().withMessage('ID utilisateur destinataire invalide'),
   body('currencyId').isUUID().withMessage('ID de cryptomonnaie invalide'),
   body('amount').isFloat({ min: 0.00000001 }).withMessage('Montant invalide'),
@@ -122,7 +121,8 @@ router.post('/transfer', checkTransaction, [
  * @access Private
  */
 router.get('/stats/:currencyId', [
-  param('currencyId').isUUID().withMessage('ID de cryptomonnaie invalide')
+  param('currencyId').isUUID().withMessage('ID de cryptomonnaie invalide'),
+  query('range').optional().isIn(['1h', '24h', '7d', '30d']).withMessage('Intervalle invalide')
 ], NewEconomyController.getEconomicStats);
 
 /**

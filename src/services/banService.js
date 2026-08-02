@@ -1,3 +1,4 @@
+const { Op } = require('sequelize');
 const { User } = require('../models');
 const logger = require('../utils/logger');
 
@@ -37,6 +38,15 @@ class BanService {
       });
 
       invalidateBanCache(userId);
+
+      // Couper les sessions ouvertes : sans cela, l'utilisateur suspendu
+      // pouvait continuer à rafraîchir ses jetons indéfiniment.
+      try {
+        await require('./authService').revokeAllSessions(userId, 'suspended');
+      } catch (e) {
+        logger.warn(`[ban] Sessions non révoquées pour ${userId}: ${e.message}`);
+      }
+
       logger.info(`Utilisateur ${user.username} suspendu pour ${durationDays} jours. Raison: ${reason}`);
 
       return {
@@ -120,6 +130,12 @@ class BanService {
           }
         });
         
+        try {
+          await require('./authService').revokeAllSessions(userId, 'permanent_ban');
+        } catch (e) {
+          logger.warn(`[ban] Sessions non révoquées pour ${userId}: ${e.message}`);
+        }
+
         logger.warn(`Utilisateur ${user.username} banni définitivement (5ème violation)`);
       }
 
@@ -234,11 +250,15 @@ class BanService {
   // Nettoyer les suspensions expirées (tâche cron)
   static async cleanupExpiredSuspensions() {
     try {
+      // `User.sequelize.Op` n'existe pas en Sequelize v6 (retiré depuis v5,
+      // il faut importer `Op` du package) : ce cron plantait silencieusement
+      // à chaque exécution horaire, donc ne levait jamais automatiquement les
+      // suspensions expirées.
       const expiredUsers = await User.findAll({
         where: {
           is_suspended: true,
           suspended_until: {
-            [User.sequelize.Op.lt]: new Date()
+            [Op.lt]: new Date()
           }
         }
       });

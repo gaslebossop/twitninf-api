@@ -183,7 +183,7 @@ class AgentLoop {
           session,
           buildDelta: () => buildDeltaPrompt({ newObservations: observations.slice(observationsSent), iteration: iterations, budgets: budgets() }),
           buildFull: () => this.contextEngine.build({
-            event, thread, memories, episodes, observations,
+            event, thread, memories, episodes, observations, runId,
             iteration: iterations, toolCallsUsed, provider: this.config.providerOrder[0]
           }),
           signal
@@ -237,29 +237,25 @@ class AgentLoop {
         });
 
         if (envelope.state === RUN_STATES.COMPLETE || envelope.state === RUN_STATES.BLOCKED) {
+          // Un passage autonome qui conclut sans avoir rien lu conclut sur du
+          // vide. Le garde-fou porte sur ce point précis — pas sur la façon
+          // d'y remédier : l'ancienne version exécutait collect_ecosystem à la
+          // place du modèle, ce qui lui imposait à la fois l'outil et l'angle
+          // d'observation. Ici il reçoit le constat et choisit lui-même par
+          // quoi regarder.
           if (isAutonomous && toolCallsUsed === 0) {
-            const calls = [{
-              id: `v3_initial_observation_${iterations}`,
-              name: 'collect_ecosystem',
-              args: {},
-              purpose: 'Observation minimale obligatoire avant toute conclusion autonome'
-            }];
-            const results = await this.tools.executeBatch(calls, {
-              event, runId, iteration: iterations, signal, onEvent: emit,
-              remainingToolCalls: this.config.maxToolCalls, scheduleWake, scheduleWakes,
-              provider: lastProvider, decisionSummary: envelope.decision_summary
-            });
-            toolCallsUsed += calls.length;
-            observations.push(...results, {
+            protocolFailures += 1;
+            observations.push({
               tool: 'protocol',
               success: false,
-              error: 'Un cycle scheduled/proactive ne peut pas conclure avant une observation réelle. Le catalogue available_tools est connecté via les tool_calls JSON.'
+              error: 'Ce passage autonome n’a encore lu aucune donnée réelle : conclure maintenant reviendrait à conclure sur du vide. Choisis toi-même la lecture qui a du sens pour ce passage (notifications, timeline, écosystème, recherche, tendances, mémoire…) puis décide à partir de ce que tu observes.'
             });
             await this.memory.saveCheckpoint(runId, iterations, {
-              decision_summary: 'Garde-fou V3: observation initiale injectée avant une conclusion autonome sans outil.',
-              tool_calls: calls.map(c => ({ name: c.name, args: c.args })), results, toolCallsUsed
+              decision_summary: 'Garde-fou V3: conclusion autonome refusée avant toute observation réelle.',
+              tool_calls: [], results: [], toolCallsUsed
             });
-            emit({ type: 'checkpoint', iteration: iterations, toolCallsUsed, safeguard: 'required_initial_observation' });
+            emit({ type: 'checkpoint', iteration: iterations, toolCallsUsed, safeguard: 'observation_required_before_conclusion' });
+            if (protocolFailures > this.config.stallLimit) break;
             continue;
           }
 
@@ -285,7 +281,10 @@ class AgentLoop {
 
         const remaining = this.config.maxToolCalls - toolCallsUsed;
         if (remaining <= 0) {
-          observations.push({ tool: 'loop_guard', success: false, error: 'Budget d’outils épuisé pour ce passage. Conclus maintenant.' });
+          observations.push({
+            tool: 'loop_guard', success: false,
+            error: 'Budget d’outils épuisé pour ce passage. Conclus maintenant. Si une action sensible demandée (paiement, virement, conversion, transaction) n’a PAS réussi via un outil, dis-le honnêtement (state=blocked) — ne prétends JAMAIS qu’elle a été effectuée.'
+          });
           break;
         }
 
@@ -293,7 +292,10 @@ class AgentLoop {
         const repeats = (batchHistory.get(signature) || 0) + 1;
         batchHistory.set(signature, repeats);
         if (repeats > this.config.stallLimit) {
-          observations.push({ tool: 'loop_guard', success: false, error: 'Même série d’outils répétée sans progrès. Change d’approche ou termine.' });
+          observations.push({
+            tool: 'loop_guard', success: false,
+            error: 'Même série d’outils répétée sans progrès. Change d’approche ou termine. Si une action sensible demandée n’a PAS réussi via un outil, dis-le honnêtement — ne prétends JAMAIS qu’elle a été effectuée.'
+          });
           if (repeats > this.config.stallLimit + 1) break;
           continue;
         }

@@ -3,7 +3,7 @@ const { param, query, validationResult } = require('express-validator');
 const router = express.Router();
 
 // Import des modèles et services
-const { User, UserFollow, Tweet, TweetLike, TweetRetweet, sequelize } = require('../models');
+const { User, UserFollow, Tweet, TweetLike, TweetRetweet, Notification, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const multer = require('multer');
 const sharp = require('sharp');
@@ -13,9 +13,21 @@ const { v4: uuidv4 } = require('uuid');
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
 const BanService = require('../services/banService');
+const {
+  TARGET_LANGUAGES,
+  SOURCE_LANGUAGE,
+  READABLE_LANGUAGES,
+} = require('../services/tweetTranslationService');
 const logger = require('../utils/logger');
 const ctrTracker = require('../services/ctrTracker');
-const { TIER, TIER_PRICES_TWC, DEFAULT_DURATION_DAYS } = require('../constants/subscriptionTiers');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
+const {
+  TIER,
+  TIER_PRICES_EUR,
+  DEFAULT_DURATION_DAYS,
+  nfAmountForEur,
+} = require('../constants/subscriptionTiers');
+const { getPlatformCurrency } = require('../economy/platformCurrency');
 const {
   maybeExpireSubscription,
   isSubscriptionActive,
@@ -24,6 +36,7 @@ const {
 } = require('../utils/subscriptionHelpers');
 
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
+const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
 
 // Middleware de validation des erreurs
 const handleValidationErrors = (req, res, next) => {
@@ -39,7 +52,45 @@ const handleValidationErrors = (req, res, next) => {
 };
 
 /**
- * Achat ou prolongation d'abonnement payant (Plus / Pro) en TWC.
+ * Tarifs des abonnements convertis au cours du NF du moment.
+ *
+ * Source unique de vérité : c'est ce que les clients affichent ET ce qui est
+ * débité. Si le cours est indisponible, aucun ancien montant fixe n'est
+ * renvoyé et l'achat reste bloqué.
+ */
+async function resolveSubscriptionPricing(transaction) {
+  const currency = await getPlatformCurrency({ transaction });
+  const nfPriceEur = Number(currency?.currentPrice) || null;
+
+  const forTier = (tier) => {
+    const eur = TIER_PRICES_EUR[tier];
+    const nf = nfAmountForEur(eur, nfPriceEur);
+    return { eur, nf: nf ?? 0, live: nf != null };
+  };
+
+  const plus = forTier(TIER.PLUS);
+  const pro = forTier(TIER.PRO);
+  const upgradeEur = Math.max(0, TIER_PRICES_EUR[TIER.PRO] - TIER_PRICES_EUR[TIER.PLUS]);
+  const upgradeNf = nfAmountForEur(upgradeEur, nfPriceEur);
+
+  return {
+    currency_id: currency?.id || null,
+    currency_symbol: currency?.symbol || 'NF',
+    nf_price_eur: nfPriceEur,
+    duration_days: DEFAULT_DURATION_DAYS,
+    plus,
+    pro,
+    upgrade: {
+      eur: upgradeEur,
+      nf: upgradeNf ?? 0,
+      live: upgradeNf != null,
+    },
+  };
+}
+
+/**
+ * Achat ou prolongation d'abonnement payant (Plus / Pro), débité en NF au
+ * cours du moment pour un prix en euros constant.
  * @param {string|null} explicitTier — si défini (ex. 'plus'), ignore req.body.tier
  */
 async function handleSubscriptionPurchase(req, res, explicitTier) {
@@ -60,10 +111,14 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
 
     const duration = req.body.duration;
     const userId = req.user.id;
-    const currencyId = '077ae58c-7ba5-4da0-bb67-5829a83a2ea1';
     const NewEconomyService = require('../services/newEconomyService');
 
-    const user = await User.findByPk(userId, { transaction, lock: true });
+    // L'autorisation antifraude est persistée dans une transaction séparée et
+    // sa FK vers users prend un verrou KEY SHARE. Un FOR UPDATE ici la bloquait
+    // jusqu'au timeout. NO KEY UPDATE sérialise toujours deux achats concurrents
+    // sans bloquer cette vérification de FK.
+    const subscriptionLock = transaction.LOCK.NO_KEY_UPDATE;
+    const user = await User.findByPk(userId, { transaction, lock: subscriptionLock });
     if (!user) {
       await transaction.rollback();
       return res.status(404).json({
@@ -73,7 +128,7 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
     }
 
     await maybeExpireSubscription(user, transaction);
-    await user.reload({ transaction, lock: true });
+    await user.reload({ transaction, lock: subscriptionLock });
 
     const active = isSubscriptionActive(user);
 
@@ -85,15 +140,40 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
       });
     }
 
-    let price = TIER_PRICES_TWC[tier];
+    const pricing = await resolveSubscriptionPricing(transaction);
+    const currencyId = pricing.currency_id;
+    if (!currencyId) {
+      await transaction.rollback();
+      return res.status(503).json({
+        success: false,
+        message: 'Le portefeuille NF est momentanément indisponible.'
+      });
+    }
+    if (!pricing[tier].live) {
+      await transaction.rollback();
+      return res.status(503).json({
+        success: false,
+        message: 'Le cours du NF est momentanément indisponible. Réessayez dans quelques instants : aucun achat ne sera facturé à un ancien prix fixe.'
+      });
+    }
+    let price = pricing[tier].nf;
+    let priceEur = pricing[tier].eur;
     let itemId = `subscription_${tier}_${DEFAULT_DURATION_DAYS}d`;
     const durationDays = Math.max(1, parseInt(duration, 10) || DEFAULT_DURATION_DAYS);
     let description = `Abonnement ${tier === TIER.PLUS ? 'Plus' : 'Pro'} (${durationDays} j.)`;
 
     if (active && user.subscription_tier === TIER.PLUS && tier === TIER.PRO) {
-      price = TIER_PRICES_TWC[TIER.PRO] - TIER_PRICES_TWC[TIER.PLUS];
+      if (!pricing.upgrade.live) {
+        await transaction.rollback();
+        return res.status(503).json({
+          success: false,
+          message: 'Le cours du NF est momentanément indisponible. La mise à niveau ne peut pas être calculée.'
+        });
+      }
+      price = pricing.upgrade.nf;
+      priceEur = pricing.upgrade.eur;
       itemId = 'subscription_upgrade_plus_to_pro';
-      description = 'Mise à niveau Plus → Pro';
+      description = `Mise à niveau Plus → Pro (${priceEur} €)`;
       if (price <= 0) {
         await transaction.rollback();
         return res.status(400).json({
@@ -121,10 +201,11 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
       await transaction.rollback();
       return res.status(400).json({
         success: false,
-        message: `Solde insuffisant. Vous avez ${userWallet.wallet.balance} TWC, il en faut ${price} TWC.`,
+        message: `Solde insuffisant. Vous avez ${userWallet.wallet.balance} NF, il en faut ${price} NF (${priceEur} €).`,
         data: {
           current_balance: userWallet.wallet.balance,
           required_amount: price,
+          required_amount_eur: priceEur,
           missing_amount: price - userWallet.wallet.balance
         }
       });
@@ -142,11 +223,27 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
         transaction
       );
     } catch (spendError) {
-      console.error('❌ [SUB] Erreur transaction TWC:', spendError);
+      console.error('❌ [SUB] Erreur transaction NF:', spendError);
+      await transaction.rollback();
+      const isRiskError = transactionAuthorizationService.constructor.isRiskError(spendError);
+      return res.status(isRiskError ? spendError.httpStatus : 500).json({
+        success: false,
+        message: isRiskError
+          ? spendError.message
+          : 'Erreur lors de la transaction. Vos NF n\'ont pas été débités.',
+        code: isRiskError ? spendError.code : undefined
+      });
+    }
+
+    const paymentTransactionId =
+      spendResult?.transaction?.transactionHash ||
+      spendResult?.transactionHash ||
+      spendResult?.transaction?.id;
+    if (!paymentTransactionId) {
       await transaction.rollback();
       return res.status(500).json({
         success: false,
-        message: 'Erreur lors de la transaction. Vos TWC n\'ont pas été débités.'
+        message: 'Le paiement NF n’a pas pu être confirmé. Aucun abonnement n’a été activé.'
       });
     }
 
@@ -178,8 +275,11 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
         subscription_tier: tier,
         subscription_expires_at: nextExpiry,
         duration_days: durationDays,
-        transaction_id: spendResult.transaction.transactionHash,
+        payment_confirmed: true,
+        transaction_id: paymentTransactionId,
         amount_spent: price,
+        amount_spent_eur: priceEur,
+        currency_symbol: pricing.currency_symbol,
         remaining_balance: spendResult.remainingBalance
       }
     });
@@ -245,7 +345,7 @@ router.get('/profile/:username', [
         is_active: true,
         is_suspended: false
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium', 'subscription_tier', 'verification_style', 'stats', 'created_at', 'last_activity']
+      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium', 'subscription_tier', 'verification_style', 'stats', 'profile_customization', 'created_at', 'last_activity']
     });
 
     if (!user) {
@@ -291,7 +391,7 @@ router.get('/profile/authenticated/:username', [
         is_active: true,
         is_suspended: false
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'verified', 'premium', 'subscription_tier', 'verification_style', 'stats', 'created_at', 'last_activity']
+      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'verified', 'premium', 'subscription_tier', 'verification_style', 'stats', 'profile_customization', 'is_private_account', 'created_at', 'last_activity']
     });
 
     if (!user) {
@@ -310,14 +410,20 @@ router.get('/profile/authenticated/:username', [
 
     // Déterminer la relation de suivi si l'utilisateur courant n'est pas le même
     let isFollowing = false;
+    let followStatus = null;
     if (currentUserId && user.id !== currentUserId) {
-      isFollowing = await UserFollow.isFollowing(currentUserId, user.id);
+      const existingFollow = await UserFollow.findOne({
+        where: { follower_id: currentUserId, following_id: user.id },
+        attributes: ['status']
+      });
+      followStatus = existingFollow?.status || null;
+      isFollowing = followStatus === 'active';
     }
 
     res.json({
       success: true,
       message: 'Profil utilisateur (auth) récupéré avec succès',
-      data: { user, isFollowing }
+      data: { user, isFollowing, followStatus }
     });
 
   } catch (error) {
@@ -326,6 +432,168 @@ router.get('/profile/authenticated/:username', [
       success: false,
       message: 'Erreur interne du serveur'
     });
+  }
+});
+
+/**
+ * GET /api/users/subscription-pricing
+ * Prix Premium fixe en euros et équivalent NF calculé au cours du moment.
+ * Cette route doit rester AVANT `/:id`, sinon Express traite
+ * "subscription-pricing" comme un identifiant utilisateur.
+ */
+router.get('/subscription-pricing', authenticateToken, async (req, res) => {
+  try {
+    return res.json({ success: true, data: await resolveSubscriptionPricing() });
+  } catch (error) {
+    logger.error('Erreur subscription-pricing:', error);
+    return res.status(503).json({ success: false, message: 'Le cours du NF est momentanément indisponible.' });
+  }
+});
+
+/**
+ * GET /api/users/follow-requests
+ * Demandes de suivi reçues, en attente d'approbation (compte privé).
+ * Cette route doit rester AVANT `/:id`, même raison que subscription-pricing.
+ */
+router.get('/follow-requests', authenticateToken, async (req, res) => {
+  try {
+    const requests = await UserFollow.findAll({
+      where: { following_id: req.user.id, status: 'pending' },
+      include: [{
+        model: User,
+        as: 'follower',
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'profile_customization']
+      }],
+      order: [['created_at', 'DESC']]
+    });
+
+    res.json({ success: true, message: 'Demandes de suivi récupérées avec succès', data: { requests } });
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des demandes de suivi:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * PUT /api/users/follow-requests/:followId/accept
+ * Accepter une demande de suivi reçue.
+ */
+router.put('/follow-requests/:followId/accept', [
+  authenticateToken,
+  param('followId').isUUID().withMessage('ID de demande invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const request = await UserFollow.findOne({
+      where: { id: req.params.followId, following_id: req.user.id, status: 'pending' }
+    });
+
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Demande de suivi introuvable' });
+    }
+
+    await request.update({ status: 'active' });
+
+    res.json({ success: true, message: 'Demande de suivi acceptée', data: { follow: request } });
+  } catch (error) {
+    logger.error('Erreur lors de l\'acceptation de la demande de suivi:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * PUT /api/users/follow-requests/:followId/reject
+ * Refuser (supprimer) une demande de suivi reçue.
+ */
+router.put('/follow-requests/:followId/reject', [
+  authenticateToken,
+  param('followId').isUUID().withMessage('ID de demande invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const request = await UserFollow.findOne({
+      where: { id: req.params.followId, following_id: req.user.id, status: 'pending' }
+    });
+
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Demande de suivi introuvable' });
+    }
+
+    await request.destroy();
+
+    res.json({ success: true, message: 'Demande de suivi refusée' });
+  } catch (error) {
+    logger.error('Erreur lors du refus de la demande de suivi:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * DELETE /api/users/followers/:followerId
+ * Retirer quelqu'un de SES propres abonnés.
+ *
+ * L'inverse de `DELETE /:id/follow` : là, on décide de ne plus suivre ; ici, on
+ * décide que quelqu'un ne nous suit plus. C'est le geste qui manquait pour
+ * qu'un compte privé serve à quelque chose une fois qu'on a accepté quelqu'un
+ * par erreur — sans lui, il fallait passer le compte en public, retirer, et
+ * repasser en privé.
+ *
+ * Le lien est SUPPRIMÉ, pas repassé en `pending` : une demande en attente est
+ * quelque chose que la personne a formulé, la fabriquer à sa place lui ferait
+ * croire qu'elle a redemandé. Elle repart donc de zéro et devra refaire la
+ * démarche — qui retombera en `pending` si le compte est toujours privé.
+ */
+router.delete('/followers/:followerId', [
+  authenticateToken,
+  denySuspended,
+  param('followerId').isUUID().withMessage('ID d\'utilisateur invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const ownerId = req.user.id;
+    const followerId = req.params.followerId;
+
+    if (String(ownerId) === String(followerId)) {
+      return res.status(400).json({ success: false, message: 'Opération invalide' });
+    }
+
+    // On ne retire QUE des liens qui pointent vers soi : impossible de casser
+    // l'abonnement de deux tiers, même en devinant leurs identifiants.
+    const follow = await UserFollow.findOne({
+      where: { follower_id: followerId, following_id: ownerId }
+    });
+
+    if (!follow) {
+      return res.status(404).json({
+        success: false,
+        message: 'Cette personne ne fait pas partie de vos abonnés'
+      });
+    }
+
+    // `destroy` déclenche le hook qui décrémente les compteurs des deux côtés —
+    // et uniquement pour un lien `active`, donc retirer une demande encore en
+    // attente ne fait pas tomber le compteur d'abonnés en négatif.
+    await follow.destroy();
+
+    // Le graphe du moteur de similarité doit oublier l'arête, sinon il
+    // continue de recommander comme si la personne suivait toujours.
+    try {
+      const similarity = require('../services/similarity');
+      similarity.onUnfollow(followerId, ownerId);
+
+      const videoRecommendationService = require('../services/videoRecommendationService');
+      videoRecommendationService.onFollow(followerId, ownerId, false);
+    } catch (e) { /* non-critique */ }
+
+    res.json({
+      success: true,
+      message: 'Abonné retiré',
+      data: { removed_follower_id: String(followerId) }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors du retrait d\'un abonné:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
   }
 });
 
@@ -346,7 +614,7 @@ router.get('/:id', [
         is_active: true,
         is_suspended: false
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium', 'verification_style', 'stats', 'created_at', 'last_activity']
+      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium', 'verification_style', 'stats', 'profile_customization', 'is_private_account', 'created_at', 'last_activity']
     });
 
     if (!user) {
@@ -438,7 +706,7 @@ router.get('/:id/tweets', [
   param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
   query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
   query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
-  query('type').optional().isIn(['all', 'tweets', 'replies', 'retweets']).withMessage('Type de tweet invalide'),
+  query('type').optional().isIn(['all', 'tweets', 'replies', 'retweets', 'media', 'likes']).withMessage('Type de tweet invalide'),
   handleValidationErrors
 ], async (req, res) => {
   try {
@@ -452,7 +720,7 @@ router.get('/:id/tweets', [
         is_active: true,
         is_suspended: false
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style']
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'is_private_account', 'profile_customization']
     });
 
     if (!user) {
@@ -464,6 +732,24 @@ router.get('/:id/tweets', [
 
     // Utilisateur authentifié via middleware
     const currentUserId = req.user.id;
+
+    // Compte privé : personne d'autre que le propriétaire ou un abonné
+    // accepté (`active`) ne voit les tweets. Le client déduit l'état
+    // "verrouillé" de `user.is_private_account` + son statut de suivi.
+    if (user.is_private_account && String(currentUserId) !== String(id)) {
+      const isFollower = await UserFollow.isFollowing(currentUserId, id);
+      if (!isFollower) {
+        return res.json({
+          success: true,
+          message: 'Tweets de l\'utilisateur récupérés avec succès',
+          data: {
+            user,
+            tweets: [],
+            pagination: { total: 0, limit: parseInt(limit), offset: parseInt(offset), hasMore: false }
+          }
+        });
+      }
+    }
 
     let tweets = [];
     let totalCount = 0;
@@ -478,7 +764,7 @@ router.get('/:id/tweets', [
           include: [{
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
           }]
         }],
         order: [['created_at', 'DESC']],
@@ -489,7 +775,51 @@ router.get('/:id/tweets', [
       totalCount = await TweetRetweet.count({ where: { user_id: id } });
 
       // Mapper vers les tweets enrichis (stats/interactions en batch, pas de N+1)
-      tweets = await hydrateTweetStats(retweets.map((rt) => rt.tweet), currentUserId);
+      const visibleRetweets = await filterVisibleTweets(
+        retweets.map((rt) => rt.tweet),
+        currentUserId,
+        { User, UserFollow, Op }
+      );
+      tweets = await hydrateTweetStats(visibleRetweets, currentUserId);
+    } else if (type === 'likes') {
+      // L'onglet J'aime suit l'ordre des likes, pas la date de publication.
+      // Les tweets privés, modérés ou issus d'un compte privé non suivi sont
+      // retirés avant hydratation afin que cet onglet ne contourne jamais les
+      // règles de confidentialité du fil.
+      const likedRows = await TweetLike.findAll({
+        where: { user_id: id },
+        include: [{
+          model: Tweet,
+          as: 'tweet',
+          required: true,
+          where: { is_private: false, moderation_status: 'approved' },
+          include: [{
+            model: User,
+            as: 'author',
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
+          }]
+        }],
+        order: [['created_at', 'DESC']],
+        limit: parseInt(limit),
+        offset: parseInt(offset)
+      });
+
+      totalCount = await TweetLike.count({
+        where: { user_id: id },
+        include: [{
+          model: Tweet,
+          as: 'tweet',
+          required: true,
+          where: { is_private: false, moderation_status: 'approved' }
+        }]
+      });
+
+      const visibleLikes = await filterVisibleTweets(
+        likedRows.map((like) => like.tweet),
+        currentUserId,
+        { User, UserFollow, Op }
+      );
+      tweets = await hydrateTweetStats(visibleLikes, currentUserId);
     } else {
       // Tweets et réponses (et éventuellement all)
       const whereClause = { user_id: id, is_private: false, moderation_status: 'approved' };
@@ -501,6 +831,14 @@ router.get('/:id/tweets', [
         whereClause.parent_tweet_id = null;
         whereClause.is_retweet = false;
         whereClause.is_quote = false;
+      } else if (type === 'media') {
+        whereClause.is_retweet = false;
+        whereClause[Op.and] = [
+          sequelize.where(
+            sequelize.fn('jsonb_array_length', sequelize.col('media_urls')),
+            { [Op.gt]: 0 }
+          )
+        ];
       }
 
       const rawTweets = await Tweet.findAll({
@@ -508,7 +846,7 @@ router.get('/:id/tweets', [
         include: [{
           model: User,
           as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style']
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
         }],
         order: [['created_at', 'DESC']],
         limit: parseInt(limit),
@@ -561,7 +899,7 @@ router.get('/:id/followers', [
     // Vérifier que l'utilisateur existe
     const user = await User.findByPk(id, {
       where: { is_active: true },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style']
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
     });
 
     if (!user) {
@@ -621,7 +959,7 @@ router.get('/:id/following', [
     // Vérifier que l'utilisateur existe
     const user = await User.findByPk(id, {
       where: { is_active: true },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style']
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
     });
 
     if (!user) {
@@ -716,11 +1054,15 @@ router.post('/:id/follow', [
       });
     }
 
+    // Compte privé : la demande reste en attente jusqu'à approbation par la
+    // cible, elle ne compte pas encore comme un suivi (cf. hooks UserFollow).
+    const targetStatus = userToFollow.is_private_account ? 'pending' : 'active';
+
     // Créer le suivi
     const follow = await UserFollow.create({
       follower_id: followerId,
       following_id: followingId,
-      status: 'active',
+      status: targetStatus,
       metadata: {
         source: req.userPlatform || 'unknown',
         device: req.headers['user-agent'] || 'unknown',
@@ -728,20 +1070,26 @@ router.post('/:id/follow', [
       }
     });
 
-    // 🔗 Mettre à jour le graphe social du moteur de similarité en temps réel
-    try {
-      const similarity = require('../services/similarity');
-      similarity.onFollow(followerId, followingId);
+    if (targetStatus === 'pending') {
+      try {
+        await Notification.createFollowRequestNotification(followerId, followingId);
+      } catch (e) { /* non-critique */ }
+    } else {
+      // 🔗 Mettre à jour le graphe social du moteur de similarité en temps réel
+      try {
+        const similarity = require('../services/similarity');
+        similarity.onFollow(followerId, followingId);
 
-      // 🎬 [VideoReco] New video engine follow
-      const videoRecommendationService = require('../services/videoRecommendationService');
-      videoRecommendationService.onFollow(followerId, followingId, true);
-    } catch (e) { /* non-critique */ }
+        // 🎬 [VideoReco] New video engine follow
+        const videoRecommendationService = require('../services/videoRecommendationService');
+        videoRecommendationService.onFollow(followerId, followingId, true);
+      } catch (e) { /* non-critique */ }
+    }
 
     res.status(201).json({
       success: true,
-      message: 'Abonnement créé avec succès',
-      data: { follow }
+      message: targetStatus === 'pending' ? 'Demande de suivi envoyée' : 'Abonnement créé avec succès',
+      data: { follow, status: targetStatus }
     });
 
   } catch (error) {
@@ -936,13 +1284,18 @@ router.get('/:id/follow-status', [
     const followerId = req.user.id;
     const followingId = req.params.id;
 
-    // Vérifier si l'utilisateur suit déjà
-    const isFollowing = await UserFollow.isFollowing(followerId, followingId);
+    // Statut brut de la relation (`active`, `pending`, ou absente) : la
+    // demande de suivi sur un compte privé n'est pas encore "isFollowing".
+    const existingFollow = await UserFollow.findOne({
+      where: { follower_id: followerId, following_id: followingId },
+      attributes: ['status']
+    });
+    const status = existingFollow?.status || null;
 
     res.json({
       success: true,
       message: 'Statut de suivi récupéré avec succès',
-      data: { isFollowing }
+      data: { isFollowing: status === 'active', status }
     });
 
   } catch (error) {
@@ -1144,6 +1497,256 @@ router.post('/purchase-premium', [
   authenticateToken,
   denySuspended
 ], async (req, res) => handleSubscriptionPurchase(req, res, TIER.PLUS));
+
+/* ── Personnalisation de profil premium (façon Discord) ─────────────────── */
+
+/** Palettes proposées : on ne stocke que des couleurs validées, jamais du CSS libre. */
+const PROFILE_BANNER_STYLES = ['none', 'gradient', 'glow', 'mesh', 'stripes'];
+const PROFILE_AVATAR_DECORATIONS = ['none', 'ring', 'crown', 'petals', 'circuit', 'flames', 'stars'];
+/** Force du thème de profil : le même dégradé, plus ou moins poussé. */
+const PROFILE_THEME_INTENSITIES = ['soft', 'normal', 'vivid'];
+/**
+ * Nom affiché : police + traitement animé (palier Pro).
+ * Le vocabulaire des polices est celui que le client mobile sait déjà résoudre
+ * (`utils/profileDisplayNamePrefs`) — il était jusqu'ici stocké sur l'appareil,
+ * donc invisible pour les visiteurs.
+ */
+// Liste fermée : une valeur absente d'ici est silencieusement ignorée à
+// l'enregistrement (voir plus bas), sans erreur renvoyée au client. Elle doit
+// donc rester alignée mot pour mot sur `NameFont` côté app
+// (services/profileCustomizationService) et sur `DisplayNameFontId`
+// (utils/profileDisplayNamePrefs).
+const PROFILE_NAME_FONTS = [
+  'system', 'display', 'editorial', 'serif', 'mono', 'compact',
+  // Dix familles ajoutées, embarquées en Bold réel côté app.
+  'geometric', 'rounded', 'elegant', 'soft', 'friendly',
+  'classic', 'grotesque', 'techno', 'handwritten', 'roman',
+];
+const PROFILE_NAME_EFFECTS = ['none', 'gradient', 'shimmer', 'glow', 'certified'];
+/** Taille du pseudo affiché sur le profil (palier Pro, comme police/effet). */
+const PROFILE_NAME_SIZES = ['normal', 'large', 'xlarge', 'huge', 'giant'];
+
+/**
+ * « Certifié » ne se paie pas : il reprend la couleur du badge de vérification
+ * et ne s'ouvre qu'aux comptes `verified`. C'est le seul habillage adossé à la
+ * certification plutôt qu'au palier d'abonnement — un compte Pro non certifié
+ * n'y a pas droit, un compte certifié gratuit y a droit.
+ */
+const CERTIFIED_NAME_EFFECT = 'certified';
+/** Ambiance animée peinte EN FOND du profil, jamais par-dessus (palier Pro). */
+const PROFILE_EFFECTS = ['none', 'sparkles', 'embers', 'bubbles', 'snow'];
+/** Titre libre affiché sous le pseudo — court, sinon il concurrence la bio. */
+const PROFILE_TITLE_MAX = 40;
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+/** Palier minimum pour personnaliser : Plus. Pro débloque les décorations. */
+function customizationTier(user) {
+  const tier = String(user?.subscription_tier || TIER.FREE);
+  if (tier === TIER.PRO || tier === TIER.PLUS) return tier;
+  // `premium` est l'ancien drapeau : il vaut Pro pour les comptes historiques.
+  return user?.premium ? TIER.PRO : TIER.FREE;
+}
+
+function sanitizeCustomization(input, tier, { verified = false } = {}) {
+  const source = input && typeof input === 'object' ? input : {};
+  const output = {};
+  // Un compte certifié gratuit passe la porte de la route pour son seul effet
+  // de nom : tout le reste reste payant, d'où ce garde-fou champ par champ.
+  const paid = tier !== TIER.FREE;
+
+  if (paid && typeof source.accent_color === 'string' && HEX_COLOR.test(source.accent_color.trim())) {
+    output.accent_color = source.accent_color.trim().toLowerCase();
+  }
+  if (paid && typeof source.secondary_color === 'string' && HEX_COLOR.test(source.secondary_color.trim())) {
+    output.secondary_color = source.secondary_color.trim().toLowerCase();
+  }
+  if (paid && PROFILE_BANNER_STYLES.includes(source.banner_style)) {
+    output.banner_style = source.banner_style;
+  }
+  if (paid && PROFILE_THEME_INTENSITIES.includes(source.theme_intensity)) {
+    output.theme_intensity = source.theme_intensity;
+  }
+  // Les décorations d'avatar sont l'avantage exclusif du palier Pro.
+  if (PROFILE_AVATAR_DECORATIONS.includes(source.avatar_decoration)) {
+    output.avatar_decoration = tier === TIER.PRO ? source.avatar_decoration : 'none';
+  }
+  // Même règle pour les deux habillages animés arrivés ensuite : ils sont la
+  // contrepartie visible du palier Pro, un compte Plus les voit mais ne les
+  // enregistre pas.
+  if (PROFILE_NAME_FONTS.includes(source.name_font)) {
+    output.name_font = tier === TIER.PRO ? source.name_font : 'system';
+  }
+  if (PROFILE_NAME_EFFECTS.includes(source.name_effect)) {
+    // Deux droits différents selon l'effet : « Certifié » suit le badge, les
+    // autres suivent le palier payant.
+    const allowed = source.name_effect === CERTIFIED_NAME_EFFECT
+      ? verified
+      : tier === TIER.PRO;
+    output.name_effect = allowed ? source.name_effect : 'none';
+  }
+  if (PROFILE_EFFECTS.includes(source.profile_effect)) {
+    output.profile_effect = tier === TIER.PRO ? source.profile_effect : 'none';
+  }
+  if (PROFILE_NAME_SIZES.includes(source.name_size)) {
+    output.name_size = tier === TIER.PRO ? source.name_size : 'normal';
+  }
+  if (paid && typeof source.profile_title === 'string') {
+    const title = source.profile_title.trim().replace(/\s+/g, ' ').slice(0, PROFILE_TITLE_MAX);
+    if (title) output.profile_title = title;
+  }
+  if (paid && typeof source.about_me === 'string') {
+    const about = source.about_me.trim().slice(0, 300);
+    if (about) output.about_me = about;
+  }
+  return output;
+}
+
+/**
+ * GET /api/users/me/profile-customization
+ * Renvoie la personnalisation courante et ce que le palier autorise.
+ */
+router.get('/me/profile-customization', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id, {
+      attributes: ['id', 'premium', 'subscription_tier', 'verified', 'verification_style', 'profile_customization']
+    });
+    if (!user) return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+
+    const tier = customizationTier(user);
+    return res.json({
+      success: true,
+      data: {
+        customization: user.profile_customization || {},
+        tier,
+        can_customize: tier !== TIER.FREE,
+        can_use_decorations: tier === TIER.PRO,
+        // Droit adossé à la certification, pas à l'abonnement.
+        can_use_certified_name: !!user.verified,
+        verification_style: user.verification_style || 'default',
+        options: {
+          banner_styles: PROFILE_BANNER_STYLES,
+          theme_intensities: PROFILE_THEME_INTENSITIES,
+          avatar_decorations: PROFILE_AVATAR_DECORATIONS,
+          name_fonts: PROFILE_NAME_FONTS,
+          name_effects: PROFILE_NAME_EFFECTS,
+          name_sizes: PROFILE_NAME_SIZES,
+          profile_effects: PROFILE_EFFECTS,
+          profile_title_max: PROFILE_TITLE_MAX
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Erreur lecture personnalisation profil:', error);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * PUT /api/users/me/profile-customization
+ * Enregistre couleurs / style de bannière / décoration / à propos.
+ */
+router.put('/me/profile-customization', [authenticateToken, denySuspended], async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id);
+    if (!user) return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+
+    const tier = customizationTier(user);
+    // La certification ouvre à elle seule l'effet de nom « Certifié » : un compte
+    // certifié gratuit doit pouvoir l'enregistrer. `sanitizeCustomization`
+    // écarte ensuite tout le reste, qui demande bien un abonnement.
+    if (tier === TIER.FREE && !user.verified) {
+      return res.status(403).json({
+        success: false,
+        message: 'La personnalisation de profil est réservée aux abonnements Plus et Pro',
+        code: 'SUBSCRIPTION_REQUIRED'
+      });
+    }
+
+    const customization = sanitizeCustomization(req.body?.customization ?? req.body, tier, {
+      verified: !!user.verified,
+    });
+    user.profile_customization = customization;
+    // `profile_customization` est un JSONB muté par assignation : sans ce
+    // `changed`, Sequelize ne détecte pas toujours la modification et le save
+    // repart sans rien écrire.
+    user.changed('profile_customization', true);
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: 'Personnalisation enregistrée',
+      data: { customization, tier }
+    });
+  } catch (error) {
+    logger.error('Erreur sauvegarde personnalisation profil:', error);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * PUT /api/users/me/language
+ * Langue de lecture (« Traduction bêta »).
+ *
+ * Accepte les 10 langues traduites plus `fr`, la langue d'origine. Choisir
+ * `fr` est un choix à part entière : il est enregistré, donc la question de
+ * la première connexion ne revient plus.
+ */
+router.put('/me/language', [authenticateToken], async (req, res) => {
+  try {
+    const requested = String(req.body?.language || '').trim().toLowerCase();
+    if (!READABLE_LANGUAGES.includes(requested)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Langue non prise en charge',
+        code: 'UNSUPPORTED_LANGUAGE'
+      });
+    }
+
+    const user = await User.findByPk(req.user.id);
+    if (!user) return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+
+    user.preferred_language = requested;
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: 'Langue de lecture enregistrée',
+      data: { preferred_language: requested }
+    });
+  } catch (error) {
+    logger.error('Erreur enregistrement de la langue de lecture:', error);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * GET /api/users/me/language
+ * Langue de lecture actuelle et catalogue des langues disponibles.
+ * `preferred_language: null` = jamais choisie, l'app pose la question.
+ */
+router.get('/me/language', [authenticateToken], async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id, {
+      attributes: ['id', 'preferred_language']
+    });
+    if (!user) return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+
+    return res.json({
+      success: true,
+      message: 'Langue de lecture récupérée',
+      data: {
+        preferred_language: user.preferred_language || null,
+        languages: [
+          { code: SOURCE_LANGUAGE, label: 'Français', original: true },
+          ...TARGET_LANGUAGES.map((language) => ({ ...language, original: false }))
+        ]
+      }
+    });
+  } catch (error) {
+    logger.error('Erreur récupération de la langue de lecture:', error);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
 
 /**
  * POST /api/users/:id/block

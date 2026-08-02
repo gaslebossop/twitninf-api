@@ -1,4 +1,4 @@
-const { DataTypes, Model } = require('sequelize');
+const { DataTypes, Model, Op } = require('sequelize');
 const logger = require('../utils/logger');
 
 class Tweet extends Model {
@@ -112,7 +112,7 @@ class Tweet extends Model {
         {
           model: this.sequelize.models.User,
           as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium']
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'profile_customization']
         }
       ],
       order: [[sortBy, sortOrder]],
@@ -147,7 +147,7 @@ class Tweet extends Model {
         {
           model: this.sequelize.models.User,
           as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium']
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'profile_customization']
         }
       ],
       order: [['created_at', 'DESC']],
@@ -165,9 +165,10 @@ class Tweet extends Model {
       includeRetweets = true
     } = options;
 
-    // Récupérer les utilisateurs suivis
+    // Récupérer les utilisateurs suivis (actifs seulement — une demande de
+    // suivi `pending` sur un compte privé ne doit pas faire fuiter son fil)
     const following = await this.sequelize.models.UserFollow.findAll({
-      where: { follower_id: userId },
+      where: { follower_id: userId, status: 'active' },
       attributes: ['following_id']
     });
 
@@ -175,7 +176,8 @@ class Tweet extends Model {
     followingIds.push(userId); // Inclure les propres tweets de l'utilisateur
 
     const whereClause = {
-      user_id: { [this.sequelize.Op.in]: followingIds },
+      // `this.sequelize.Op` n'existe pas en Sequelize v6.
+      user_id: { [Op.in]: followingIds },
       parent_tweet_id: null // Tweets originaux uniquement
     };
 
@@ -193,13 +195,37 @@ class Tweet extends Model {
         {
           model: this.sequelize.models.User,
           as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium']
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'profile_customization']
         }
       ],
       order: [['created_at', 'DESC']],
       limit,
       offset
     });
+  }
+
+  /**
+   * Nombre de réponses de PLUSIEURS tweets, en une seule requête.
+   *
+   * Remplace un `Tweet.count({ where: { parent_tweet_id } })` par tweet.
+   * Renvoie une Map<parentId, nombre> ; un tweet sans réponse est absent du
+   * résultat SQL, lire `map.get(id) || 0`.
+   */
+  static async countRepliesForTweets(tweetIds = []) {
+    const ids = [...new Set(tweetIds.map(String))].filter(Boolean);
+    if (ids.length === 0) return new Map();
+
+    const rows = await this.findAll({
+      where: { parent_tweet_id: ids, is_data_test: false },
+      attributes: [
+        'parent_tweet_id',
+        [this.sequelize.fn('COUNT', this.sequelize.col('id')), 'count'],
+      ],
+      group: ['parent_tweet_id'],
+      raw: true,
+    });
+
+    return new Map(rows.map((r) => [String(r.parent_tweet_id), Number(r.count) || 0]));
   }
 }
 
@@ -405,6 +431,18 @@ const tweetSchema = {
   // Indique si le tweet a déjà été monétisé
   monetized: {
     type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+
+  /**
+   * « Traduction (bêta) » — réservée aux abonnés Pro à la publication.
+   * Sert de drapeau d'affichage côté client : c'est ce booléen qui décide
+   * d'afficher ou non le sélecteur de langue sur le tweet. Les traductions
+   * elles-mêmes vivent dans la table `tweet_translations`.
+   */
+  translation_enabled: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
     defaultValue: false
   },
 

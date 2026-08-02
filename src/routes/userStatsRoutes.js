@@ -631,6 +631,116 @@ router.get('/:userId/activity', authenticateToken, async (req, res) => {
 });
 
 /**
+ * GET /api/user-stats/:userId/best-time
+ * Meilleurs créneaux de publication — avantage abonné (Plus / Pro).
+ *
+ * À ne pas confondre avec `/activity`, qui mesure quand l'utilisateur EST
+ * actif (ses propres tweets, ses propres likes). Ici on mesure l'inverse :
+ * quand SON AUDIENCE réagit à ce qu'il publie. Publier à l'heure où l'on est
+ * soi-même sur l'app n'a aucune raison d'être l'heure où les autres y sont.
+ *
+ * La note d'un créneau est l'engagement MOYEN PAR TWEET publié dans ce
+ * créneau, pas l'engagement total : sans cette normalisation, l'heure
+ * recommandée serait simplement celle où l'utilisateur poste le plus souvent,
+ * ce qui ne lui apprend rien.
+ */
+router.get('/:userId/best-time', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { timeframe = '90d' } = req.query;
+
+    if (req.user.id !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Accès non autorisé' });
+    }
+
+    const days = timeframe === '30d' ? 30 : timeframe === '1y' ? 365 : 90;
+    const startDate = new Date(Date.now() - days * 86400000);
+
+    /**
+     * Les trois jointures peuvent multiplier les lignes entre elles (un tweet
+     * à 10 likes et 3 retweets en produit 30) : chaque compteur est donc un
+     * COUNT(DISTINCT) sur la clé de sa propre table, jamais un COUNT(*).
+     * Seuls les tweets ORIGINAUX comptent — recommander une heure sur la base
+     * de réponses noierait le signal.
+     */
+    const rows = await sequelize.query(`
+      SELECT
+        EXTRACT(HOUR FROM t.created_at)::int AS hour,
+        COUNT(DISTINCT t.id) AS tweets,
+        COUNT(DISTINCT l.id) AS likes,
+        COUNT(DISTINCT rt.id) AS retweets,
+        COUNT(DISTINCT rp.id) AS replies
+      FROM tweets t
+      LEFT JOIN tweet_likes l ON l.tweet_id = t.id
+      LEFT JOIN tweet_retweets rt ON rt.tweet_id = t.id
+      LEFT JOIN tweets rp ON rp.parent_tweet_id = t.id AND rp.deleted_at IS NULL
+      WHERE t.user_id::text = :userId
+        AND t.created_at >= :startDate
+        AND t.deleted_at IS NULL
+        AND t.parent_tweet_id IS NULL
+      GROUP BY 1
+      ORDER BY 1
+    `, {
+      replacements: { userId, startDate },
+      type: sequelize.QueryTypes.SELECT
+    });
+
+    /** En dessous, un seul tweet chanceux suffirait à élire une heure. */
+    const MIN_TWEETS_PER_SLOT = 3;
+
+    const hourly = Array.from({ length: 24 }, (_, hour) => {
+      const row = rows.find((r) => parseInt(r.hour, 10) === hour);
+      const tweets = row ? parseInt(row.tweets, 10) : 0;
+      const engagement = row
+        ? parseInt(row.likes, 10) + parseInt(row.retweets, 10) + parseInt(row.replies, 10)
+        : 0;
+      return {
+        hour,
+        tweets,
+        engagement,
+        avg_engagement: tweets > 0 ? Math.round((engagement / tweets) * 100) / 100 : 0,
+        // Un créneau sous-échantillonné est renvoyé quand même (l'app affiche
+        // l'histogramme complet) mais reste inéligible à la recommandation.
+        reliable: tweets >= MIN_TWEETS_PER_SLOT
+      };
+    });
+
+    const eligible = hourly.filter((h) => h.reliable && h.avg_engagement > 0);
+    const bestHours = [...eligible]
+      .sort((a, b) => b.avg_engagement - a.avg_engagement)
+      .slice(0, 3)
+      .map((h) => h.hour);
+
+    const totalTweets = hourly.reduce((sum, h) => sum + h.tweets, 0);
+
+    res.json({
+      success: true,
+      data: {
+        userId,
+        timeframe,
+        hourly,
+        bestHours,
+        /**
+         * Sans assez d'historique, aucune heure n'est défendable. L'app doit
+         * alors se taire plutôt que d'inventer une recommandation — un mauvais
+         * conseil sur un avantage payant coûte plus cher que pas de conseil.
+         */
+        hasEnoughData: eligible.length > 0,
+        sampleTweets: totalTweets,
+        generated_at: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('❌ Erreur calcul meilleur créneau:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors du calcul des meilleurs créneaux',
+      error: error.message
+    });
+  }
+});
+
+/**
  * GET /api/user-stats/:userId/engagement-breakdown
  * Récupère la répartition de l'engagement d'un utilisateur
  */

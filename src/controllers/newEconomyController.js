@@ -4,6 +4,19 @@ const logger = require('../utils/logger');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
 const { getOrCreateEurCurrency } = require('../economy/eurCurrency');
 const { roundTWC } = require('../economy/money');
+const P2PFraudDetector = require('../economy/p2pFraudDetector');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
+
+function sendRiskError(res, error) {
+  if (!transactionAuthorizationService.constructor.isRiskError(error)) return false;
+  res.status(error.httpStatus || 403).json({
+    success: false,
+    message: error.message,
+    code: error.code,
+    details: error.details || undefined,
+  });
+  return true;
+}
 
 /**
  * Contrôleur pour le nouveau système économique TwitCoins
@@ -78,6 +91,7 @@ class NewEconomyController {
       });
     } catch (error) {
       logger.error('Erreur lors de l\'achat:', error);
+      if (sendRiskError(res, error)) return;
       res.status(500).json({
         success: false,
         message: error.message || 'Erreur serveur interne'
@@ -126,6 +140,7 @@ class NewEconomyController {
       });
     } catch (error) {
       logger.error('Erreur lors de la dépense:', error);
+      if (sendRiskError(res, error)) return;
       res.status(500).json({
         success: false,
         message: error.message || 'Erreur serveur interne'
@@ -140,7 +155,7 @@ class NewEconomyController {
     try {
       const { currencyId } = req.params;
 
-      const stats = await NewEconomyService.getEconomicStats(currencyId);
+      const stats = await NewEconomyService.getEconomicStats(currencyId, { range: req.query.range });
 
       res.json({
         success: true,
@@ -324,6 +339,7 @@ class NewEconomyController {
       });
     } catch (error) {
       logger.error('Erreur lors de l\'échange NF/EUR:', error);
+      if (sendRiskError(res, error)) return;
       const message = error instanceof Error && /Solde insuffisant|Devises identiques|Taux de change invalide/.test(error.message)
         ? error.message
         : 'Erreur serveur interne';
@@ -587,6 +603,33 @@ class NewEconomyController {
         }
       }
 
+      // ── Détection de fraude P2P ──────────────────────────────────────────
+      // Contrôle dédié aux virements entre utilisateurs (graphe réel des
+      // transferts en base), pas le middleware `checkTransaction` — pensé
+      // pour les paiements carte, il ne s'applique plus ici. Voir
+      // economy/p2pFraudDetector.js pour le détail des signaux. Le solde et
+      // le montant utilisés ici sont ceux réellement engagés (après
+      // conversion EUR→NF éventuelle), pas le `body.amount` brut.
+      const { wallet: senderWalletBefore } = await NewEconomyService.getUserWallet(currencyId, fromUserId);
+      const fraudCheck = await P2PFraudDetector.assessTransfer({
+        fromUserId,
+        toUserId,
+        amountNf,
+        senderBalanceBefore: senderWalletBefore.balance
+      });
+
+      if (fraudCheck.blocked) {
+        return res.status(403).json({
+          success: false,
+          message: 'Virement refusé pour des raisons de sécurité. Contactez le support si vous pensez qu\'il s\'agit d\'une erreur.',
+          code: 'P2P_TRANSFER_BLOCKED',
+          fraud_score: fraudCheck.score
+        });
+      }
+      if (fraudCheck.verdict === 'review') {
+        res.setHeader('X-Fraud-Warning', 'true');
+      }
+
       const result = await NewEconomyService.transferCoins(
         fromUserId,
         toUserId,
@@ -617,6 +660,7 @@ class NewEconomyController {
       });
     } catch (error) {
       logger.error('Erreur lors du transfert de TwitCoins:', error);
+      if (sendRiskError(res, error)) return;
       const message = error instanceof Error && /Solde insuffisant|Transfert minimal|Transfert vers soi-même/.test(error.message)
         ? error.message
         : 'Erreur serveur interne';

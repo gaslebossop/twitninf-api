@@ -16,6 +16,10 @@ const rustClient = require('../services/rustRecommenderClient');
 const { sequelize } = require('../database');
 const { QueryTypes } = require('sequelize');
 const redis = require('redis');
+const { engagementTargetSql } = require('../utils/engagementTarget');
+const { visibleAuthorSql } = require('../utils/privateAccountVisibility');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Client Redis dédié à NeuralRank pour l'invalidation
 let _redisClient;
@@ -43,10 +47,20 @@ function getFallbackEngine() {
  * Récupère les tweets complets depuis la DB à partir d'une liste d'IDs,
  * en préservant l'ordre Rust et en incluant author + interactions utilisateur.
  */
-async function fetchTweetsByIds(tweetIds, userId) {
+async function fetchTweetsByIds(tweetIds, userId, experimentAssignments = []) {
   if (!tweetIds || tweetIds.length === 0) return [];
+  const assignmentByTweet = new Map(
+    (Array.isArray(experimentAssignments) ? experimentAssignments : [])
+      .filter(assignment => assignment?.tweet_id && assignment?.variant_id)
+      .map(assignment => [String(assignment.tweet_id), assignment]),
+  );
 
-  const idsStr = tweetIds.map(id => `'${id}'`).join(',');
+  // Les ids viennent du service Rust, mais ils sont interpolés dans le SQL :
+  // on n'accepte que des UUID stricts plutôt que de faire confiance à la
+  // sortie d'un service tiers.
+  const safeIds = tweetIds.filter(id => UUID_RE.test(String(id)));
+  if (safeIds.length === 0) return [];
+  const idsStr = safeIds.map(id => `'${id}'`).join(',');
 
   const rows = await sequelize.query(`
     SELECT
@@ -61,6 +75,7 @@ async function fetchTweetsByIds(tweetIds, userId) {
       t.mentions,
       t.tweet_type,
       t.original_tweet_id,
+      t.translation_enabled,
       -- Tweet d'origine (les retweets purs ont volontairement content = '')
       ot.id          AS original_id,
       ot.content     AS original_content,
@@ -73,6 +88,7 @@ async function fetchTweetsByIds(tweetIds, userId) {
       ot.mentions    AS original_mentions,
       ot.tweet_type  AS original_tweet_type,
       ot.original_tweet_id AS original_original_tweet_id,
+      ot.translation_enabled AS original_translation_enabled,
       -- Tweet parent (pour les réponses recommandées : affichées avec leur contexte)
       pt.id          AS parent_id,
       pt.content     AS parent_content,
@@ -86,6 +102,10 @@ async function fetchTweetsByIds(tweetIds, userId) {
       u.verified    AS author_verified,
       u.verification_style AS author_verification_style,
       u.premium     AS author_premium,
+      -- Personnalisation : c'est elle qui habille le nom et la pastille dans le
+      -- fil. Sans elle ici, chaque carte devrait aller la chercher elle-même.
+      u.subscription_tier AS author_subscription_tier,
+      u.profile_customization AS author_profile_customization,
       -- Auteur du tweet d'origine
       ou.id          AS original_author_id,
       ou.username    AS original_author_username,
@@ -94,6 +114,8 @@ async function fetchTweetsByIds(tweetIds, userId) {
       ou.verified    AS original_author_verified,
       ou.verification_style AS original_author_verification_style,
       ou.premium     AS original_author_premium,
+      ou.subscription_tier AS original_author_subscription_tier,
+      ou.profile_customization AS original_author_profile_customization,
       -- Auteur du tweet parent
       pu.id          AS parent_author_id,
       pu.username    AS parent_author_username,
@@ -102,15 +124,21 @@ async function fetchTweetsByIds(tweetIds, userId) {
       pu.verified    AS parent_author_verified,
       pu.verification_style AS parent_author_verification_style,
       pu.premium     AS parent_author_premium,
-      -- Stats agrégées
-      COALESCE((SELECT COUNT(*) FROM tweet_likes    WHERE tweet_id = t.id), 0) AS likes_count,
-      COALESCE((SELECT COUNT(*) FROM tweet_retweets WHERE tweet_id = t.id), 0) AS retweets_count,
-      COALESCE((SELECT COUNT(*) FROM tweets         WHERE parent_tweet_id = t.id AND deleted_at IS NULL), 0) AS replies_count,
-      COALESCE(t.view_count, 0) AS views_count,
-      -- Interactions de l'utilisateur courant
-      EXISTS(SELECT 1 FROM tweet_likes    WHERE tweet_id = t.id AND user_id = :userId::uuid) AS is_liked,
-      EXISTS(SELECT 1 FROM tweet_retweets WHERE tweet_id = t.id AND user_id = :userId::uuid) AS is_retweeted
+      pu.subscription_tier AS parent_author_subscription_tier,
+      pu.profile_customization AS parent_author_profile_customization,
+      -- Stats agrégées — portées par la cible d'engagement (l'original pour un
+      -- retweet pur), jamais par la ligne retweet qui n'a aucun like propre.
+      COALESCE((SELECT COUNT(*) FROM tweet_likes    WHERE tweet_id = et.target_id), 0) AS likes_count,
+      COALESCE((SELECT COUNT(*) FROM tweet_retweets WHERE tweet_id = et.target_id), 0) AS retweets_count,
+      COALESCE((SELECT COUNT(*) FROM tweets         WHERE parent_tweet_id = et.target_id AND deleted_at IS NULL), 0) AS replies_count,
+      COALESCE(stt.view_count, t.view_count, 0) AS views_count,
+      -- Interactions de l'utilisateur courant — sur la même cible que les
+      -- compteurs, sinon le coeur et le nombre affiché se contredisent.
+      EXISTS(SELECT 1 FROM tweet_likes    WHERE tweet_id = et.target_id AND user_id = :userId::uuid) AS is_liked,
+      EXISTS(SELECT 1 FROM tweet_retweets WHERE tweet_id = et.target_id AND user_id = :userId::uuid) AS is_retweeted
     FROM tweets t
+    CROSS JOIN LATERAL (SELECT ${engagementTargetSql('t')} AS target_id) et
+    LEFT JOIN tweets stt ON stt.id = et.target_id
     JOIN users u ON u.id = t.user_id
     LEFT JOIN tweets ot
       ON ot.id = t.original_tweet_id
@@ -128,6 +156,17 @@ async function fetchTweetsByIds(tweetIds, userId) {
       AND t.deleted_at IS NULL
       AND t.moderation_status = 'approved'
       AND t.is_private = false
+      -- Comptes privés : le moteur Rust classe des tweets sans rien savoir de
+      -- la confidentialité des comptes, c'est donc ici que ça se joue. Le
+      -- filtre porte AUSSI sur l'auteur de l'original : sinon il suffisait
+      -- qu'un compte public retweete un compte privé pour le rendre lisible de
+      -- tous, ce qui vide le réglage de son sens.
+      AND ${visibleAuthorSql('u')}
+      -- Le cas "ou.id IS NULL" est conservé tel quel : la jointure est déjà
+      -- LEFT et filtrée sur is_active, et le code aval sait afficher un retweet
+      -- dont l'auteur d'origine a disparu. Sans ce cas, la condition partirait
+      -- en NULL et ferait tomber la ligne entière.
+      AND (ot.id IS NULL OR ou.id IS NULL OR ${visibleAuthorSql('ou')})
   `, {
     replacements: { userId },
     type: QueryTypes.SELECT,
@@ -158,6 +197,7 @@ async function fetchTweetsByIds(tweetIds, userId) {
       media_urls: row.original_media_urls || [],
       hashtags: row.original_hashtags || [],
       mentions: row.original_mentions || [],
+      translation_enabled: Boolean(row.original_translation_enabled),
       author: {
         id: String(row.original_author_id),
         username: row.original_author_username,
@@ -166,6 +206,8 @@ async function fetchTweetsByIds(tweetIds, userId) {
         verified: Boolean(row.original_author_verified),
         verification_style: row.original_author_verification_style || 'default',
         premium: Boolean(row.original_author_premium),
+        subscription_tier: row.original_author_subscription_tier || 'free',
+        profile_customization: row.original_author_profile_customization || {},
         stats: {},
       },
     } : null;
@@ -189,6 +231,8 @@ async function fetchTweetsByIds(tweetIds, userId) {
         verified: Boolean(row.parent_author_verified),
         verification_style: row.parent_author_verification_style || 'default',
         premium: Boolean(row.parent_author_premium),
+        subscription_tier: row.parent_author_subscription_tier || 'free',
+        profile_customization: row.parent_author_profile_customization || {},
         stats: {},
       },
     } : null;
@@ -204,9 +248,10 @@ async function fetchTweetsByIds(tweetIds, userId) {
       || originalMedia.length > 0;
     if (!hasRenderableContent) continue;
 
+    const assignment = assignmentByTweet.get(String(row.id));
     tweets.push({
       id: String(row.id),
-      content: row.content || '',
+      content: assignment?.content || row.content || '',
       created_at: row.created_at,
       is_retweet: row.is_retweet || false,
       is_quote: row.is_quote || false,
@@ -218,6 +263,9 @@ async function fetchTweetsByIds(tweetIds, userId) {
       media_urls: row.media_urls || [],
       hashtags: row.hashtags || [],
       mentions: row.mentions || [],
+      // Sans ce champ, le fil NeuralRank n'affiche jamais la traduction : ce
+      // constructeur part d'une ligne SQL, pas d'une instance Sequelize.
+      translation_enabled: Boolean(row.translation_enabled),
       author: {
         id: String(row.author_id),
         username: row.author_username,
@@ -226,6 +274,8 @@ async function fetchTweetsByIds(tweetIds, userId) {
         verified: row.author_verified || false,
         verification_style: row.author_verification_style || 'default',
         premium: row.author_premium || false,
+        subscription_tier: row.author_subscription_tier || 'free',
+        profile_customization: row.author_profile_customization || {},
         stats: {},
       },
       stats: {
@@ -238,6 +288,15 @@ async function fetchTweetsByIds(tweetIds, userId) {
         is_liked: Boolean(row.is_liked),
         is_retweeted: Boolean(row.is_retweeted),
       },
+      ...(assignment ? {
+        ab_test: {
+          experiment_id: String(assignment.experiment_id),
+          variant_id: String(assignment.variant_id),
+          variant_label: String(assignment.variant_label || ''),
+          status: assignment.status === 'completed' ? 'completed' : 'active',
+          is_winner: Boolean(assignment.is_winner),
+        },
+      } : {}),
     });
   }
 
@@ -285,12 +344,13 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
       mode,
       limit: limitInt,
       offset: offsetInt,
+      enableExperiments: req.headers['x-twitninf-client'] === 'windows-electron',
     });
 
     logger.info(`[NeuralRank] user=${userId} mode=${mode} count=${result.count} latency=${result.latencyMs}ms cache=${result.cacheHit}`);
 
     // Hydrater les IDs en tweets complets
-    const tweets = await fetchTweetsByIds(result.tweetIds, userId);
+    const tweets = await fetchTweetsByIds(result.tweetIds, userId, result.experiments);
 
     return res.json({
       success: true,
@@ -373,7 +433,7 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
  */
 router.post('/track', authenticateToken, async (req, res) => {
   const userId = req.user.id;
-  const { tweetId, interactionType, dwellMs } = req.body;
+  const { tweetId, interactionType, dwellMs, experimentId, variantId } = req.body;
 
   if (!tweetId || !interactionType) {
     return res.status(400).json({ success: false, error: 'tweetId et interactionType sont requis' });
@@ -400,7 +460,15 @@ router.post('/track', authenticateToken, async (req, res) => {
   }
 
   try {
-    const result = await rustClient.trackInteraction(userId, parseInt(tweetId), mappedType, dwellMs || null);
+    const result = await rustClient.trackInteraction(
+      userId,
+      tweetId,
+      mappedType,
+      dwellMs || null,
+      experimentId && variantId
+        ? { experiment_id: experimentId, variant_id: variantId }
+        : null,
+    );
     return res.json({ success: true, data: result });
   } catch (err) {
     logger.error(`[NeuralRank] Track error: ${err.message}`);

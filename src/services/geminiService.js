@@ -25,7 +25,24 @@ async function evaluateTweetForRecommendations({ content, authorUsername, isRepl
   - "ban" : contenu ULTRA GRAVE interdit (haine raciale/ethnique, violence explicite, harcèlement grave, sexualité explicite, menaces de mort, apologie terrorisme, doxxing)
   
   IMPORTANT : Réponds uniquement en français et sois bienveillant dans ton évaluation.
-  
+
+  CONTEXTE DE LA PLATEFORME (à connaître avant de juger) :
+  TwitNinf est un réseau social francophone avec son propre vocabulaire. Ces
+  termes sont NORMAUX et parfaitement compréhensibles pour ses utilisateurs :
+  - "ninf", "twitninf", "le ninf" : le nom de la plateforme et de sa communauté
+  - "NF", "TWC" : les monnaies internes ; "wallet", "mining", "casino" : ses fonctionnalités
+  - "policiercongo", "kospor", "G Corp" : comptes et entités connus de la plateforme
+  - argot, verlan, abréviations SMS, emojis, mélange français / lingala / anglais :
+    registre habituel des utilisateurs
+  Les messages sont courts et informels par nature (annonces de retour, salutations,
+  réactions, blagues internes). C'est le format attendu, pas un défaut.
+
+  RÈGLE ABSOLUE : un mot, un pseudo, une abréviation ou une référence que TU ne
+  reconnais pas n'est JAMAIS une raison de mettre "not_eligible". Ton
+  incompréhension d'un terme ne mesure pas la qualité du message. Dans ce cas,
+  réponds "eligible". Ne juge la qualité que sur ce que le message FAIT
+  (insulter, spammer, harceler), jamais sur le vocabulaire employé.
+
   Retourne un JSON strict avec les champs EXACTS suivants :
   - decision (string) : "eligible" | "not_eligible" | "ban"
   - score (0..1) : score de qualité du contenu
@@ -34,12 +51,19 @@ async function evaluateTweetForRecommendations({ content, authorUsername, isRepl
   CRITÈRES DE DÉCISION :
   
   🟡 "not_eligible" (pas de recommandation, mais visible sur profil) :
-  - Insultes et langage grossier
+  - Insultes et langage grossier visant quelqu'un
   - Contenu gênant ou déplacé
   - Spam léger (répétitions, autopromo insistante)
-  - Contenu très faible qualité/incohérent
+  - Suite de caractères tapés au hasard, sans aucun mot réel (ex: "gjkgjkjkggjk")
   - Propos méchants ou irrespectueux
-  
+
+  ⚠️ NE PAS mettre "not_eligible" pour :
+  - un message court, familier ou banal ("je suis de retour", "bonjour", "ça va ?")
+  - du vocabulaire propre à la plateforme, un pseudo, un surnom ou un mot inconnu de toi
+  - de l'argot, des abréviations, des fautes d'orthographe ou un mélange de langues
+  - un message qui te semble « peu utile » ou « sans valeur informative » : ce n'est
+    pas un critère, la conversation ordinaire est le contenu normal du réseau
+
   🔴 "ban" (contenu ULTRA GRAVE, supprimé) :
   - Haine raciale, ethnique ou religieuse
   - Violence explicite ou apologie d'actes violents
@@ -85,6 +109,24 @@ async function evaluateTweetForRecommendations({ content, authorUsername, isRepl
         textType: typeof response?.text,
         fullResponse: JSON.stringify(response, null, 2)
       });
+
+      // Quand le tweet déclenche les filtres de sécurité de Gemini, l'API ne
+      // renvoie AUCUN texte, juste un finishReason. Ce cas retombait sur les
+      // fallbacks génériques plus bas, qui répondent "eligible" — autrement dit
+      // le contenu le plus problématique (insultes crues, violence) passait en
+      // recommandation, alors que le refus du modèle en est justement le signal
+      // le plus fort. On le traite comme non recommandable, sans le supprimer :
+      // ce signal peut avoir des faux positifs, il ne justifie pas un ban.
+      const blockedFinishReason = String(response?.candidates?.[0]?.finishReason || '');
+      if (['PROHIBITED_CONTENT', 'SAFETY', 'BLOCKLIST', 'SPII'].includes(blockedFinishReason)) {
+        logger.warn(`🛑 Gemini a bloqué sa propre réponse (${blockedFinishReason}) — tweet non recommandé`);
+        return {
+          decision: 'not_eligible',
+          eligible: false,
+          reason: `gemini_safety_block:${blockedFinishReason}`,
+          score: 0.1
+        };
+      }
 
             // Extraction robuste du texte de réponse
       let text = '';
@@ -377,7 +419,7 @@ async function processPendingTweet(tweetId, tweetContent, authorUsername, isRepl
        const { Tweet } = require('../models');
        const TweetQueueService = require('./tweetQueueService');
        const tweetQueueService = new TweetQueueService();
-       
+
        // Mettre à jour le statut de modération du tweet
        await Tweet.update({
          moderation_status: finalResult.moderation_status

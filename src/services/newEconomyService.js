@@ -13,6 +13,7 @@ const { roundTWC, toAmount, computePackageCoins } = require('../economy/money');
 const EconomyLedger = require('../economy/ledger');
 const EconomyMetrics = require('../economy/metrics');
 const Pow = require('../economy/pow');
+const { CHART_RANGES, resolveChartRange } = require('../economy/chartRanges');
 
 /**
  * API économique TwitCoins — monnaie fermée plateforme.
@@ -413,14 +414,15 @@ class NewEconomyService {
     }
   }
 
-  static async getEconomicStats(currencyId) {
+  static async getEconomicStats(currencyId, { range } = {}) {
     const currency = await VirtualCurrency.findByPk(currencyId);
     if (!currency) {
       throw new Error('Monnaie introuvable');
     }
     const metrics = await EconomyMetrics.refresh(currencyId);
     await currency.reload();
-    return EconomyMetrics.buildPublicStats(currency, metrics);
+    const rangeKey = resolveChartRange(range);
+    return EconomyMetrics.buildPublicStats(currency, metrics, { rangeHours: CHART_RANGES[rangeKey].hours });
   }
 
   static getSpendingCategory(itemType) {

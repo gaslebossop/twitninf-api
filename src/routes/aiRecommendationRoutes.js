@@ -19,6 +19,7 @@ const authMiddleware = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
 const { getAIBridge } = require('../services/aiRecommendationBridge');
 const { getVectorStore } = require('../services/vectorStoreService');
+const { engagementTargetId } = require('../utils/engagementTarget');
 
 // ═══════════════════════════════════════════════════════════════════
 // GET /api/ai-recommendations/
@@ -79,16 +80,19 @@ router.get('/', authMiddleware.authenticateToken, async (req, res) => {
                 if (dbTweet) {
                     const tweetData = dbTweet.toJSON();
 
-                    // Calculer les stats fraîches
+                    // Calculer les stats fraîches — sur un retweet pur, elles
+                    // appartiennent au tweet d'origine, pas à la ligne retweet.
+                    const sId = engagementTargetId(tweetData);
+
                     const [lCount, rtCount, repCount] = await Promise.all([
-                        TweetLike.countTweetLikes(tId).catch(() => 0),
-                        TweetRetweet.countTweetRetweets(tId).catch(() => 0),
-                        Tweet.count({ where: { parent_tweet_id: tId } }).catch(() => 0)
+                        TweetLike.countTweetLikes(sId).catch(() => 0),
+                        TweetRetweet.countTweetRetweets(sId).catch(() => 0),
+                        Tweet.count({ where: { parent_tweet_id: sId } }).catch(() => 0)
                     ]);
 
                     const [isLiked, isRetweeted] = await Promise.all([
-                        TweetLike.hasUserLikedTweet(userId, tId).catch(() => false),
-                        TweetRetweet.hasUserRetweetedTweet(userId, tId).catch(() => false)
+                        TweetLike.hasUserLikedTweet(userId, sId).catch(() => false),
+                        TweetRetweet.hasUserRetweetedTweet(userId, sId).catch(() => false)
                     ]);
 
                     tweetData.stats = {

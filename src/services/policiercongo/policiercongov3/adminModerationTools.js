@@ -341,6 +341,29 @@ function registerAdminModerationTools(registry, { models }) {
   });
 
   register({
+    name: 'set_verification_style', risk: TOOL_RISK.SENSITIVE, idempotent: true,
+    description: 'Change le style visuel du badge d’un compte déjà vérifié : default, rose (ex. certification spéciale de type prix de concours), gray ou gold. Ne touche pas au booléen verified — si le compte n’est pas encore vérifié, attribue d’abord le badge via verify_user_directly ou approve_verification_request.',
+    inputSchema: object({
+      target: { type: 'string', maxLength: 100 },
+      style: { type: 'string', enum: ['default', 'rose', 'gray', 'gold'] },
+      reason: REASON
+    }, ['target', 'style', 'reason']),
+    handler: async ({ target, style, reason }) => {
+      const user = await resolveUser(models, target);
+      if (!user) throw new Error(`Compte introuvable: ${target}`);
+      if (!user.verified) throw new Error('Ce compte n’est pas vérifié : attribue d’abord le badge (verify_user_directly ou approve_verification_request) avant de choisir son style.');
+      const previousStyle = user.verification_style;
+      if (previousStyle === style) return { styled: true, unchanged: true, style, user: { ...publicUser(user), verification_style: style } };
+      await user.update({ verification_style: style });
+      await logModerationAction(models, {
+        type: 'approve', targetType: 'user', targetId: user.id, reason,
+        metadata: { action_type: 'verification_style', previous_style: previousStyle, new_style: style }
+      });
+      return { styled: true, style, user: { ...publicUser(user), verification_style: style } };
+    }
+  });
+
+  register({
     name: 'approve_verification_request', risk: TOOL_RISK.SENSITIVE, idempotent: false,
     description: 'Approuve une demande de vérification en attente. Vérifie d’abord son contenu avec get_verification_requests (include_form_data=true) avant de décider.',
     inputSchema: object({ request_id: UUID, reason: { type: 'string', maxLength: 500 } }, ['request_id']),

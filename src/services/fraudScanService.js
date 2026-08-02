@@ -14,11 +14,11 @@
  * d'une corrélation d'identité — c'est une limite réelle, pas un oubli.
  */
 
-const { QueryTypes } = require('sequelize');
+const { QueryTypes, Op } = require('sequelize');
 const { sequelize } = require('../database/index');
-const { User } = require('../models');
-const { getPlatformCurrency } = require('../economy/platformCurrency');
+const { User, UserWallet, VirtualCurrency } = require('../models');
 const { MINING_DAILY_WIN_LIMIT, TREASURY_USER_ID } = require('../economy/constants');
+const { toAmount, roundTWC } = require('../economy/money');
 const { POLICE_ACCOUNT_ID } = require('./policiercongo/config');
 
 // Comptes système : leur activité automatisée (minage/paris/transferts à
@@ -81,25 +81,41 @@ function scoreOf(entries) {
 }
 
 class FraudScanService {
+  /**
+   * Scan MULTI-MONNAIE : le scan portait auparavant sur une seule monnaie
+   * (`getPlatformCurrency()`, la plus ancienne active — en pratique le NF),
+   * ce qui rendait invisibles toute fraude sur les monnaies communautaires
+   * créées ensuite (échangées via `exchangeCurrency`, minées, transférées en
+   * P2P comme le NF). On boucle maintenant sur TOUTES les monnaies actives et
+   * chaque signal est tagué `currencyId`/`currencySymbol` — le score et la
+   * sévérité restent globaux par utilisateur (le comportement compte,
+   * peu importe la monnaie sur laquelle il porte), mais le montant à retirer
+   * (`fraudByCurrency`) est calculé et plafonné séparément par monnaie,
+   * puisque chaque monnaie a son propre portefeuille et sa propre valeur.
+   */
   static async scan({ lookbackDays = 14, limit = 100 } = {}) {
-    const currency = await getPlatformCurrency();
     const scannedAt = new Date().toISOString();
-    if (!currency) {
+    const currencies = await VirtualCurrency.findAll({ where: { isActive: true } });
+    if (!currencies.length) {
       return { scannedAt, lookbackDays, stats: { usersFlagged: 0, signalsRaised: 0 }, flaggedUsers: [] };
     }
 
     const since = new Date(Date.now() - lookbackDays * 86400000);
 
-    const [transferSignals, miningSignals, casinoSignals, patternSignals, purchaseSignals] = await Promise.all([
-      this._scanTransfers(currency.id, since),
-      this._scanMining(currency.id, since),
-      this._scanCasino(since),
-      this._scanPatterns(currency.id, since),
-      this._scanPurchases(currency.id, since)
-    ]);
+    const perCurrencyResults = await Promise.all(
+      currencies.map((currency) => this._scanCurrency(currency, since))
+    );
+    const casinoSignals = await this._scanCasino(since, currencies);
+
+    const allSignals = [...casinoSignals];
+    let signalsRaised = casinoSignals.length;
+    for (const r of perCurrencyResults) {
+      allSignals.push(...r.signals);
+      signalsRaised += r.signals.length;
+    }
 
     const byUser = new Map();
-    for (const s of [...transferSignals, ...miningSignals, ...casinoSignals, ...patternSignals, ...purchaseSignals]) {
+    for (const s of allSignals) {
       if (!s.userId || SYSTEM_ACCOUNT_IDS.has(s.userId)) continue;
       if (!byUser.has(s.userId)) byUser.set(s.userId, []);
       byUser.get(s.userId).push(s);
@@ -111,11 +127,49 @@ class FraudScanService {
       : [];
     const userMap = new Map(users.map(u => [u.id, u]));
 
+    // Soldes réels par (utilisateur, monnaie) — nécessaires pour plafonner le
+    // montant suggéré au retrait à ce qui est RÉELLEMENT disponible dans
+    // chaque portefeuille concerné (jamais déduit d'un simple total de signaux).
+    const involvedCurrencyIds = [...new Set(allSignals.map(s => s.currencyId).filter(Boolean))];
+    const wallets = userIds.length && involvedCurrencyIds.length
+      ? await UserWallet.findAll({
+          where: { userId: { [Op.in]: userIds }, currencyId: { [Op.in]: involvedCurrencyIds } },
+          attributes: ['userId', 'currencyId', 'balance']
+        })
+      : [];
+    const balanceMap = new Map(wallets.map(w => [`${w.userId}:${w.currencyId}`, toAmount(w.balance)]));
+    const currencyMap = new Map(currencies.map(c => [c.id, c]));
+
     const flaggedUsers = userIds
       .map(userId => {
         const entries = byUser.get(userId);
         const score = scoreOf(entries);
         const user = userMap.get(userId);
+
+        // Regroupe les montants imputables par monnaie (les signaux sans
+        // montant, `amount: null`, correspondent à de l'argent déjà sorti du
+        // compte au moment du signal — voir chaque scanner pour le détail).
+        const byCurrency = new Map();
+        for (const e of entries) {
+          if (!e.currencyId) continue;
+          if (!byCurrency.has(e.currencyId)) byCurrency.set(e.currencyId, 0);
+          if (e.amount != null && e.amount > 0) {
+            byCurrency.set(e.currencyId, byCurrency.get(e.currencyId) + Number(e.amount));
+          } else if (!byCurrency.has(e.currencyId)) {
+            byCurrency.set(e.currencyId, 0);
+          }
+        }
+        const fraudByCurrency = [...byCurrency.entries()].map(([currencyId, estimatedFraudAmount]) => {
+          const currentBalance = balanceMap.get(`${userId}:${currencyId}`) || 0;
+          return {
+            currencyId,
+            symbol: currencyMap.get(currencyId)?.symbol || '?',
+            estimatedFraudAmount: roundTWC(estimatedFraudAmount),
+            suggestedBurnAmount: roundTWC(Math.min(estimatedFraudAmount, currentBalance)),
+            currentBalance: roundTWC(currentBalance)
+          };
+        }).filter(c => c.currentBalance > 0 || c.estimatedFraudAmount > 0);
+
         return {
           userId,
           username: user?.username || null,
@@ -125,7 +179,8 @@ class FraudScanService {
           accountCreatedAt: user?.createdAt || null,
           score,
           severity: score >= 8 ? 'high' : score >= 4 ? 'medium' : 'low',
-          reasons: entries.map(({ reason, score: s, detail }) => ({ reason, score: s, detail }))
+          reasons: entries.map(({ reason, score: s, detail, currencySymbol }) => ({ reason, score: s, detail, currencySymbol: currencySymbol || null })),
+          fraudByCurrency
         };
       })
       .sort((a, b) => b.score - a.score)
@@ -139,10 +194,24 @@ class FraudScanService {
         highSeverity: flaggedUsers.filter(u => u.severity === 'high').length,
         mediumSeverity: flaggedUsers.filter(u => u.severity === 'medium').length,
         lowSeverity: flaggedUsers.filter(u => u.severity === 'low').length,
-        signalsRaised: transferSignals.length + miningSignals.length + casinoSignals.length + patternSignals.length + purchaseSignals.length
+        signalsRaised,
+        currenciesScanned: currencies.length
       },
       flaggedUsers
     };
+  }
+
+  /** Lance les 4 scanners currency-scoped pour UNE monnaie et tague chaque signal. */
+  static async _scanCurrency(currency, since) {
+    const [transferSignals, miningSignals, patternSignals, purchaseSignals] = await Promise.all([
+      this._scanTransfers(currency.id, since),
+      this._scanMining(currency.id, since),
+      this._scanPatterns(currency.id, since),
+      this._scanPurchases(currency.id, since)
+    ]);
+    const tagged = [...transferSignals, ...miningSignals, ...patternSignals, ...purchaseSignals]
+      .map(s => ({ ...s, currencyId: currency.id, currencySymbol: currency.symbol }));
+    return { signals: tagged };
   }
 
   /**
@@ -175,7 +244,8 @@ class FraudScanService {
     for (const b of bursts) {
       out.push({
         userId: b.userId, category: 'purchase', reason: 'rafale_achats_eur', score: 4,
-        detail: `jusqu'à ${b.maxPerHour} achats en une heure (${Number(b.totalEur).toFixed(2)} € cumulés) — cadence évoquant un test de moyen de paiement`
+        detail: `jusqu'à ${b.maxPerHour} achats en une heure (${Number(b.totalEur).toFixed(2)} € cumulés) — cadence évoquant un test de moyen de paiement`,
+        amount: null // signal comportemental (cadence), pas un montant NF directement imputable
       });
     }
 
@@ -204,7 +274,8 @@ class FraudScanService {
     for (const c of cashout) {
       out.push({
         userId: c.userId, category: 'purchase', reason: 'achat_puis_revente_immediate', score: 5,
-        detail: `${c.occurrences} fois où un achat EUR→NF a été retransféré à ≥${Math.round(PURCHASE_CASHOUT_RATIO * 100)}% vers un autre compte en moins de ${PURCHASE_CASHOUT_WINDOW_HOURS}h (${Number(c.cashedOut).toFixed(2)} NF au total)`
+        detail: `${c.occurrences} fois où un achat EUR→NF a été retransféré à ≥${Math.round(PURCHASE_CASHOUT_RATIO * 100)}% vers un autre compte en moins de ${PURCHASE_CASHOUT_WINDOW_HOURS}h (${Number(c.cashedOut).toFixed(2)} NF au total)`,
+        amount: null // le montant a déjà quitté ce compte (transféré ailleurs) : rien à retirer ICI
       });
     }
 
@@ -212,50 +283,67 @@ class FraudScanService {
   }
 
   /**
-   * Trace la circulation des NF issus d'un compte suspect : marche avant dans
-   * le graphe des transferts P2P, saut par saut, jusqu'à `maxHops`. Ce n'est
-   * PAS un traçage comptable exact (le NF est fongible — on ne peut pas
-   * prouver que "ce NF précis" est le même qui a circulé, une fois mélangé
-   * dans un portefeuille avec d'autres fonds) : c'est une carte de "qui a
-   * reçu de l'argent de ce compte, et ensuite de qui" pour guider l'admin,
-   * pas une preuve comptable au NF près.
+   * Trace la circulation des fonds issus d'un compte suspect : marche avant
+   * dans le graphe des transferts P2P, saut par saut, jusqu'à `maxHops`. Ce
+   * n'est PAS un traçage comptable exact (une monnaie virtuelle est fongible
+   * — on ne peut pas prouver que "cette unité précise" est celle qui a
+   * circulé, une fois mélangée dans un portefeuille avec d'autres fonds) :
+   * c'est une carte de "qui a reçu de l'argent de ce compte, et ensuite de
+   * qui" pour guider l'admin, pas une preuve comptable au NF près.
+   *
+   * Parcourt TOUTES les monnaies actives (pas seulement le NF) : un compte
+   * peut tout aussi bien blanchir via une monnaie communautaire, et les
+   * amounts de deux monnaies différentes n'étant pas comparables, chaque
+   * arête et chaque compte exposé garde son `currencyId`/`currencySymbol`
+   * plutôt que d'être sommés ensemble.
    */
   static async traceFlow({ userId, lookbackDays = 30, maxHops = 4 } = {}) {
-    const currency = await getPlatformCurrency();
-    if (!currency || !userId) {
+    if (!userId) {
+      return { userId, edges: [], exposedAccounts: [] };
+    }
+    const currencies = await VirtualCurrency.findAll({ where: { isActive: true } });
+    if (!currencies.length) {
       return { userId, edges: [], exposedAccounts: [] };
     }
     const since = new Date(Date.now() - lookbackDays * 86400000);
     const hops = Math.max(1, Math.min(6, parseInt(maxHops, 10) || 4));
 
-    const edges = await sequelize.query(
-      `WITH RECURSIVE flow AS (
-         SELECT t.id AS "txId", t.from_user_id AS "fromUserId", t.to_user_id AS "toUserId",
-                t.amount, t.created_at AS "createdAt", 1 AS hop
-         FROM transactions t
-         WHERE t.currency_id = :currencyId AND t.type = 'TRANSFER' AND (t.metadata->>'ledger') = 'P2P'
-           AND t.from_user_id = :userId AND t.created_at >= :since
-         UNION ALL
-         SELECT t.id, t.from_user_id, t.to_user_id, t.amount, t.created_at, flow.hop + 1
-         FROM transactions t
-         JOIN flow ON t.from_user_id = flow."toUserId" AND t.created_at > flow."createdAt"
-         WHERE t.currency_id = :currencyId AND t.type = 'TRANSFER' AND (t.metadata->>'ledger') = 'P2P'
-           AND flow.hop < :hops AND t.created_at >= :since
-       )
-       SELECT DISTINCT "txId", "fromUserId", "toUserId", amount, "createdAt", hop
-       FROM flow
-       ORDER BY hop ASC, "createdAt" ASC
-       LIMIT 500`,
-      { replacements: { currencyId: currency.id, userId, since, hops }, type: QueryTypes.SELECT }
-    );
+    const perCurrencyEdges = await Promise.all(currencies.map(async (currency) => {
+      const rows = await sequelize.query(
+        `WITH RECURSIVE flow AS (
+           SELECT t.id AS "txId", t.from_user_id AS "fromUserId", t.to_user_id AS "toUserId",
+                  t.amount, t.created_at AS "createdAt", 1 AS hop
+           FROM transactions t
+           WHERE t.currency_id = :currencyId AND t.type = 'TRANSFER' AND (t.metadata->>'ledger') = 'P2P'
+             AND t.from_user_id = :userId AND t.created_at >= :since
+           UNION ALL
+           SELECT t.id, t.from_user_id, t.to_user_id, t.amount, t.created_at, flow.hop + 1
+           FROM transactions t
+           JOIN flow ON t.from_user_id = flow."toUserId" AND t.created_at > flow."createdAt"
+           WHERE t.currency_id = :currencyId AND t.type = 'TRANSFER' AND (t.metadata->>'ledger') = 'P2P'
+             AND flow.hop < :hops AND t.created_at >= :since
+         )
+         SELECT DISTINCT "txId", "fromUserId", "toUserId", amount, "createdAt", hop
+         FROM flow
+         ORDER BY hop ASC, "createdAt" ASC
+         LIMIT 500`,
+        { replacements: { currencyId: currency.id, userId, since, hops }, type: QueryTypes.SELECT }
+      );
+      return rows.map(r => ({ ...r, currencyId: currency.id, currencySymbol: currency.symbol }));
+    }));
+    const edges = perCurrencyEdges.flat();
 
-    const exposureByUser = new Map();
+    // Exposition regroupée par (compte, monnaie) : recevoir 100 NF et 100
+    // d'une monnaie communautaire de deux compte différents ne doit jamais
+    // se sommer en "200" d'une unité qui n'existe pas.
+    const exposureByUserCurrency = new Map();
     for (const e of edges) {
       if (e.toUserId === userId) continue;
-      const prev = exposureByUser.get(e.toUserId) || { received: 0, hops: new Set() };
+      const key = `${e.toUserId}:${e.currencyId}`;
+      const prev = exposureByUserCurrency.get(key) || { userId: e.toUserId, currencyId: e.currencyId, currencySymbol: e.currencySymbol, received: 0, hops: new Set() };
       prev.received += Number(e.amount);
       prev.hops.add(e.hop);
-      exposureByUser.set(e.toUserId, prev);
+      exposureByUserCurrency.set(key, prev);
     }
 
     const involvedIds = [...new Set([userId, ...edges.map(e => e.toUserId), ...edges.map(e => e.fromUserId)])];
@@ -264,11 +352,13 @@ class FraudScanService {
       : [];
     const userMap = new Map(users.map(u => [u.id, u]));
 
-    const exposedAccounts = [...exposureByUser.entries()]
-      .map(([id, v]) => ({
-        userId: id,
-        username: userMap.get(id)?.username || null,
-        avatar: userMap.get(id)?.avatar || null,
+    const exposedAccounts = [...exposureByUserCurrency.values()]
+      .map((v) => ({
+        userId: v.userId,
+        username: userMap.get(v.userId)?.username || null,
+        avatar: userMap.get(v.userId)?.avatar || null,
+        currencyId: v.currencyId,
+        currencySymbol: v.currencySymbol,
         receivedTotal: Math.round(v.received * 100) / 100,
         minHop: Math.min(...v.hops)
       }))
@@ -282,7 +372,8 @@ class FraudScanService {
         transactionId: e.txId, fromUserId: e.fromUserId, toUserId: e.toUserId,
         fromUsername: userMap.get(e.fromUserId)?.username || null,
         toUsername: userMap.get(e.toUserId)?.username || null,
-        amount: Number(e.amount), createdAt: e.createdAt, hop: e.hop
+        amount: Number(e.amount), createdAt: e.createdAt, hop: e.hop,
+        currencyId: e.currencyId, currencySymbol: e.currencySymbol
       })),
       exposedAccounts
     };
@@ -336,7 +427,8 @@ class FraudScanService {
       for (const s of structuring) {
         out.push({
           userId: s.userId, category: 'transfer', reason: 'transferts_fractionnes_sous_le_seuil', score: 5,
-          detail: `${s.cnt} transferts le même jour totalisant ${Number(s.total).toFixed(2)} NF, aucun ne dépassant individuellement ${(STRUCTURING_SINGLE_CAP_RATIO * 100).toFixed(0)}% du seuil — fractionnement probable`
+          detail: `${s.cnt} transferts le même jour totalisant ${Number(s.total).toFixed(2)} NF, aucun ne dépassant individuellement ${(STRUCTURING_SINGLE_CAP_RATIO * 100).toFixed(0)}% du seuil — fractionnement probable`,
+          amount: null // montant déjà sorti du compte (envoyé), rien à retirer ICI
         });
       }
     }
@@ -364,9 +456,13 @@ class FraudScanService {
       { replacements: { currencyId, since, systemIds, minSenders: MULE_MIN_SENDERS, passRatio: MULE_PASSTHROUGH_RATIO }, type: QueryTypes.SELECT }
     );
     for (const m of mules) {
+      const passedThrough = Number(m.received) - Number(m.sent);
       out.push({
         userId: m.userId, category: 'transfer', reason: 'compte_relais_entonnoir', score: 5,
-        detail: `reçu de ${m.senders} comptes distincts (${Number(m.received).toFixed(2)} NF) puis reversé ${Number(m.sent).toFixed(2)} NF — profil de compte relais/entonnoir`
+        detail: `reçu de ${m.senders} comptes distincts (${Number(m.received).toFixed(2)} NF) puis reversé ${Number(m.sent).toFixed(2)} NF — profil de compte relais/entonnoir`,
+        // Ce qui n'a pas encore été reversé est ce qui peut encore être retiré ;
+        // le reste a déjà quitté le compte (plafonné à 0 si tout a été reversé).
+        amount: Math.max(0, passedThrough)
       });
     }
 
@@ -399,7 +495,8 @@ class FraudScanService {
     for (const d of dormant) {
       out.push({
         userId: d.userId, category: 'transfer', reason: 'reactivation_apres_dormance', score: 4,
-        detail: `réactivé après ${Math.round(Number(d.dormantDays))} jours d'inactivité pour envoyer ${Number(d.total).toFixed(2)} NF sur ${d.cnt} transfert(s)`
+        detail: `réactivé après ${Math.round(Number(d.dormantDays))} jours d'inactivité pour envoyer ${Number(d.total).toFixed(2)} NF sur ${d.cnt} transfert(s)`,
+        amount: null // montant envoyé, déjà sorti du compte
       });
     }
 
@@ -426,7 +523,7 @@ class FraudScanService {
     for (const row of synced) {
       const ids = Array.isArray(row.userIds) ? row.userIds : [];
       const detail = `${ids.length} comptes créés récemment ont transféré à la même minute (${new Date(row.minute).toISOString()}) — coordination probable`;
-      for (const uid of ids) out.push({ userId: uid, category: 'transfer', reason: 'activite_synchronisee_multi_comptes', score: 4, detail });
+      for (const uid of ids) out.push({ userId: uid, category: 'transfer', reason: 'activite_synchronisee_multi_comptes', score: 4, detail, amount: null });
     }
 
     // Montants systématiquement ronds : la structuration/le blanchiment
@@ -447,7 +544,8 @@ class FraudScanService {
     for (const r of roundNumbers) {
       out.push({
         userId: r.userId, category: 'transfer', reason: 'montants_ronds_systematiques', score: 2,
-        detail: `${(Number(r.roundRatio) * 100).toFixed(0)}% de ses ${r.cnt} transferts sont des montants ronds (multiples de 100 NF)`
+        detail: `${(Number(r.roundRatio) * 100).toFixed(0)}% de ses ${r.cnt} transferts sont des montants ronds (multiples de 100 NF)`,
+        amount: null // montant envoyé, déjà sorti du compte
       });
     }
 
@@ -475,7 +573,8 @@ class FraudScanService {
     for (const mc of mineCashout) {
       out.push({
         userId: mc.userId, category: 'mining', reason: 'minage_puis_transfert_immediat', score: 3,
-        detail: `${mc.occurrences} fois où un gain de minage a été retransféré à un autre compte en moins de ${MINE_CASHOUT_WINDOW_HOURS}h — dissociation rapide de l'origine des fonds`
+        detail: `${mc.occurrences} fois où un gain de minage a été retransféré à un autre compte en moins de ${MINE_CASHOUT_WINDOW_HOURS}h — dissociation rapide de l'origine des fonds`,
+        amount: null // montant déjà retransféré ailleurs
       });
     }
 
@@ -510,7 +609,7 @@ class FraudScanService {
 
     if (populationP99 > 0) {
       const large = await sequelize.query(
-        `SELECT id, from_user_id AS "fromUserId", amount
+        `SELECT id, from_user_id AS "fromUserId", to_user_id AS "toUserId", amount
          FROM transactions
          WHERE currency_id = :currencyId AND type = 'TRANSFER' AND created_at >= :since
            AND (metadata->>'ledger') = 'P2P' AND amount >= :p99 AND ${sysExcl()}
@@ -521,7 +620,19 @@ class FraudScanService {
         const ratio = Number(t.amount) / populationP99;
         out.push({
           userId: t.fromUserId, category: 'transfer', reason: 'transfert_hors_norme_population', score: Math.min(5, 2 + Math.floor(ratio)),
-          detail: `${Number(t.amount).toFixed(2)} NF — ${ratio.toFixed(1)}x le 99e centile de tous les transferts de la période (tx ${t.id})`
+          detail: `${Number(t.amount).toFixed(2)} NF envoyés — ${ratio.toFixed(1)}x le 99e centile de tous les transferts de la période (tx ${t.id})`,
+          amount: null // montant envoyé, déjà sorti du compte de l'expéditeur
+        });
+        // L'argent envoyé est probablement encore chez le DESTINATAIRE (sauf
+        // s'il l'a déjà dépensé/retransféré) — c'est là qu'il y a réellement
+        // quelque chose à retirer, pas chez l'expéditeur dont le compte est
+        // déjà vide de cette somme. Score plus bas : recevoir un gros virement
+        // est moins suspect en soi qu'en envoyer un (le destinataire peut être
+        // totalement innocent), mais le montant reste identifié pour l'admin.
+        out.push({
+          userId: t.toUserId, category: 'transfer', reason: 'reception_transfert_hors_norme', score: 2,
+          detail: `A reçu ${Number(t.amount).toFixed(2)} NF — ${ratio.toFixed(1)}x le 99e centile de tous les transferts de la période (tx ${t.id})`,
+          amount: Number(t.amount)
         });
       }
     }
@@ -537,7 +648,7 @@ class FraudScanService {
          WHERE currency_id = :currencyId AND type = 'TRANSFER' AND created_at >= :since AND (metadata->>'ledger') = 'P2P' AND ${sysExcl()}
          GROUP BY from_user_id HAVING COUNT(*) >= :minSample
        )
-       SELECT t.id, t.from_user_id AS "fromUserId", t.amount, u.mean, u.sd
+       SELECT t.id, t.from_user_id AS "fromUserId", t.to_user_id AS "toUserId", t.amount, u.mean, u.sd
        FROM transactions t
        JOIN per_user u ON u."userId" = t.from_user_id
        WHERE t.currency_id = :currencyId AND t.type = 'TRANSFER' AND t.created_at >= :since AND (t.metadata->>'ledger') = 'P2P'
@@ -550,7 +661,15 @@ class FraudScanService {
       const devs = sd > 0 ? (Number(o.amount) - Number(o.mean)) / sd : 0;
       out.push({
         userId: o.fromUserId, category: 'transfer', reason: 'ecart_a_son_propre_historique', score: Math.min(6, 3 + Math.floor(devs - PERSONAL_BASELINE_DEVIATION)),
-        detail: `${Number(o.amount).toFixed(2)} NF vs sa moyenne habituelle de ${Number(o.mean).toFixed(2)} NF (≈${devs.toFixed(1)} écarts-types au-dessus)`
+        detail: `${Number(o.amount).toFixed(2)} NF vs sa moyenne habituelle de ${Number(o.mean).toFixed(2)} NF (≈${devs.toFixed(1)} écarts-types au-dessus)`,
+        amount: null // montant envoyé, déjà sorti du compte de l'expéditeur
+      });
+      // Même logique que pour le signal de population : l'argent est
+      // probablement encore chez le destinataire.
+      out.push({
+        userId: o.toUserId, category: 'transfer', reason: 'reception_ecart_historique_expediteur', score: 2,
+        detail: `A reçu ${Number(o.amount).toFixed(2)} NF d'un compte dont c'est ${devs.toFixed(1)} écarts-types au-dessus de sa moyenne habituelle`,
+        amount: Number(o.amount)
       });
     }
 
@@ -575,8 +694,10 @@ class FraudScanService {
     );
     for (const w of washTrades) {
       const detail = `${w.pairs} aller-retour(s) avec un même compte en moins de ${WASH_TRADE_WINDOW_HOURS}h (${Number(w.volumeOut).toFixed(2)} NF)`;
-      out.push({ userId: w.userA, category: 'transfer', reason: 'aller_retour_rapide', score: 3, detail });
-      out.push({ userId: w.userB, category: 'transfer', reason: 'aller_retour_rapide', score: 3, detail });
+      // Aller-retour : chaque compte a autant envoyé que reçu, effet net quasi
+      // nul sur le solde de chacun — rien de spécifique à retirer ici.
+      out.push({ userId: w.userA, category: 'transfer', reason: 'aller_retour_rapide', score: 3, detail, amount: null });
+      out.push({ userId: w.userB, category: 'transfer', reason: 'aller_retour_rapide', score: 3, detail, amount: null });
     }
 
     // Cycle de blanchiment à 3 comptes (A→B→C→A) : plus dur à repérer qu'un
@@ -584,7 +705,7 @@ class FraudScanService {
     // l'expéditeur, il transite par un intermédiaire — signal indépendant du
     // aller-retour ci-dessus, qui ne voit que les paires directes.
     const cycles = await sequelize.query(
-      `SELECT DISTINCT a.from_user_id AS "userA", a.to_user_id AS "userB", b.to_user_id AS "userC"
+      `SELECT DISTINCT a.from_user_id AS "userA", a.to_user_id AS "userB", b.to_user_id AS "userC", c.amount AS "returnAmount"
        FROM transactions a
        JOIN transactions b
          ON b.from_user_id = a.to_user_id AND b.to_user_id != a.from_user_id
@@ -602,9 +723,16 @@ class FraudScanService {
     );
     for (const c of cycles) {
       const detail = `Cycle de transferts ${c.userA} → ${c.userB} → ${c.userC} → retour en moins de ${LAUNDER_CYCLE_WINDOW_HOURS}h — argent qui revient par un intermédiaire`;
-      out.push({ userId: c.userA, category: 'transfer', reason: 'cycle_de_transferts', score: 4, detail });
-      out.push({ userId: c.userB, category: 'transfer', reason: 'cycle_de_transferts', score: 4, detail });
-      out.push({ userId: c.userC, category: 'transfer', reason: 'cycle_de_transferts', score: 4, detail });
+      out.push({ userId: c.userB, category: 'transfer', reason: 'cycle_de_transferts', score: 4, detail, amount: null });
+      out.push({ userId: c.userC, category: 'transfer', reason: 'cycle_de_transferts', score: 4, detail, amount: null });
+      // userA reçoit le DERNIER segment du cycle (C→A) : cet argent vient tout
+      // juste de revenir dans son portefeuille, contrairement aux deux autres
+      // comptes qui n'ont fait que faire transiter les fonds.
+      out.push({
+        userId: c.userA, category: 'transfer', reason: 'cycle_de_transferts', score: 4,
+        detail: `${detail} — ${Number(c.returnAmount).toFixed(2)} NF reçus au retour du cycle`,
+        amount: Number(c.returnAmount)
+      });
     }
 
     // Concentration : un compte dont l'essentiel du volume sortant va vers UN seul destinataire.
@@ -628,7 +756,8 @@ class FraudScanService {
     for (const c of concentration) {
       out.push({
         userId: c.userId, category: 'transfer', reason: 'flux_concentre_sur_un_compte', score: 3,
-        detail: `${(100 * c.volume / c.total).toFixed(0)}% du volume sortant (${c.totalCount} transferts) va vers un seul compte`
+        detail: `${(100 * c.volume / c.total).toFixed(0)}% du volume sortant (${c.totalCount} transferts) va vers un seul compte`,
+        amount: null // montant envoyé, déjà sorti du compte
       });
     }
 
@@ -672,7 +801,7 @@ class FraudScanService {
       { replacements: { currencyId, since, cap: MINING_DAILY_WIN_LIMIT, minDays: MINING_CAP_STREAK_DAYS }, type: QueryTypes.SELECT }
     );
     for (const c of cappedStreak) {
-      out.push({ userId: c.userId, category: 'mining', reason: 'minage_au_plafond_repete', score: 3, detail: `${MINING_DAILY_WIN_LIMIT} rounds gagnés (le plafond quotidien) sur ${c.daysAtCap} jours différents` });
+      out.push({ userId: c.userId, category: 'mining', reason: 'minage_au_plafond_repete', score: 3, detail: `${MINING_DAILY_WIN_LIMIT} rounds gagnés (le plafond quotidien) sur ${c.daysAtCap} jours différents`, amount: null });
     }
 
     // Écart médian entre victoires consécutives trop court pour un client humain.
@@ -694,42 +823,59 @@ class FraudScanService {
       { replacements: { currencyId, since, minSamples: MINING_MIN_GAP_SAMPLES, minGap: MINING_MIN_GAP_SECONDS }, type: QueryTypes.SELECT }
     );
     for (const g of fastGaps) {
-      out.push({ userId: g.userId, category: 'mining', reason: 'minage_cadence_suspecte', score: 5, detail: `écart médian de ${Number(g.median_gap).toFixed(1)}s entre victoires sur ${g.samples} rounds — rythme peu plausible pour un client manuel` });
+      out.push({ userId: g.userId, category: 'mining', reason: 'minage_cadence_suspecte', score: 5, detail: `écart médian de ${Number(g.median_gap).toFixed(1)}s entre victoires sur ${g.samples} rounds — rythme peu plausible pour un client manuel`, amount: null });
     }
 
     return out;
   }
 
-  /** Casino : taux de gain trop élevé par rapport à la chance annoncée, profit cumulé anormal, rafales de paris. */
-  static async _scanCasino(since) {
+  /**
+   * Casino : taux de gain trop élevé par rapport à la chance annoncée, profit
+   * cumulé anormal, rafales de paris. `casino_bets` porte un `currency_id`
+   * (le casino existe sur n'importe quelle monnaie active, pas seulement le
+   * NF) : le taux de gain (ratio, indépendant de l'unité) peut se calculer
+   * toutes monnaies confondues par utilisateur, mais le PROFIT (`netProfit`)
+   * est une somme en unités monétaires — mélanger plusieurs monnaies dans un
+   * seul total n'aurait aucun sens (10 NF + 10 d'une monnaie communautaire à
+   * 0,08 € ne fait pas "20" de quoi que ce soit), donc ce signal est groupé
+   * par (utilisateur, monnaie).
+   */
+  static async _scanCasino(since, currencies = []) {
     const out = [];
+    const currencyMap = new Map(currencies.map(c => [c.id, c]));
 
-    // Taux de gain réel très au-dessus de la chance moyenne enregistrée par pari
-    // (approximation z-score binomial : (observé - attendu) / écart-type attendu).
     const winRate = await sequelize.query(
-      `SELECT user_id AS "userId", COUNT(*) AS bets, AVG(win_chance) / 100.0 AS "avgChance",
+      `SELECT user_id AS "userId", currency_id AS "currencyId", COUNT(*) AS bets, AVG(win_chance) / 100.0 AS "avgChance",
               SUM(CASE WHEN won THEN 1 ELSE 0 END)::float / COUNT(*) AS "actualRate",
               SUM(payout - bet_amount) AS "netProfit"
        FROM casino_bets
        WHERE created_at >= :since
-       GROUP BY user_id
+       GROUP BY user_id, currency_id
        HAVING COUNT(*) >= :minSample
        LIMIT 500`,
       { replacements: { since, minSample: CASINO_MIN_SAMPLE }, type: QueryTypes.SELECT }
     );
     for (const w of winRate) {
       const n = Number(w.bets);
+      const symbol = currencyMap.get(w.currencyId)?.symbol || '?';
       const p = Math.max(0.001, Math.min(0.999, Number(w.avgChance)));
       const stddev = Math.sqrt(n * p * (1 - p)) / n;
       const z = stddev > 0 ? (Number(w.actualRate) - p) / stddev : 0;
       if (z >= 3) {
         out.push({
           userId: w.userId, category: 'casino', reason: 'taux_de_gain_casino_anormal', score: Math.min(6, 3 + Math.floor(z - 3)),
-          detail: `taux de gain ${(w.actualRate * 100).toFixed(1)}% observé sur ${n} paris vs ${(p * 100).toFixed(1)}% attendu (z≈${z.toFixed(1)})`
+          detail: `taux de gain ${(w.actualRate * 100).toFixed(1)}% observé sur ${n} paris (${symbol}) vs ${(p * 100).toFixed(1)}% attendu (z≈${z.toFixed(1)})`,
+          amount: null, // le solde gagné reste dans le portefeuille : voir profit_casino_cumule_positif ci-dessous pour le montant
+          currencyId: w.currencyId, currencySymbol: symbol
         });
       }
       if (Number(w.netProfit) > 0 && n >= CASINO_MIN_SAMPLE * 2) {
-        out.push({ userId: w.userId, category: 'casino', reason: 'profit_casino_cumule_positif', score: 2, detail: `profit net cumulé de +${Number(w.netProfit).toFixed(2)} NF sur ${n} paris malgré l'avantage maison` });
+        out.push({
+          userId: w.userId, category: 'casino', reason: 'profit_casino_cumule_positif', score: 2,
+          detail: `profit net cumulé de +${Number(w.netProfit).toFixed(2)} ${symbol} sur ${n} paris malgré l'avantage maison`,
+          amount: Number(w.netProfit), // gains excédentaires encore dans le portefeuille (plafonné au solde réel par le scan)
+          currencyId: w.currencyId, currencySymbol: symbol
+        });
       }
     }
 
@@ -749,7 +895,7 @@ class FraudScanService {
       { replacements: { since, minBets: Math.floor(CASINO_BURST_MIN_BETS * 60 / CASINO_BURST_WINDOW_SECONDS) }, type: QueryTypes.SELECT }
     );
     for (const b of bursts) {
-      out.push({ userId: b.userId, category: 'casino', reason: 'rafale_de_paris', score: 2, detail: `jusqu'à ${b.maxBetsPerMinute} paris en une minute — cadence bot probable` });
+      out.push({ userId: b.userId, category: 'casino', reason: 'rafale_de_paris', score: 2, detail: `jusqu'à ${b.maxBetsPerMinute} paris en une minute — cadence bot probable`, amount: null });
     }
 
     return out;

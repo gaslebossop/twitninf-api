@@ -1,8 +1,62 @@
 const { Op } = require('sequelize');
 const { VirtualCurrency, UserWallet, Transaction } = require('../models');
 const { REFERENCE_PRICE_EUR, TREASURY_USER_ID } = require('./constants');
-const { roundTWC, toAmount } = require('./money');
+const { roundTWC, roundPrice, toAmount } = require('./money');
 const logger = require('../utils/logger');
+
+const ONE_HOUR_MS = 3_600_000;
+const ONE_DAY_MS = 24 * ONE_HOUR_MS;
+const SEVEN_DAYS_MS = 7 * ONE_DAY_MS;
+const THIRTY_DAYS_MS = 30 * ONE_DAY_MS;
+// En-dessous de ce délai, un point sans changement de prix n'est pas
+// réenregistré — sinon `refresh()` (appelé à CHAQUE consultation des stats,
+// pas seulement à chaque échange réel) noyait l'historique de points quasi
+// identiques, qui évinçaient les vieux points utiles hors du tableau.
+const MIN_UNCHANGED_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * Réduit un historique de prix en gardant une résolution fine sur le passé
+ * récent et de plus en plus grossière en remontant dans le temps (tous les
+ * points sur les dernières 24h, 1 point/heure jusqu'à 7 jours, 1 point/jour
+ * jusqu'à 30 jours) — au lieu d'un `slice(-N)` aveugle qui, combiné à des
+ * appels très fréquents, ne conservait jamais plus d'une heure ou deux
+ * d'historique réel quel que soit le nombre de jours théoriquement couverts.
+ * Recalculé à chaque appel : un point glisse naturellement d'une résolution
+ * à l'autre à mesure qu'il vieillit.
+ */
+function decimatePriceHistory(history) {
+  const now = Date.now();
+  const cutoff = now - THIRTY_DAYS_MS;
+  const sorted = history
+    .filter((e) => {
+      const t = new Date(e.date).getTime();
+      return Number.isFinite(t) && t > cutoff;
+    })
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  const kept = [];
+  const bucketIndex = new Map();
+  for (const entry of sorted) {
+    const t = new Date(entry.date).getTime();
+    const age = now - t;
+    const bucketMs = age <= ONE_DAY_MS ? null : age <= SEVEN_DAYS_MS ? ONE_HOUR_MS : ONE_DAY_MS;
+
+    if (bucketMs == null) {
+      kept.push(entry);
+      continue;
+    }
+    const key = Math.floor(t / bucketMs);
+    const existing = bucketIndex.get(key);
+    if (existing == null) {
+      bucketIndex.set(key, kept.length);
+      kept.push(entry);
+    } else {
+      // Garde le DERNIER point du bucket (le plus représentatif de son état final).
+      kept[existing] = entry;
+    }
+  }
+  return kept;
+}
 
 /**
  * Statistiques et synchronisation de l'offre en circulation (somme des soldes).
@@ -76,22 +130,28 @@ class EconomyMetrics {
     // dès le premier transfert.
     const multiplier = toAmount(currency.currentMultiplier) || 1;
     const basePriceEur = toAmount(currency.basePrice) || REFERENCE_PRICE_EUR;
-    const currentPrice = roundTWC(basePriceEur * multiplier);
+    const currentPrice = roundPrice(basePriceEur * multiplier);
     const previousPrice = toAmount(currency.currentPrice) || basePriceEur;
     const priceChange24h = previousPrice > 0 ? roundTWC(((currentPrice - previousPrice) / previousPrice) * 100) : 0;
 
     const priceHistory = Array.isArray(currency.priceHistory) ? [...currency.priceHistory] : [];
-    priceHistory.push({
-      date: new Date().toISOString(),
-      price: currentPrice,
-      circulatingSupply: circulating,
-      treasuryReserve: treasury,
-      volumeEur24h: volumeEur
-    });
-    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const filteredHistory = priceHistory
-      .filter((e) => new Date(e.date) > cutoff)
-      .slice(-90);
+    const last = priceHistory[priceHistory.length - 1];
+    const now = new Date();
+    const unchanged = last && Number(last.price) === currentPrice;
+    const tooSoon = last && now.getTime() - new Date(last.date).getTime() < MIN_UNCHANGED_INTERVAL_MS;
+    // Un point sans changement de prix est ignoré s'il est trop rapproché du
+    // précédent — mais un VRAI changement de prix est toujours enregistré,
+    // même quelques secondes après le point précédent.
+    if (!(unchanged && tooSoon)) {
+      priceHistory.push({
+        date: now.toISOString(),
+        price: currentPrice,
+        circulatingSupply: circulating,
+        treasuryReserve: treasury,
+        volumeEur24h: volumeEur
+      });
+    }
+    const filteredHistory = decimatePriceHistory(priceHistory);
 
     await currency.update(
       {
@@ -123,8 +183,22 @@ class EconomyMetrics {
     };
   }
 
-  static buildPublicStats(currency, metricsExtras = {}) {
+  /**
+   * `range` sélectionne la fenêtre de `priceHistory` à renvoyer — auparavant
+   * toujours les 30 DERNIÈRES ENTRÉES du tableau, quel que soit leur âge réel.
+   * Comme une entrée est ajoutée à chaque `refresh()` (chaque échange/achat,
+   * mais aussi chaque simple consultation des stats via le polling 30s de la
+   * page Trading), ces 30 entrées ne couvraient en pratique qu'une quinzaine
+   * à une trentaine de minutes — jamais plus, même si l'historique réel (90
+   * entrées sur 30 jours, voir `refresh()`) en contenait beaucoup plus. On
+   * filtre maintenant par ÂGE RÉEL des entrées plutôt que par leur position.
+   */
+  static buildPublicStats(currency, metricsExtras = {}, { rangeHours = null } = {}) {
     const basePriceEur = toAmount(currency.basePrice) || REFERENCE_PRICE_EUR;
+    const allHistory = Array.isArray(currency.priceHistory) ? currency.priceHistory : [];
+    const priceHistory = rangeHours
+      ? allHistory.filter((e) => new Date(e.date).getTime() > Date.now() - rangeHours * 3600_000)
+      : allHistory.slice(-30);
     return {
       currency: {
         symbol: currency.symbol,
@@ -142,7 +216,7 @@ class EconomyMetrics {
         treasuryReserve: metricsExtras.treasuryReserve ?? null,
         userHeldSupply: metricsExtras.userHeldSupply ?? null
       },
-      priceHistory: (currency.priceHistory || []).slice(-30)
+      priceHistory
     };
   }
 }

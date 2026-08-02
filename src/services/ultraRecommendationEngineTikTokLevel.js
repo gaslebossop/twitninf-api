@@ -1520,6 +1520,9 @@ class UltraRecommendationEngineTikTokLevel {
         is_private: plainTweet.is_private,
         view_count: plainTweet.view_count,
         click_count: plainTweet.click_count,
+        // Sans ce champ, le sélecteur de langue n'apparaîtrait jamais dans le
+        // fil : ce mapper recopie les colonnes une à une.
+        translation_enabled: plainTweet.translation_enabled,
         metadata: plainTweet.metadata,
         moderation_status: plainTweet.moderation_status,
         moderation_reason: plainTweet.moderation_reason,

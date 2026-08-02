@@ -817,7 +817,7 @@ function printReport() {
   }
 
   console.log(`\n${C.bold}📋 RECOMMANDATIONS SPÉCIFIQUES À TON API:${C.reset}`);
-  console.log(`  • env.example contient le JWT_SECRET "${C.yellow}twitninf-super-secret-key-2024${C.reset}" — utilise une clé aléatoire forte en prod`);
+  console.log(`  • [corrigé 2026-08-01] JWT_SECRET était codé en dur et faible — remplacé par une valeur aléatoire forte, plus de fallback en dur dans config.js`);
   console.log(`  • Le JWT_SECRET est le même pour access ET refresh tokens — utilise 2 secrets différents`);
   console.log(`  • Les endpoints /api/policiercongo/* n'ont pas de middleware d'auth apparent — vérifier`);
   console.log(`  • Le header X-Powered-By: Express expose la technologie — désactiver avec app.disable('x-powered-by')`);

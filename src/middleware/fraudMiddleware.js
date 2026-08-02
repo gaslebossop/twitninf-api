@@ -2,11 +2,17 @@ const fraudService = require('../services/fraudDetectionService');
 const authService = require('../services/authService');
 const logger = require('../utils/logger');
 
-// L'exemption desktop reste volontairement étroite. Les en-têtes seuls sont
-// falsifiables : ils doivent être accompagnés d'un JWT signé, non expiré et
-// contenant un identifiant utilisateur. Les routes d'authentification et de
-// paiement conservent systématiquement les contrôles FraudShield spécialisés.
-const WINDOWS_FRAUD_BYPASS_EXCLUDED_PATHS = [
+// L'exemption des clients first-party (desktop Windows, app mobile) reste
+// volontairement étroite. Les en-têtes seuls sont falsifiables : ils doivent
+// être accompagnés d'un JWT signé, non expiré et contenant un identifiant
+// utilisateur. Les routes d'authentification et de paiement conservent
+// systématiquement les contrôles FraudShield spécialisés.
+//
+// ⚠️ L'exemption ne porte JAMAIS sur la détection d'injection (`quickScan`) :
+// elle ne fait sauter que le scoring comportemental (rate limit, réputation
+// IP, vélocité) qui est calibré pour du trafic web et bannit à tort les
+// clients natifs, qui pollent et préchargent par conception.
+const FRAUD_BYPASS_EXCLUDED_PATHS = [
   '/api/auth/login',
   '/api/payments',
   '/api/new-economy/purchase',
@@ -23,6 +29,10 @@ const APP_NAVIGATION_NOISE_PATHS = [
   '/neural-rank/recommendations',
   '/users/search',
   '/tweets/views/increment',
+  // Polling périodique des clients natifs : appelé en boucle par conception
+  // (badges de la tab bar), il n'a aucune valeur de signal anti-fraude.
+  '/notifications/unread-count',
+  '/messages/conversations',
 ];
 
 function getRequestPath(req) {
@@ -54,9 +64,9 @@ function isAppNavigationNoise(req) {
   )) || /^\/users\/[0-9a-f-]{36}$/.test(path);
 }
 
-function isWindowsFraudBypassExcluded(req) {
+function isFraudBypassExcluded(req) {
   const path = getRequestPath(req);
-  return WINDOWS_FRAUD_BYPASS_EXCLUDED_PATHS.some((excluded) => (
+  return FRAUD_BYPASS_EXCLUDED_PATHS.some((excluded) => (
     path === excluded || path.startsWith(`${excluded}/`)
   ));
 }
@@ -89,12 +99,31 @@ function hasWindowsElectronTransport(req) {
   return true;
 }
 
-function isTrustedWindowsElectronRequest(req) {
-  if (isWindowsFraudBypassExcluded(req)) return false;
-  if (!hasWindowsElectronTransport(req)) return false;
+// Transport de l'app mobile Expo (iOS / Android). Même niveau d'exigence que
+// le desktop : un triplet d'en-têtes propriétaires cohérent, qui ne devient
+// digne de confiance qu'accompagné d'un JWT dont la signature est vérifiée.
+function hasMobileAppTransport(req) {
+  const platform = String(req.headers?.['user-platform'] || '').trim().toLowerCase();
+  const client = String(req.headers?.['x-twitninf-client'] || '').trim().toLowerCase();
+  const deviceId = String(req.headers?.['x-device-id'] || '').trim();
+
+  if (client !== 'mobile-expo') return false;
+  if (platform !== 'ios' && platform !== 'android') return false;
+  if (deviceId.length < 8) return false;
+
+  return true;
+}
+
+// Client officiel (desktop Windows ou app mobile) authentifié par un JWT valide.
+function isTrustedFirstPartyClient(req) {
+  if (isFraudBypassExcluded(req)) return false;
+  if (!hasWindowsElectronTransport(req) && !hasMobileAppTransport(req)) return false;
 
   return Boolean(getVerifiedBearerUserId(req));
 }
+
+// Conservé comme alias : d'anciens appelants/tests référencent encore ce nom.
+const isTrustedWindowsElectronRequest = isTrustedFirstPartyClient;
 
 // ─── Pré-filtre synchrone (Node.js, sans passer par Rust) ────────────────────
 // Détecte les patterns d'injection évidents AVANT d'envoyer la requête au contrôleur.
@@ -310,7 +339,7 @@ const checkLogin = (successField = null) => async (req, res, next) => {
 // ─── Middleware 3: Report login outcome (after auth succeeded or failed) ───────
 // Call after the controller responds to update Rust's behavioral baseline.
 const reportLoginOutcome = (success) => async (req, _res, next) => {
-  if (isTrustedWindowsElectronRequest(req)) return next();
+  if (isTrustedFirstPartyClient(req)) return next();
   if (!fraudService.isReady()) return next();
 
   const ip = getIp(req);
@@ -386,11 +415,13 @@ const checkTransaction = async (req, res, next) => {
 
 // ─── Middleware 5: Global request check (synchrone sur injections, async sinon) ─
 const checkApiRequest = async (req, res, next) => {
-  if (isTrustedWindowsElectronRequest(req)) return next();
-  if (isAppNavigationNoise(req)) return next();
   const ip = getIp(req);
 
   // ── 1. Pré-filtre synchrone ultra-rapide (regex Node.js, ~0.1ms) ────────────
+  // ⚠️ Ce scan s'exécute AVANT toute exemption : ni un client first-party de
+  // confiance ni le bruit de navigation ne peuvent y échapper. Un client
+  // officiel compromis ou un JWT volé reste une source d'injection crédible.
+  // Ne JAMAIS déplacer les early-return d'exemption au-dessus de ce bloc.
   const attackName = quickScan(req);
   if (attackName) {
     logger.warn(`[fraud] Quick-block [${attackName}] ip=${ip} path=${req.path}`);
@@ -417,9 +448,17 @@ const checkApiRequest = async (req, res, next) => {
     });
   }
 
+  // ── 2. Exemptions du scoring comportemental (jamais de l'injection) ─────────
+  // Les clients officiels authentifiés et le bruit de navigation ne sont pas
+  // envoyés au moteur Rust : leurs cadences (polling, préchargement, tracking
+  // de vues) dépassent des seuils calibrés pour du trafic web et provoquaient
+  // des bans d'IP sur du trafic parfaitement légitime.
+  if (isTrustedFirstPartyClient(req)) return next();
+  if (isAppNavigationNoise(req)) return next();
+
   if (!fraudService.isReady()) return next();
 
-  // ── 2. IP block check (Redis GET, ~1ms) ─────────────────────────────────────
+  // ── 3. IP block check (Redis GET, ~1ms) ─────────────────────────────────────
   try {
     const blocked = await fraudService.isIpBlocked(ip);
     if (blocked) {
@@ -431,7 +470,7 @@ const checkApiRequest = async (req, res, next) => {
     }
   } catch { /* fail open */ }
 
-  // ── 3. Large payload — vérification synchrone ────────────────────────────────
+  // ── 4. Large payload — vérification synchrone ────────────────────────────────
   const payloadSize = parseInt(req.headers['content-length'] || '0');
   if (payloadSize > 5_000_000) {
     logger.warn(`[fraud] Large payload blocked: ${payloadSize} bytes from ${ip}`);
@@ -442,7 +481,7 @@ const checkApiRequest = async (req, res, next) => {
     });
   }
 
-  // ── 4. Background analysis pour les autres cas (rate limit, patterns subtils) ─
+  // ── 5. Background analysis pour les autres cas (rate limit, patterns subtils) ─
   const userId   = getUserId(req);
   const endpoint = req.path || '/';
   const query    = new URLSearchParams(req.query || {}).toString();
@@ -474,7 +513,9 @@ module.exports = {
   // Exposés pour les tests unitaires / la réutilisation
   quickScan,
   getIp,
-  isTrustedWindowsElectronRequest,
+  isTrustedFirstPartyClient,
+  isTrustedWindowsElectronRequest, // alias rétrocompatible
   hasWindowsElectronTransport,
+  hasMobileAppTransport,
   isAppNavigationNoise,
 };

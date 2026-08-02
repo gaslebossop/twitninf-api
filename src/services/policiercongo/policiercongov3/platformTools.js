@@ -16,12 +16,17 @@ const NewEconomyService = require('../../newEconomyService');
 const CasinoService = require('../../casinoService');
 const contractService = require('../contractService');
 const { getPlatformCurrency } = require('../../../economy/platformCurrency');
+const { getOrCreateEurCurrency } = require('../../../economy/eurCurrency');
+const { convertUserCurrency, getCurrencyDetail, listUserCurrencies } = require('../../../economy/userCurrency');
 const { TIER, TIER_PRICES_TWC, DEFAULT_DURATION_DAYS } = require('../../../constants/subscriptionTiers');
 const { maybeExpireSubscription, isSubscriptionActive, computeNewExpiry } = require('../../../utils/subscriptionHelpers');
 
 const UUID = { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' };
 const CONTENT = { type: 'string', maxLength: 600 };
 const object = (properties, required = []) => ({ type: 'object', properties, required });
+
+/** Nombre max de destinataires par appel à pay_currency_holders — au-delà, on refuse plutôt que de payer partiellement en silence. */
+const MAX_AIRDROP_RECIPIENTS = 300;
 
 function publicUser(user) {
   if (!user) return null;
@@ -171,6 +176,32 @@ async function resolveUser(models, target) {
   if (!target) return null;
   const raw = String(target).replace(/^@/, '');
   return models.User.findOne({ where: { [Op.or]: [{ id: raw }, { username: raw }] } }).catch(() => models.User.findOne({ where: { username: raw } }));
+}
+
+const UUID_RE = /^[0-9a-fA-F-]{36}$/;
+
+/** Résout une monnaie COMMUNAUTAIRE (isUserCreated) par id, symbole ou nom — jamais NF ni EUR. */
+async function resolveCommunityCurrency(models, target) {
+  const raw = String(target ?? '').trim();
+  if (!raw) return null;
+  if (UUID_RE.test(raw)) {
+    const byId = await models.VirtualCurrency.findByPk(raw);
+    return byId && byId.isUserCreated ? byId : null;
+  }
+  return models.VirtualCurrency.findOne({
+    where: {
+      isUserCreated: true,
+      [Op.or]: [{ symbol: raw.toUpperCase() }, { name: { [Op.iLike]: raw } }]
+    }
+  });
+}
+
+/** Résout une monnaie de PAIEMENT : 'NF', 'EUR', ou le symbole/nom d'une monnaie communautaire. */
+async function resolvePayoutCurrency(models, label) {
+  const raw = String(label ?? '').trim().toUpperCase();
+  if (raw === 'NF') return getPlatformCurrency({ fresh: true });
+  if (raw === 'EUR') return getOrCreateEurCurrency();
+  return resolveCommunityCurrency(models, label);
 }
 
 function publicMessage(message) {
@@ -1251,6 +1282,173 @@ function registerPlatformTools(registry, { models, memory, config, providerRoute
         currency: currency.symbol,
         recipient: publicUser(recipient),
         reason
+      };
+    }
+  });
+
+  register({
+    name: 'exchange_nf_eur', risk: TOOL_RISK.SENSITIVE, idempotent: false,
+    description: 'Échange RÉEL entre le portefeuille NF et le portefeuille EUR interne de PolicierCongo, au cours réel courant du NF — contrairement à convert_nf_eur qui ne fait que calculer sans rien déplacer. direction=nf_to_eur débite `amount` NF pour créditer de l’EUR ; eur_to_nf fait l’inverse. Les deux portefeuilles appartiennent à PolicierCongo (aucun tiers impliqué, pas de second avis requis), mais l’opération est réelle, irréversible, et déplace légèrement le cours du NF (impact de marché). Vérifie ton solde avec get_financial_context avant si besoin.',
+    inputSchema: object({
+      amount: { type: 'number', minimum: 0.00000001 },
+      direction: { type: 'string', enum: ['nf_to_eur', 'eur_to_nf'] }
+    }, ['amount', 'direction']),
+    handler: async ({ amount, direction }) => {
+      const nfCurrency = await getPlatformCurrency({ fresh: true });
+      if (!nfCurrency || !(Number(nfCurrency.currentPrice) > 0)) throw new Error('Taux de change NF indisponible');
+      const eurCurrency = await getOrCreateEurCurrency();
+      const nfPriceEur = Number(nfCurrency.currentPrice);
+
+      const fromCurrencyId = direction === 'eur_to_nf' ? eurCurrency.id : nfCurrency.id;
+      const toCurrencyId = direction === 'eur_to_nf' ? nfCurrency.id : eurCurrency.id;
+      const rate = direction === 'eur_to_nf' ? (1 / nfPriceEur) : nfPriceEur;
+
+      const result = await NewEconomyService.exchangeCurrency(POLICE_ACCOUNT_ID, fromCurrencyId, toCurrencyId, amount, rate);
+
+      return {
+        direction,
+        debited: result.debited,
+        credited: result.credited,
+        fromBalance: result.fromBalance,
+        toBalance: result.toBalance,
+        nfPriceEur
+      };
+    }
+  });
+
+  register({
+    name: 'trade_community_currency', risk: TOOL_RISK.SENSITIVE, idempotent: false,
+    description: 'Achète ou vend une monnaie COMMUNAUTAIRE (émise par un utilisateur, ex. via create_user_currency côté mobile) contre NF ou EUR, depuis le portefeuille de PolicierCongo. direction=buy dépense `amount` en `counterpart` (NF ou EUR) pour investir dans `currency` — utile pour soutenir une monnaie qu’on juge sous-évaluée. direction=sell vend `amount` unités de `currency` détenues contre `counterpart`. Le taux part des prix réels en euros des deux monnaies (currentPrice) ; consulte get_community_currency avant un montant important, car chaque échange déplace légèrement le cours des deux monnaies (impact de marché). Aucun tiers impliqué (les deux portefeuilles sont les tiens), pas de second avis requis, mais l’opération est réelle et irréversible.',
+    inputSchema: object({
+      currency: { type: 'string', maxLength: 100 },
+      counterpart: { type: 'string', enum: ['NF', 'EUR'] },
+      direction: { type: 'string', enum: ['buy', 'sell'] },
+      amount: { type: 'number', minimum: 0.00000001 }
+    }, ['currency', 'counterpart', 'direction', 'amount']),
+    handler: async ({ currency, counterpart, direction, amount }) => {
+      const currencyRow = await resolveCommunityCurrency(models, currency);
+      if (!currencyRow) throw new Error(`Monnaie communautaire introuvable: ${currency}`);
+
+      const result = await convertUserCurrency(POLICE_ACCOUNT_ID, currencyRow.id, counterpart, amount, { reverse: direction === 'buy' });
+
+      return {
+        symbol: currencyRow.symbol,
+        direction,
+        counterpart,
+        rate: result.rate,
+        debited: result.debited,
+        credited: result.credited,
+        fromBalance: result.fromBalance,
+        toBalance: result.toBalance
+      };
+    }
+  });
+
+  register({
+    name: 'list_community_currencies', risk: TOOL_RISK.READ,
+    description: 'Liste les monnaies COMMUNAUTAIRES existantes (émises par des utilisateurs), triées par capitalisation décroissante — nom, symbole, créateur, prix en euros, capitalisation, offre totale, et ce que PolicierCongo en détient. Point de départ pour repérer une monnaie à soutenir, comparer plusieurs monnaies, ou avant get_community_currency si le symbole/nom exact n’est pas connu.',
+    inputSchema: object({
+      creator: { type: 'string', maxLength: 100 }
+    }),
+    handler: async ({ creator } = {}) => {
+      let creatorId = null;
+      if (creator) {
+        const creatorUser = await resolveUser(models, creator);
+        if (!creatorUser) throw new Error(`Créateur introuvable: ${creator}`);
+        creatorId = creatorUser.id;
+      }
+      const currencies = await listUserCurrencies({ creatorId });
+      return {
+        count: currencies.length,
+        currencies: currencies.map(c => ({
+          id: c.id,
+          name: c.name,
+          symbol: c.symbol,
+          creator: c.creator ? c.creator.username : null,
+          priceEur: Number(c.currentPrice),
+          marketCapEur: Number(c.marketCap),
+          totalSupply: Number(c.totalSupply),
+          isActive: c.isActive,
+          createdAt: c.createdAt
+        }))
+      };
+    }
+  });
+
+  register({
+    name: 'get_community_currency', risk: TOOL_RISK.READ,
+    description: 'Fiche complète d’une monnaie COMMUNAUTAIRE : cours actuel (en euros et en NF), variation depuis son émission, courbe de prix récente (jusqu’à 30 jours, un point par jour où un échange a eu lieu), capitalisation, offre émise à la création vs offre réellement en circulation (unités créées après coup par les achats), activité sur 30 jours (opérations, volume, comptes actifs), principaux détenteurs et leur part, et ce que PolicierCongo détient. `currency` accepte un UUID, un symbole (ex. "KOSP") ou un nom. Utilise list_community_currencies d’abord si le symbole exact est incertain. À consulter avant un trade_community_currency ou pay_currency_holders pour juger si une monnaie est sous/sur-évaluée ou en tendance.',
+    inputSchema: object({
+      currency: { type: 'string', maxLength: 100 }
+    }, ['currency']),
+    handler: async ({ currency }) => {
+      const currencyRow = await resolveCommunityCurrency(models, currency);
+      if (!currencyRow) throw new Error(`Monnaie communautaire introuvable: ${currency}`);
+      return getCurrencyDetail(POLICE_ACCOUNT_ID, currencyRow.id);
+    }
+  });
+
+  register({
+    name: 'pay_currency_holders', risk: TOOL_RISK.DESTRUCTIVE, idempotent: false,
+    description: `Verse un montant fixe à CHAQUE compte détenant un solde positif d’une monnaie communautaire donnée (photo instantanée des détenteurs au moment de l’appel) — pour récompenser une communauté entière plutôt qu’un individu (ex. tous les détenteurs de la monnaie d’un créateur). PolicierCongo est automatiquement exclu s’il figure lui-même parmi les détenteurs (transfert vers soi-même impossible). Le paiement peut se faire en NF, en EUR interne, ou dans une AUTRE monnaie communautaire (payout_currency). Plafonné à ${MAX_AIRDROP_RECIPIENTS} destinataires par appel — au-delà, l’appel échoue plutôt que de payer une partie silencieusement ; réduis amount_per_holder ou vise une monnaie moins répandue plutôt que de contourner la limite. Soumis au second avis croisé comme send_money : cite dans reason la décision ou l’accord qui justifie cette distribution — le vérificateur ne voit que ce texte, pas le fil de conversation.`,
+    inputSchema: object({
+      currency: { type: 'string', maxLength: 100 },
+      payout_currency: { type: 'string', maxLength: 100 },
+      amount_per_holder: { type: 'number', minimum: 0.00000001 },
+      reason: { type: 'string', minLength: 5, maxLength: 500 }
+    }, ['currency', 'payout_currency', 'amount_per_holder', 'reason']),
+    handler: async ({ currency, payout_currency, amount_per_holder, reason }) => {
+      const targetCurrency = await resolveCommunityCurrency(models, currency);
+      if (!targetCurrency) throw new Error(`Monnaie communautaire introuvable: ${currency}`);
+
+      const payoutCurrency = await resolvePayoutCurrency(models, payout_currency);
+      if (!payoutCurrency) throw new Error(`Monnaie de paiement introuvable: ${payout_currency}`);
+
+      const holderRows = await models.UserWallet.findAll({
+        where: { currencyId: targetCurrency.id, balance: { [Op.gt]: 0 } },
+        include: [{ model: models.User, as: 'user', attributes: ['id', 'username'] }]
+      });
+
+      const holders = holderRows
+        .filter(row => row.user && row.userId !== POLICE_ACCOUNT_ID)
+        .map(row => ({ id: row.userId, username: row.user.username }));
+
+      if (!holders.length) {
+        return { paid: 0, holders_targeted: 0, currency: targetCurrency.symbol, note: 'Aucun détenteur éligible (hors PolicierCongo lui-même le cas échéant).' };
+      }
+
+      if (holders.length > MAX_AIRDROP_RECIPIENTS) {
+        throw new Error(`${holders.length} détenteurs de ${targetCurrency.symbol} — au-delà de la limite de ${MAX_AIRDROP_RECIPIENTS} par appel. Réduis la portée plutôt que de la contourner.`);
+      }
+
+      const totalCost = amount_per_holder * holders.length;
+      const payerWallet = await models.UserWallet.findOne({ where: { userId: POLICE_ACCOUNT_ID, currencyId: payoutCurrency.id } });
+      const payerBalance = payerWallet ? Number(payerWallet.balance) : 0;
+      if (payerBalance < totalCost) {
+        throw new Error(`Solde insuffisant : ${totalCost} ${payoutCurrency.symbol} nécessaires pour ${holders.length} détenteurs, solde actuel ${payerBalance} ${payoutCurrency.symbol}.`);
+      }
+
+      const results = [];
+      for (const holder of holders) {
+        try {
+          const r = await NewEconomyService.transferCoins(
+            POLICE_ACCOUNT_ID, holder.id, payoutCurrency.id, amount_per_holder,
+            `Distribution aux détenteurs de ${targetCurrency.symbol} — ${reason}`
+          );
+          results.push({ username: holder.username, sent: true, net_received: r.netAmount });
+        } catch (error) {
+          results.push({ username: holder.username, sent: false, error: error.message });
+        }
+      }
+
+      return {
+        currency: targetCurrency.symbol,
+        payout_currency: payoutCurrency.symbol,
+        amount_per_holder,
+        holders_targeted: holders.length,
+        paid: results.filter(r => r.sent).length,
+        failed: results.filter(r => !r.sent).length,
+        results
       };
     }
   });

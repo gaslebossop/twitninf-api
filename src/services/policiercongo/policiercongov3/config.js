@@ -38,9 +38,13 @@ function loadV3Config(overrides = {}) {
     maxParallelReads: intEnv('POLICIERCONGO_V3_MAX_PARALLEL_READS', 6, 1, 20),
     modelTimeoutMs: intEnv('POLICIERCONGO_V3_MODEL_TIMEOUT_MS', 240000, 10000, 900000),
     toolTimeoutMs: intEnv('POLICIERCONGO_V3_TOOL_TIMEOUT_MS', 600000, 1000, 600000),
-    // 49 outils (dont les 22 outils admin/modération) + leur manuel d'usage
-    // pèsent à eux seuls ~39 000 caractères : 120 000 les laissait tronqués.
     contextCharBudget: intEnv('POLICIERCONGO_V3_CONTEXT_CHARS', 150000, 16000, 500000),
+    // Le prompt porte l'index compact des 84 outils (~25 000 caractères) au
+    // lieu de leur JSON Schema intégral (~48 500, dont un tiers était coupé
+    // faute de budget). 0 = descriptions entières : c'est la seule base sur
+    // laquelle le modèle choisit un outil. Une valeur >0 les tronque pour
+    // économiser davantage, au prix de la qualité de sélection.
+    toolIndexDescriptionChars: intEnv('POLICIERCONGO_V3_TOOL_INDEX_DESC_CHARS', 0, 0, 2000),
     // 24 000 était généreux pour la quasi-totalité des sorties d'outils
     // réelles (get_tweet, get_user, la plupart des recherches bornées) —
     // seuls les tout derniers appels d'un lot gardent ce plafond, les plus

@@ -1,0 +1,84 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["labels"],
+  "properties": {
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "n",
+          "theme",
+          "toxicity_score",
+          "toxicity_category",
+          "quality_score",
+          "quality_class",
+          "tone",
+          "confidence"
+        ],
+        "properties": {
+          "n": {
+            "type": "integer",
+            "description": "Numero du tweet tel que fourni dans l'entree"
+          },
+          "theme": {
+            "type": "string",
+            "enum": [
+              "plateforme_meta",
+              "crypto_finance_jeu",
+              "social_relationnel",
+              "clash_insulte",
+              "humour",
+              "annonce_officielle",
+              "question",
+              "politique_societe",
+              "spam_vide",
+              "autre"
+            ]
+          },
+          "toxicity_score": {
+            "type": "number",
+            "description": "0.0 = totalement inoffensif, 1.0 = attaque grave. Le registre familier ou l'argot ne sont PAS toxiques en soi."
+          },
+          "toxicity_category": {
+            "type": "string",
+            "enum": [
+              "aucune",
+              "vulgarite_legere",
+              "insulte_ciblee",
+              "harcelement",
+              "menace",
+              "haine_identitaire",
+              "contenu_sexuel"
+            ]
+          },
+          "quality_score": {
+            "type": "number",
+            "description": "0.0 = vide/spam/sans apport, 1.0 = contenu riche, informatif ou drole reussi"
+          },
+          "quality_class": {
+            "type": "string",
+            "enum": ["haute", "moyenne", "faible", "spam"]
+          },
+          "tone": {
+            "type": "string",
+            "enum": [
+              "positif",
+              "neutre",
+              "negatif",
+              "ironique",
+              "agressif",
+              "enthousiaste"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "description": "Confiance de l'annotation, 0.0 a 1.0"
+          }
+        }
+      }
+    }
+  }
+}

@@ -29,7 +29,7 @@ function getPublicMediaOriginForUpload() {
 
 /**
  * URL absolue à persister en DB après upload fichier.
- * @param {'avatars'|'banners'} kind
+ * @param {'avatars'|'banners'|'stories'|'messages'} kind
  * @param {string} filename
  */
 function buildStaticMediaPublicUrl(kind, filename) {
@@ -42,7 +42,7 @@ function resolvePublicMediaOrigin(_req) {
   return getPublicMediaOriginForUpload();
 }
 
-const STATIC_MEDIA_PATH = /(\/static\/(?:avatars|banners)\/[^\s?#]+)/i;
+const STATIC_MEDIA_PATH = /(\/static\/(?:avatars|banners|stories|messages)\/[^\s?#]+)/i;
 
 /**
  * Normalise une URL de média vers le domaine public (remplace les URLs en IP).

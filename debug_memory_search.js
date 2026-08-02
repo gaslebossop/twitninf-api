@@ -10,7 +10,7 @@ const DB_CONFIG = {
   port: 5432,
   database: "twitninf",
   user: "admin",
-  password: "myytree88",
+  password: process.env.DB_PASSWORD,
   ssl: false
 };
 

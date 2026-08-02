@@ -157,6 +157,23 @@ Client → Nginx → Node API (fraudMiddleware.js) → Redis ← Rust (fraude-se
 
 **Couche 3 — Service Rust** (`fraude-service-detector`) : analyse comportementale asynchrone. Score chaque requête par `userId` + IP. Quand le score dépasse le seuil, l'IP est bannie dans Redis.
 
+### Autorisation forte des transactions
+
+Tous les achats et mouvements de valeur passent par une preuve courte durée
+produite par le moteur Rust avant la mutation du wallet. Le moteur combine une
+référence personnelle robuste (médiane/MAD), la vélocité adaptative, les
+liaisons appareil/réseau/instrument de paiement, le graphe des transferts et
+l'historique de risque. La preuve est liée au contenu et à une clé
+d'idempotence, puis consommée dans la même transaction PostgreSQL que le débit.
+
+Les décisions sont `APPROVE`, `MONITOR`, `REVIEW` ou `DECLINE`; les mesures
+wallet sont `NONE`, `MONITOR`, `RESTRICT` ou `FREEZE`. Une indisponibilité du
+moteur bloque l'achat sans débiter le compte. Le casino est le seul flux exclu,
+via un jeton interne non forgeable par une requête cliente.
+
+La file de revue est disponible sur `GET /api/admin/economy/fraud-cases` et le
+gel/dégel manuel sur `PUT /api/admin/economy/wallets/lock`.
+
 ### Scoring par userId (anti-faux positifs)
 
 Le middleware extrait le `userId` depuis le JWT **avant même que l'auth middleware tourne**, en décodant directement le header `Authorization: Bearer ...`. Cela évite que des requêtes authentifiées soient scorées comme `anonymous` et déclenchent un ban IP à tort — notamment sur les IPs Cloudflare/mobiles partagées.
@@ -322,10 +339,11 @@ docker-compose build --no-cache
 | `DB_PORT` | Port PostgreSQL | `5432` |
 | `DB_NAME` | Nom base de données | `twitninf` |
 | `DB_USER` | Utilisateur PostgreSQL | `postgres` |
-| `DB_PASSWORD` | Mot de passe PostgreSQL | `password` |
+| `DB_PASSWORD` | Mot de passe PostgreSQL | voir `.env` sur le VPS, jamais en clair ici |
 | `REDIS_HOST` | Hôte Redis | `localhost` |
 | `REDIS_PORT` | Port Redis | `6379` |
-| `JWT_SECRET` | Secret JWT | `twitninf-super-secret-key-2024` |
+| `JWT_SECRET` | Secret JWT | valeur aléatoire forte (`openssl rand -hex 64`), voir `.env` sur le VPS |
+| `FRAUD_DATA_HASH_KEY` | Secret HMAC distinct pour pseudonymiser appareil, IP et paiement | repli sur `JWT_SECRET` |
 
 ## 🤝 Contribution
 

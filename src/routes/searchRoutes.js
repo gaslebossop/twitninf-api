@@ -338,7 +338,7 @@ router.get('/users', [
           { full_name: { [Op.iLike]: `%${query}%` } }
         ]
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'stats'],
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'stats', 'profile_customization'],
       order: getUsersOrderClause(sort),
       limit: parseInt(limit),
       offset: parseInt(offset)
@@ -895,7 +895,7 @@ router.get('/suggestions', [
       include: [{
         model: User,
         as: 'following',
-        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style']
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'profile_customization']
       }],
       where: { 'following.follower_id': userId },
       limit: 5

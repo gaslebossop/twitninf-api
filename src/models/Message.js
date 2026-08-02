@@ -32,7 +32,7 @@ const schema = {
     }
   },
   message_type: {
-    type: DataTypes.ENUM('text', 'system'),
+    type: DataTypes.ENUM('text', 'system', 'image', 'audio'),
     allowNull: false,
     defaultValue: 'text'
   },

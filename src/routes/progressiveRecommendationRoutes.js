@@ -13,7 +13,9 @@ const express = require('express');
 const router = express.Router();
 const { authenticateToken } = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
-const { Tweet } = require('../models');
+const { Tweet, User, UserFollow } = require('../models');
+const { Op } = require('sequelize');
+const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
 
 // Services
 let ProgressiveRecommendationEngine;
@@ -92,14 +94,25 @@ router.get('/', authenticateToken, async (req, res) => {
       });
     }
 
+    // Comptes privés : le moteur classe par viralité et ignore tout de la
+    // confidentialité. On tranche donc en sortie, une fois pour toutes.
+    const recommendations = await filterVisibleTweets(
+      result.recommendations,
+      userId,
+      { User, UserFollow, Op },
+    );
+
     res.json({
       success: true,
       data: {
-        recommendations: result.recommendations,
+        recommendations,
         pagination: {
           limit: parseInt(limit),
           offset: parseInt(offset),
-          total: result.recommendations.length,
+          total: recommendations.length,
+          // `hasMore` se calcule sur ce que le MOTEUR a produit, pas sur ce qui
+          // survit au filtre : une page entièrement composée de comptes privés
+          // renverrait sinon « fin du fil » alors qu'il reste tout à lire.
           hasMore: result.recommendations.length >= parseInt(limit)
         },
         metadata: result.metadata

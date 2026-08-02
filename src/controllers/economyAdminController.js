@@ -8,8 +8,27 @@ const { TREASURY_USER_ID, REFERENCE_PRICE_EUR } = require('../economy/constants'
 const { toAmount } = require('../economy/money');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
 const FraudScanService = require('../services/fraudScanService');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 
 class EconomyAdminController {
+  async fraudCases(req, res) {
+    try {
+      const cases = await transactionAuthorizationService.listRiskCases({
+        state: req.query.state || null,
+        limit: req.query.limit,
+      });
+      res.json({ success: true, cases });
+    } catch (error) {
+      const isRiskError = transactionAuthorizationService.constructor.isRiskError(error);
+      logger.error('Erreur fraudCases Admin:', error);
+      res.status(isRiskError ? error.httpStatus : 500).json({
+        success: false,
+        message: error.message,
+        code: isRiskError ? error.code : undefined,
+      });
+    }
+  }
+
   async fraudScan(req, res) {
     try {
       const lookbackDays = Math.max(1, Math.min(90, parseInt(req.query.lookbackDays, 10) || 14));
@@ -35,30 +54,46 @@ class EconomyAdminController {
     }
   }
 
+  /**
+   * Retrait anti-fraude — `items` porte le MONTANT et la MONNAIE exacts à
+   * retirer par compte, fournis par le scan (`FlaggedUser.fraudByCurrency`,
+   * éventuellement ajusté par l'admin dans l'UI) : on ne vide plus tout le
+   * portefeuille d'un coup, et on ne se limite plus à une seule monnaie
+   * (`getPlatformCurrency()`) — un compte peut être retiré simultanément sur
+   * le NF et sur une ou plusieurs monnaies communautaires.
+   */
   async fraudBurn(req, res) {
-    const { userIds, reason } = req.body;
-    if (!Array.isArray(userIds) || !userIds.length) {
-      return res.status(400).json({ success: false, message: 'userIds requis' });
+    const { items, reason } = req.body;
+    if (!Array.isArray(items) || !items.length) {
+      return res.status(400).json({ success: false, message: 'items requis (userId, currencyId, amount par compte)' });
     }
+    for (const item of items) {
+      if (!item?.userId || !item?.currencyId || !(Number(item.amount) > 0)) {
+        return res.status(400).json({ success: false, message: 'Chaque item requiert userId, currencyId et un amount > 0' });
+      }
+    }
+
     const dbTransaction = await sequelize.transaction();
 
     try {
-      const currency = await getPlatformCurrency({ transaction: dbTransaction });
-      if (!currency) throw new Error('Monnaie TWC non trouvée');
-
       const results = [];
-      for (const userId of userIds) {
-        const { amount } = await EconomyLedger.burnFraudulent(userId, currency.id, reason, dbTransaction);
-        results.push({ userId, burned: amount });
+      const touchedCurrencyIds = new Set();
+      for (const item of items) {
+        const { tx, amount } = await EconomyLedger.burnFraudulent(item.userId, item.currencyId, Number(item.amount), reason, dbTransaction);
+        results.push({ userId: item.userId, currencyId: item.currencyId, requested: Number(item.amount), burned: amount, transactionId: tx?.id || null });
+        touchedCurrencyIds.add(item.currencyId);
       }
 
-      await EconomyMetrics.refresh(currency.id, dbTransaction);
+      await Promise.all([...touchedCurrencyIds].map((id) => EconomyMetrics.refresh(id, dbTransaction)));
       await dbTransaction.commit();
 
-      const total = results.reduce((sum, r) => sum + r.burned, 0);
-      logger.warn(`ADMIN: retrait anti-fraude de ${total} NF sur ${results.length} compte(s) — ${reason || 'sans motif précisé'}`);
+      const totalsByCurrency = {};
+      for (const r of results) {
+        totalsByCurrency[r.currencyId] = (totalsByCurrency[r.currencyId] || 0) + r.burned;
+      }
+      logger.warn(`ADMIN: retrait anti-fraude sur ${results.length} entrée(s) (${touchedCurrencyIds.size} monnaie(s)) — ${reason || 'sans motif précisé'} — ${JSON.stringify(totalsByCurrency)}`);
 
-      res.json({ success: true, results, totalBurned: total });
+      res.json({ success: true, results, totalsByCurrency });
     } catch (error) {
       await dbTransaction.rollback();
       logger.error('Erreur fraudBurn Admin:', error);
@@ -336,15 +371,18 @@ class EconomyAdminController {
         return res.status(404).json({ success: false, message: 'Portefeuille TWC non trouvé' });
       }
 
-      await wallet.update({
-        isLocked: !!isLocked,
-        lockReason: isLocked ? reason || 'Verrouillé par le Gardien' : null
+      const result = await transactionAuthorizationService.setManualWalletState({
+        userId,
+        frozen: !!isLocked,
+        reason: reason || 'Verrouillé par le Gardien',
+        reviewerUserId: req.user?.id || null
       });
 
       res.json({
         success: true,
-        isLocked: wallet.isLocked,
-        message: wallet.isLocked ? 'Portefeuille gelé' : 'Portefeuille dégelé'
+        isLocked: result.frozen,
+        affectedWallets: result.affectedWallets,
+        message: result.frozen ? 'Portefeuille gelé' : 'Portefeuille dégelé'
       });
     } catch (error) {
       res.status(500).json({ success: false, message: error.message });

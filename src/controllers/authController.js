@@ -2,6 +2,20 @@ const authService = require('../services/authService');
 const { validationResult } = require('express-validator');
 const logger = require('../utils/logger');
 
+/**
+ * Contexte d'appareil attaché à une session, pour que l'utilisateur puisse
+ * identifier ses appareils connectés et en révoquer un à distance.
+ */
+function sessionContextFrom(req) {
+  return {
+    deviceId: req.headers['x-device-id'] || req.headers['x-fingerprint'] || null,
+    platform: req.headers['user-platform'] || req.userPlatform || null,
+    appVersion: req.headers['x-app-version'] || null,
+    userAgent: req.headers['user-agent'] || null,
+    ip: req.ip || null,
+  };
+}
+
 class AuthController {
   // Inscription d'un utilisateur
   async register(req, res) {
@@ -23,7 +37,7 @@ class AuthController {
         fullName,
         password,
         platform: platform || 'android'
-      });
+      }, sessionContextFrom(req));
 
       res.status(201).json(result);
     } catch (error) {
@@ -61,7 +75,7 @@ class AuthController {
       const result = await authService.login({
         username,
         password
-      });
+      }, sessionContextFrom(req));
 
       res.status(200).json(result);
     } catch (error) {
@@ -93,7 +107,7 @@ class AuthController {
         });
       }
 
-      const result = await authService.refreshToken(refreshToken);
+      const result = await authService.refreshToken(refreshToken, sessionContextFrom(req));
       res.status(200).json(result);
     } catch (error) {
       logger.error('Erreur dans refreshToken:', error);
@@ -116,7 +130,10 @@ class AuthController {
   async logout(req, res) {
     try {
       const userId = req.user.id;
-      const result = await authService.logout(userId);
+      // Le refresh token identifie la session à révoquer : sans lui, les
+      // autres appareils/comptes resteraient inutilement connectés ou, à
+      // l'inverse, seraient coupés à tort.
+      const result = await authService.logout(userId, req.body?.refreshToken || null);
       res.status(200).json(result);
     } catch (error) {
       logger.error('Erreur dans logout:', error);
@@ -308,7 +325,18 @@ class AuthController {
       const { currentPassword, newPassword } = req.body;
 
       const result = await authService.changePassword(userId, currentPassword, newPassword);
-      res.status(200).json(result);
+
+      // Un changement de mot de passe doit couper les sessions ouvertes
+      // ailleurs — ce n'était pas le cas jusqu'ici. On réémet immédiatement
+      // un couple de jetons pour l'appareil courant afin de ne pas le
+      // déconnecter lui aussi.
+      await authService.revokeAllSessions(userId, 'password_changed');
+      const { token: refreshToken } = await authService.createSession(
+        userId,
+        sessionContextFrom(req)
+      );
+
+      res.status(200).json({ ...result, data: { ...(result.data || {}), refreshToken } });
     } catch (error) {
       logger.error('Erreur dans changePassword:', error);
       
@@ -345,6 +373,31 @@ class AuthController {
         success: false,
         message: 'Token d\'authentification invalide'
       });
+    }
+  }
+
+  // Appareils actuellement connectés
+  async listSessions(req, res) {
+    try {
+      const sessions = await authService.listSessions(req.user.id);
+      res.status(200).json({ success: true, data: { sessions } });
+    } catch (error) {
+      logger.error('Erreur dans listSessions:', error);
+      res.status(500).json({ success: false, message: 'Erreur lors de la récupération des sessions' });
+    }
+  }
+
+  // Révocation à distance d'un appareil
+  async revokeSession(req, res) {
+    try {
+      const revoked = await authService.revokeSessionById(req.user.id, req.params.id);
+      if (!revoked) {
+        return res.status(404).json({ success: false, message: 'Session introuvable' });
+      }
+      res.status(200).json({ success: true, message: 'Session révoquée' });
+    } catch (error) {
+      logger.error('Erreur dans revokeSession:', error);
+      res.status(500).json({ success: false, message: 'Erreur lors de la révocation' });
     }
   }
 }

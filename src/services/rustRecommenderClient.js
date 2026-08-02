@@ -11,6 +11,16 @@ const logger = require('../utils/logger');
 const RUST_BASE_URL = process.env.RUST_RECOMMENDER_URL || 'http://127.0.0.1:3002';
 const TIMEOUT_MS = 4000; // 4s max — sinon fallback JS
 
+// Clé interne service-to-service attendue par le moteur Rust sur /track,
+// /invalidate et /recommendations. Elle n'était envoyée sur AUCUN appel : le
+// service répondait donc 401 à tout le tracking, et le modèle CTR n'a jamais
+// reçu le moindre événement (d'où un `ctr_samples` bloqué à 0, qui désactive
+// en permanence le blending ML et l'auto-tuner).
+const INTERNAL_SECRET = process.env.INTERNAL_SECRET || '';
+if (!INTERNAL_SECRET) {
+  logger.warn('[RustRecommender] INTERNAL_SECRET absent — le moteur Rust rejettera les appels (401)');
+}
+
 // Connexion persistante vers le service Rust (co-localisé sur le VPS) : évite
 // de renégocier une connexion TCP à chaque appel /recommendations, appelé à
 // chaque chargement/scroll du fil d'accueil.
@@ -33,6 +43,7 @@ async function rustPost(path, body) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
+        'X-Service-Key': INTERNAL_SECRET,
       },
       timeout: TIMEOUT_MS,
       agent: keepAliveAgent,
@@ -64,7 +75,10 @@ async function rustPost(path, body) {
 async function rustGet(path) {
   return new Promise((resolve, reject) => {
     const req = http.get(
-      { hostname: '127.0.0.1', port: 3002, path, timeout: TIMEOUT_MS, agent: keepAliveAgent },
+      {
+        hostname: '127.0.0.1', port: 3002, path, timeout: TIMEOUT_MS, agent: keepAliveAgent,
+        headers: { 'X-Service-Key': INTERNAL_SECRET },
+      },
       (res) => {
         let data = '';
         res.on('data', (c) => { data += c; });
@@ -92,7 +106,7 @@ async function rustGet(path) {
  * @returns {Promise<{tweetIds: number[], latencyMs: number, cacheHit: boolean}>}
  */
 async function getRecommendations(userId, opts = {}) {
-  const { mode = 'for_you', limit = 50, offset = 0 } = opts;
+  const { mode = 'for_you', limit = 50, offset = 0, enableExperiments = false } = opts;
 
   const result = await rustPost('/recommendations', {
     user_id: userId,
@@ -100,6 +114,7 @@ async function getRecommendations(userId, opts = {}) {
     limit,
     offset,
     exclude_seen: true,
+    enable_experiments: Boolean(enableExperiments),
   });
 
   if (!result.success) {
@@ -108,6 +123,7 @@ async function getRecommendations(userId, opts = {}) {
 
   return {
     tweetIds: result.tweet_ids,
+    experiments: Array.isArray(result.experiments) ? result.experiments : [],
     count: result.count,
     latencyMs: result.latency_ms,
     cacheHit: result.cache_hit,
@@ -124,12 +140,14 @@ async function getRecommendations(userId, opts = {}) {
  * @param {string} interactionType - 'like', 'comment', 'retweet', 'share', 'view', 'skip', 'report', 'block', etc.
  * @param {number|null} dwellMs - Temps passé sur le contenu en ms (optionnel)
  */
-async function trackInteraction(userId, tweetId, interactionType, dwellMs = null) {
+async function trackInteraction(userId, tweetId, interactionType, dwellMs = null, experiment = null) {
   const result = await rustPost('/track', {
     user_id: userId,
     tweet_id: tweetId,
     interaction_type: interactionType,
     dwell_ms: dwellMs,
+    experiment_id: experiment?.experiment_id || null,
+    variant_id: experiment?.variant_id || null,
   });
 
   if (!result.success) {

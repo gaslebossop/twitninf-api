@@ -1,4 +1,5 @@
 const express = require('express');
+const { Op } = require('sequelize');
 const cors = require('cors');
 const { authenticateToken } = require('./middleware/authMiddleware');
 const helmet = require('helmet');
@@ -46,6 +47,7 @@ const searchRoutes = require('./routes/searchRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const userRoutes = require('./routes/userRoutes');
 const messageRoutes = require('./routes/messageRoutes');
+const storyRoutes = require('./routes/storyRoutes');
 const moderationRoutes = require('./routes/moderationRoutes');
 const recommendationRoutes = require('./routes/recommendationRoutes');
 const behaviorRoutes = require('./routes/behaviorRoutes');
@@ -54,6 +56,7 @@ const trackingRoutes = require('./routes/trackingRoutes');
 const virtualCurrencyRoutes = require('./routes/virtualCurrencyRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const newEconomyRoutes = require('./routes/newEconomyRoutes');
+const userCurrencyRoutes = require('./routes/userCurrencyRoutes');
 const casinoRoutes = require('./routes/casinoRoutes');
 const tweetMonetizationRoutes = require('./routes/tweetMonetizationRoutes');
 const eventRoutes = require('./routes/events');
@@ -106,7 +109,9 @@ const { globalBanCheck } = require('./middleware/globalBanMiddleware');
 
 // Import du service de détection des fraudes (Redis ↔ Rust)
 const fraudService = require('./services/fraudDetectionService');
-const { blockBannedIp, checkApiRequest } = require('./middleware/fraudMiddleware');
+const { blockBannedIp, checkApiRequest, isTrustedFirstPartyClient } = require('./middleware/fraudMiddleware');
+const transactionAuthorizationService = require('./services/transactionAuthorizationService');
+const { requestContextMiddleware } = require('./services/transactionAuthorizationService');
 
 // Créer l'application Express
 const app = express();
@@ -123,6 +128,11 @@ app.set('trust proxy', 1);
 const redisClient = redis.createClient(config.redis);
 redisClient.on('error', (err) => logger.error('Erreur Redis:', err));
 redisClient.on('connect', () => logger.info('Connexion Redis établie'));
+// node-redis v4 ne se connecte plus automatiquement à createClient() (contrairement
+// à v3) : sans ce .connect(), ce client restait à l'état "closed" en permanence —
+// /api/health rapportait "redis: disconnected" en continu, et tout code qui s'en
+// servirait plus tard pour du cache aurait échoué avec "The client is closed".
+redisClient.connect().catch((err) => logger.error('[redis] Connexion initiale échouée:', err.message));
 
 // Connexion du service de détection des fraudes sur le même Redis
 fraudService.connect(config.redis).catch((e) =>
@@ -148,15 +158,23 @@ app.use(cors(config.server.cors));
 // Compression des réponses optimisée
 app.use(compression(config.performance.compression));
 
-// Limitation du taux de requêtes global - Version plus permissive pour les tests
+// Limitation du taux de requêtes global — ne s'applique qu'au trafic hors
+// application officielle (web, scripts, bots). Un client first-party
+// authentifié (app mobile, desktop Windows) est exempté : c'est le moteur
+// anti-fraude (Rust, cadence/comportement) qui le surveille désormais — voir
+// `isTrustedFirstPartyClient` dans fraudMiddleware.js, avec les mêmes
+// garde-fous (login/paiements toujours limités, JWT vérifié obligatoire).
+// Avant ce changement, un usage normal de l'app (scroll, polling des badges,
+// navigation) pouvait dépasser 1000 req/15min et recevait un 429 générique
+// alors qu'aucune fraude n'était en cause.
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // 1000 requêtes par fenêtre (augmenté)
+  max: 1000, // 1000 requêtes par fenêtre (trafic non first-party)
   // Le minage (app Windows) soumet un nonce à chaque bloc trouvé — en usage
   // normal ça peut aller bien au-delà de 1000/15min sans être un abus, donc
   // ces routes ont leur propre limite dédiée (voir miningLimiter) au lieu de
   // partager le quota global avec le reste de l'app.
-  skip: (req) => req.path.startsWith('/new-economy/mining'),
+  skip: (req) => req.path.startsWith('/new-economy/mining') || isTrustedFirstPartyClient(req),
   message: {
     success: false,
     message: 'Trop de requêtes. Réessayez plus tard.'
@@ -189,10 +207,15 @@ const authLimiter = rateLimit({
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
 
-// Protection rate limit sur les routes de tweets (plus strict)
+// Protection rate limit sur les routes de tweets (plus strict).
+// Comme le limiteur global : hors app uniquement, le trafic first-party
+// authentifié est laissé au moteur anti-fraude (vélocité API dédiée, voir
+// `velocity_rules.rs`), calibré pour la cadence réelle de l'app (feed, likes,
+// vues) plutôt que sur un compteur générique par route.
 const tweetLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // 200 tweets par fenêtre
+  max: 200, // 200 tweets par fenêtre (trafic non first-party)
+  skip: (req) => isTrustedFirstPartyClient(req),
   message: {
     success: false,
     message: 'Trop de tweets. Réessayez plus tard.'
@@ -204,7 +227,8 @@ app.use('/api/tweets', tweetLimiter);
 // Protection rate limit sur les routes de recherche
 const searchLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 300, // 300 recherches par fenêtre
+  max: 300, // 300 recherches par fenêtre (trafic non first-party)
+  skip: (req) => isTrustedFirstPartyClient(req),
   message: {
     success: false,
     message: 'Trop de recherches. Réessayez plus tard.'
@@ -223,6 +247,10 @@ app.use(morgan('combined', {
 // Parser pour le corps des requêtes
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Capture a server-trusted, privacy-preserving context for every future wallet
+// mutation. The central ledger can then authorize calls without trusting route
+// bodies or requiring every controller to forward IP/device identifiers.
+app.use(requestContextMiddleware);
 
 // NOTE SÉCURITÉ : on n'écrase PLUS req.ip à partir de l'en-tête brut
 // X-Forwarded-For (falsifiable par le client). Express calcule désormais
@@ -277,100 +305,50 @@ app.use('/api', blockBannedIp);
 app.use('/api', checkApiRequest);
 
 // Routes API - Version complète avec toutes les fonctionnalités
-app.use('/api/auth', (req, res, next) => {
-  console.log('🔵 Route auth appelée:', req.method, req.path);
-  next();
-}, authRoutes);
+app.use('/api/auth', authRoutes);
 
-app.use('/api/tweets', (req, res, next) => {
-  console.log('🐦 Route tweets appelée:', req.method, req.path);
-  next();
-}, tweetRoutes);
+app.use('/api/tweets', tweetRoutes);
 
-app.use('/api/search', (req, res, next) => {
-  console.log('🔍 Route recherche appelée:', req.method, req.path);
-  next();
-}, searchRoutes);
+app.use('/api/search', searchRoutes);
 
-app.use('/api/notifications', (req, res, next) => {
-  console.log('🔔 Route notifications appelée:', req.method, req.path);
-  next();
-}, notificationRoutes);
+app.use('/api/notifications', notificationRoutes);
 
-app.use('/api/users', (req, res, next) => {
-  console.log('👤 Route utilisateurs appelée:', req.method, req.path);
-  next();
-}, userRoutes);
+app.use('/api/users', userRoutes);
 
-app.use('/api/messages', (req, res, next) => {
-  console.log('💬 Route messages appelée:', req.method, req.path);
-  next();
-}, messageRoutes);
+app.use('/api/messages', messageRoutes);
 
-app.use('/api/moderation', (req, res, next) => {
-  console.log('🛡️ Route modération appelée:', req.method, req.path);
-  next();
-}, moderationRoutes);
+app.use('/api/stories', storyRoutes);
 
-app.use('/api/recommendations', (req, res, next) => {
-  console.log('🚀 Route recommandations appelée:', req.method, req.path);
-  next();
-}, recommendationRoutes);
+app.use('/api/moderation', moderationRoutes);
 
-app.use('/api/behavior', (req, res, next) => {
-  console.log('📊 Route comportement appelée:', req.method, req.path);
-  next();
-}, behaviorRoutes);
+// Modération communautaire (BÊTA) — pour l'instant consommée par la seule app Windows.
+app.use('/api/community-moderation', require('./routes/communityModerationRoutes'));
 
-app.use('/api/monetization', (req, res, next) => {
-  console.log('💰 Route monétisation appelée:', req.method, req.path);
-  next();
-}, monetizationRoutes);
+app.use('/api/recommendations', recommendationRoutes);
 
-app.use('/api/virtual-currency', (req, res, next) => {
-  console.log('🪙 Route cryptomonnaie virtuelle appelée:', req.method, req.path);
-  next();
-}, virtualCurrencyRoutes);
+app.use('/api/behavior', behaviorRoutes);
 
-app.use('/api/payments', (req, res, next) => {
-  console.log('💳 Route paiements appelée:', req.method, req.path);
-  next();
-}, paymentRoutes);
+app.use('/api/monetization', monetizationRoutes);
 
-app.use('/api/new-economy', (req, res, next) => {
-  console.log('🏦 Route nouvelle économie appelée:', req.method, req.path);
-  next();
-}, newEconomyRoutes);
+app.use('/api/virtual-currency', virtualCurrencyRoutes);
 
-app.use('/api/casino', (req, res, next) => {
-  console.log('🎰 Route casino appelée:', req.method, req.path);
-  next();
-}, casinoRoutes);
+app.use('/api/payments', paymentRoutes);
 
-app.use('/api/tweet-monetization', (req, res, next) => {
-  console.log('💰 Route monétisation tweets appelée:', req.method, req.path);
-  next();
-}, tweetMonetizationRoutes);
+app.use('/api/new-economy', newEconomyRoutes);
 
-app.use('/api/events', (req, res, next) => {
-  console.log('🎉 Route événements appelée:', req.method, req.path);
-  next();
-}, eventRoutes);
+app.use('/api/currencies', userCurrencyRoutes);
 
-app.use('/api/functional-events', (req, res, next) => {
-  console.log('⚡ Route événements fonctionnels appelée:', req.method, req.path);
-  next();
-}, functionalEventRoutes);
+app.use('/api/casino', casinoRoutes);
 
-app.use('/api/theme-presets', (req, res, next) => {
-  console.log('🎨 Route presets de thèmes appelée:', req.method, req.path);
-  next();
-}, themePresetRoutes);
+app.use('/api/tweet-monetization', tweetMonetizationRoutes);
 
-app.use('/api/progressive-recommendations', (req, res, next) => {
-  console.log('🚀 Route recommandations progressives appelée:', req.method, req.path);
-  next();
-}, progressiveRecommendationRoutes);
+app.use('/api/events', eventRoutes);
+
+app.use('/api/functional-events', functionalEventRoutes);
+
+app.use('/api/theme-presets', themePresetRoutes);
+
+app.use('/api/progressive-recommendations', progressiveRecommendationRoutes);
 
 // NeuralRank Fusion — moteur Rust haute performance
 app.use('/api/neural-rank', neuralRankRoutes);
@@ -380,63 +358,32 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api/premium', premiumRoutes);
 
 // 📊 CTR Tracking pour l'algorithme Rust
-app.use('/api/track', (req, res, next) => {
-  console.log('📊 Route tracking appelée:', req.method, req.path);
-  next();
-}, trackingRoutes);
+app.use('/api/track', trackingRoutes);
 
-app.use('/api/user-stats', (req, res, next) => {
-  console.log('📈 Route statistiques utilisateur appelée:', req.method, req.path);
-  console.log('📈 Routes disponibles:', userStatsRoutes.stack ? userStatsRoutes.stack.map(r => r.route?.path) : 'Pas de stack');
-  next();
-}, userStatsRoutes);
+app.use('/api/user-stats', userStatsRoutes);
 
-app.use('/api/verification', (req, res, next) => {
-  console.log('📋 Route vérification appelée:', req.method, req.path);
-  next();
-}, verificationRoutes);
+app.use('/api/verification', verificationRoutes);
 
 // Routes publicitaires
-app.use('/api/ads', (req, res, next) => {
-  console.log('🎯 Route publicité appelée:', req.method, req.path);
-  next();
-}, adRoutes);
+app.use('/api/ads', adRoutes);
 
 // Routes des défis d'utilisateur
-app.use('/api/user-challenges', (req, res, next) => {
-  console.log('🎯 Route défis utilisateur appelée:', req.method, req.path);
-  next();
-}, userChallengeRoutes);
+app.use('/api/user-challenges', userChallengeRoutes);
 
 // Routes des badges vérifiés
-app.use('/api/verified-badges', (req, res, next) => {
-  console.log('🏆 Route badges vérifiés appelée:', req.method, req.path);
-  next();
-}, verifiedBadgeRoutes);
+app.use('/api/verified-badges', verifiedBadgeRoutes);
 
 // Routes des styles de vérification
-app.use('/api/verification-style', (req, res, next) => {
-  console.log('🎨 Route styles de vérification appelée:', req.method, req.path);
-  next();
-}, verificationStyleRoutes);
+app.use('/api/verification-style', verificationStyleRoutes);
 
 // Routes de l'inventaire
-app.use('/api/inventory', (req, res, next) => {
-  console.log('🎒 Route inventaire appelée:', req.method, req.path);
-  next();
-}, inventoryRoutes);
+app.use('/api/inventory', inventoryRoutes);
 
 // 🧠 Routes de recommandation IA (Deep Learning)
-app.use('/api/ai-recommendations', (req, res, next) => {
-  console.log('🧠 Route recommandations IA appelée:', req.method, req.path);
-  next();
-}, aiRecommendationRoutes);
+app.use('/api/ai-recommendations', aiRecommendationRoutes);
 
 // 🛡️ Routes d'administration de l'économie
-app.use('/api/admin/economy', (req, res, next) => {
-  console.log('🛡️ Route admin économie appelée:', req.method, req.path);
-  next();
-}, economyAdminRoutes);
+app.use('/api/admin/economy', economyAdminRoutes);
 
 app.use('/api/admin/similarity', similarityAdminRoutes);
 app.use('/api/admin/shadowban', shadowbanAdminRoutes);
@@ -631,7 +578,11 @@ app.post('/api/policiercongo/reset-memory', async (req, res) => {
 app.get('/api/health', async (req, res) => {
   try {
     const dbStatus = await testConnection();
-    const redisStatus = redisClient.ready ? 'connected' : 'disconnected';
+    // node-redis v4 expose `.isReady` (et `.isOpen`), pas `.ready` (qui
+    // n'existe pas sur ce client et vaut donc toujours `undefined`) : ce
+    // endpoint rapportait "disconnected" en permanence même quand la
+    // connexion fonctionnait réellement.
+    const redisStatus = redisClient.isReady ? 'connected' : 'disconnected';
     
     res.status(200).json({
       success: true,
@@ -641,6 +592,7 @@ app.get('/api/health', async (req, res) => {
       environment: config.server.env,
       database: dbStatus ? 'connected' : 'disconnected',
       redis: redisStatus,
+      transaction_authorization: fraudService.isReady() ? 'ready' : 'fail_closed',
       memory: process.memoryUsage(),
       version: require('../package.json').version,
       features: {
@@ -650,7 +602,10 @@ app.get('/api/health', async (req, res) => {
         likes: true,
         retweets: true,
         user_follows: true,
-        ai_recommendations: getAIBridge().ready
+        // `getAIBridge` n'était pas importé dans ce fichier : /api/health levait
+        // une ReferenceError et répondait 503 en permanence, ce qui masquait
+        // l'état réel du service.
+        ai_recommendations: require('./services/aiRecommendationBridge').getAIBridge().ready
       }
     });
   } catch (error) {
@@ -810,9 +765,14 @@ function setupCronJobs() {
       logger.info('Nettoyage des notifications anciennes...');
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       
+      // `sequelize.Op` n'existe pas en Sequelize v6 (retiré, il faut importer
+      // `Op` du package) — combiné à la double instance Sequelize corrigée
+      // dans database/index.js, ce cron plantait silencieusement chaque nuit
+      // depuis le début : les notifications lues de plus de 30 jours ne
+      // s'étaient jamais purgées, gonflant la table `notifications` pour rien.
       const deletedCount = await sequelize.models.Notification.destroy({
         where: {
-          created_at: { [sequelize.Op.lt]: thirtyDaysAgo },
+          created_at: { [Op.lt]: thirtyDaysAgo },
           is_read: true
         }
       });
@@ -820,6 +780,15 @@ function setupCronJobs() {
       logger.info(`${deletedCount} notifications anciennes supprimées`);
     } catch (error) {
       logger.error('Erreur lors du nettoyage des notifications:', error);
+    }
+  });
+
+  // Purge des stories expirées + de leurs fichiers médias (toutes les heures)
+  cron.schedule('20 * * * *', async () => {
+    try {
+      await storyRoutes.purgeExpiredStories();
+    } catch (error) {
+      logger.error('Erreur lors de la purge des stories:', error);
     }
   });
 
@@ -1030,6 +999,10 @@ async function startServer() {
 
     // Exécuter la migration automatique pour les colonnes de modération
     await runAutoMigration();
+
+    // Crée le registre durable avant d'accepter le moindre achat ou mouvement
+    // de valeur. Si cette étape échoue, l'API ne démarre pas en mode fail-open.
+    await transactionAuthorizationService.initialize();
 
     // 📊 Initialiser les données comportementales
     logger.info('📊 Initialisation des données comportementales...');

@@ -1,6 +1,7 @@
 const authService = require('../services/authService');
 const logger = require('../utils/logger');
 const User = require('../models/User');
+const { isTrustedFirstPartyClient } = require('./fraudMiddleware');
 
 // Middleware pour vérifier l'authentification
 const authenticateToken = async (req, res, next) => {
@@ -257,12 +258,22 @@ const updateLastActivity = async (req, res, next) => {
   }
 };
 
-// Middleware pour vérifier la limite de taux par utilisateur
+// Middleware pour vérifier la limite de taux par utilisateur.
+// Un client first-party authentifié (app mobile, desktop Windows) n'est pas
+// compté ici : ce compteur en mémoire, générique par route, appliquait le
+// même quota (200/15min) à `/api/auth/me`, appelé à chaque focus d'écran par
+// l'app. C'est désormais le moteur anti-fraude — calibré sur la cadence réelle
+// de l'app — qui surveille ce trafic. Les routes sensibles (login/register)
+// ne passent pas par ce middleware et gardent leur propre limiteur strict.
 const userRateLimit = (maxRequests = 100, windowMs = 15 * 60 * 1000) => {
   const userRequests = new Map();
 
   return (req, res, next) => {
     if (!req.user || !req.user.id) {
+      return next();
+    }
+
+    if (isTrustedFirstPartyClient(req)) {
       return next();
     }
 

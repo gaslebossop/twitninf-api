@@ -4,6 +4,7 @@ const { User, UserWallet, Transaction, VirtualCurrency, sequelize } = require('.
 const { authenticateToken } = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
 const crypto = require('crypto');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 
 router.use(authenticateToken);
 
@@ -88,6 +89,7 @@ router.get('/plans', async (req, res) => {
 
 // POST /api/premium/subscribe — S'abonner au premium
 router.post('/subscribe', async (req, res) => {
+  let dbTransaction = null;
   try {
     const userId = req.user.id;
     const { plan_id, payment_method } = req.body;
@@ -97,14 +99,25 @@ router.post('/subscribe', async (req, res) => {
     }
 
     const plan = PREMIUM_PLANS[plan_id];
-    const user = await User.findByPk(userId);
+    dbTransaction = await sequelize.transaction();
+    const user = await User.findByPk(userId, {
+      transaction: dbTransaction,
+      // La décision antifraude est écrite depuis une transaction séparée avec
+      // une FK vers users (KEY SHARE). NO KEY UPDATE protège toujours contre
+      // deux souscriptions concurrentes sans provoquer de timeout circulaire.
+      lock: dbTransaction.LOCK.NO_KEY_UPDATE,
+    });
 
     if (!user) {
+      await dbTransaction.rollback();
+      dbTransaction = null;
       return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
     }
 
     // Vérifier si déjà premium et encore valide
     if (user.premium && user.subscriptionExpiresAt && new Date(user.subscriptionExpiresAt) > new Date()) {
+      await dbTransaction.rollback();
+      dbTransaction = null;
       return res.status(400).json({ success: false, message: 'Déjà abonné au premium' });
     }
 
@@ -116,39 +129,74 @@ router.post('/subscribe', async (req, res) => {
     expiryDate.setDate(expiryDate.getDate() + plan.duration_days);
 
     // Créer transaction
-    const currency = await VirtualCurrency.findOne({ where: { symbol: 'EUR' } });
+    const currency = await VirtualCurrency.findOne({
+      where: { symbol: 'EUR' },
+      transaction: dbTransaction,
+    });
+    if (!currency) {
+      throw new Error('Portefeuille EUR indisponible');
+    }
     let wallet = null;
     if (currency) {
-      wallet = await UserWallet.findOne({ where: { userId, currencyId: currency.id } });
+      wallet = await UserWallet.findOne({
+        where: { userId, currencyId: currency.id },
+        transaction: dbTransaction,
+      });
       if (!wallet) {
         wallet = await UserWallet.create({
           id: crypto.randomUUID(),
           userId,
           currencyId: currency.id,
           balance: 0,
-        });
+        }, { transaction: dbTransaction });
       }
     }
+
+    const riskAuthorization = await transactionAuthorizationService.authorize({
+      userId,
+      transactionKind: 'premium_subscription',
+      direction: 'inbound',
+      amount: plan.price_eur,
+      amountEur: plan.price_eur,
+      currencyId: currency.id,
+      merchantId: 'twitninf_premium',
+      paymentMethod: payment_method,
+      itemType: 'premium',
+      itemId: plan_id,
+    });
 
     const transaction = await Transaction.create({
       transactionHash,
       toUserId: userId,
-      currencyId: currency ? currency.id : null,
-      amount: 0,
+      currencyId: currency.id,
+      amount: plan.price_eur,
       amountInEur: plan.price_eur,
-      type: 'PREMIUM_SUBSCRIPTION',
+      type: 'PURCHASE',
       status: 'COMPLETED',
       description: `Abonnement ${plan.name}`,
-      metadata: { planId: plan_id, duration_days: plan.duration_days },
+      metadata: {
+        planId: plan_id,
+        duration_days: plan.duration_days,
+        purchaseType: 'PREMIUM_SUBSCRIPTION',
+        paymentMethod: payment_method || null,
+        ...transactionAuthorizationService.riskMetadata(riskAuthorization),
+      },
       confirmedAt: new Date(),
-    });
+    }, { transaction: dbTransaction });
+    await transactionAuthorizationService.consume(
+      riskAuthorization,
+      transaction.id,
+      dbTransaction
+    );
 
     // Mettre à jour l'utilisateur
     await user.update({
       premium: true,
       subscriptionTier: 'premium',
       subscriptionExpiresAt: expiryDate,
-    });
+    }, { transaction: dbTransaction });
+    await dbTransaction.commit();
+    dbTransaction = null;
 
     logger.info(`✅ Premium activated: ${req.user.username} expires ${expiryDate}`);
 
@@ -165,8 +213,16 @@ router.post('/subscribe', async (req, res) => {
       },
     });
   } catch (error) {
+    if (dbTransaction && !dbTransaction.finished) {
+      await dbTransaction.rollback();
+    }
     logger.error('❌ Erreur subscribe:', error);
-    res.status(500).json({ success: false, message: 'Erreur serveur' });
+    const isRiskError = transactionAuthorizationService.constructor.isRiskError(error);
+    res.status(isRiskError ? error.httpStatus : 500).json({
+      success: false,
+      message: isRiskError ? error.message : 'Erreur serveur',
+      code: isRiskError ? error.code : undefined,
+    });
   }
 });
 

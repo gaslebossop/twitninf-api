@@ -8,9 +8,35 @@ const { Op } = require('sequelize');
 const { UserWallet, VirtualCurrency, Tweet, User } = require('../models');
 const NewEconomyService = require('./newEconomyService');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
+const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
 const logger = require('../utils/logger');
 
 class TweetMonetizationService {
+  /** Message unique — la raison affichée doit être la même partout. */
+  static PREMIUM_REQUIRED_REASON =
+    'La monétisation est réservée aux abonnements Plus et Pro';
+
+  /**
+   * L'auteur a-t-il le droit d'être payé ?
+   *
+   * ⚠ On relit l'abonnement EN BASE plutôt que de croire un objet passé par
+   * l'appelant : `isSubscriptionActive` a besoin de `subscription_tier` ET de
+   * `subscription_expires_at`, et la plupart des `include` de l'app ne
+   * chargent ni l'un ni l'autre. Un auteur partiellement chargé passerait
+   * alors pour un compte gratuit — ou pire, un abonnement expiré passerait
+   * pour actif.
+   *
+   * @param {string|object} author id ou instance utilisateur
+   */
+  static async isAuthorMonetizable(author) {
+    const id = typeof author === 'object' && author ? author.id : author;
+    if (!id) return false;
+    const user = await User.findByPk(id, {
+      attributes: ['id', 'subscription_tier', 'subscription_expires_at'],
+    });
+    return isSubscriptionActive(user);
+  }
+
   /**
    * Taux de récompenses STANDARDS (Tweets classiques)
    */
@@ -59,13 +85,18 @@ class TweetMonetizationService {
         include: [{
           model: User,
           as: 'author',
-          attributes: ['id', 'username', 'verified', 'stats']
+          attributes: ['id', 'username', 'verified', 'stats', 'subscription_tier', 'subscription_expires_at']
         }]
       });
 
       if (!tweet) {
         throw new Error('Tweet non trouvé');
       }
+
+      // La monétisation est un avantage d'abonnement. Un compte gratuit voit
+      // toujours le détail du calcul — c'est ce qui donne envie de s'abonner —
+      // mais toutes les récompenses sont à zéro et rien n'est distribuable.
+      const monetizable = isSubscriptionActive(tweet.author);
 
       // Données d'engagement
       const views = tweet.viewCount || 0;
@@ -84,8 +115,7 @@ class TweetMonetizationService {
       const tweetAge = Date.now() - new Date(tweet.createdAt).getTime();
       const ageInHours = tweetAge / (1000 * 60 * 60);
 
-      // Tous les tweets sont éligibles
-      const isEligible = true;
+      const isEligible = monetizable;
 
       // Calculer le score d'engagement (0-100)
       const engagementRate = totalInteractions > 0 ? (totalInteractions / Math.max(views, 1)) * 100 : 0;
@@ -99,13 +129,22 @@ class TweetMonetizationService {
         watchtime: this.roundTWC(watchTimeSeconds * currentRates.WATCHTIME_PER_SEC)
       };
 
-      const totalReward = this.roundTWC(Object.values(rewards).reduce((sum, reward) => sum + reward, 0));
+      // Le potentiel est calculé pour tout le monde ; seul le versement est
+      // réservé. C'est ce qui permet à un compte gratuit de voir CE QU'IL
+      // gagnerait — un écran vide ne vend rien.
+      const potentialReward = this.roundTWC(Object.values(rewards).reduce((sum, reward) => sum + reward, 0));
+      const totalReward = monetizable ? potentialReward : 0;
 
       // Créer les raisons d'éligibilité
       const reasons = [];
       const label = tweet.tweet_type === 'video' ? '🎬 Vidéo' : '📝 Tweet';
-      reasons.push(`✅ ${label} éligible pour monétisation`);
-      reasons.push(`💰 Récompense totale: ${totalReward.toFixed(2)} TWC`);
+      if (monetizable) {
+        reasons.push(`✅ ${label} éligible pour monétisation`);
+        reasons.push(`💰 Récompense totale: ${totalReward.toFixed(2)} TWC`);
+      } else {
+        reasons.push(`🔒 ${this.PREMIUM_REQUIRED_REASON}`);
+        reasons.push(`💰 Vous gagneriez ${potentialReward.toFixed(2)} TWC avec un abonnement`);
+      }
       reasons.push(`👁️ Vues: ${views} × ${currentRates.VIEWS} = ${rewards.views.toFixed(2)} TWC`);
 
       if (watchTimeSeconds > 0 && currentRates.WATCHTIME_PER_SEC > 0) {
@@ -131,6 +170,11 @@ class TweetMonetizationService {
         },
         rewards,
         totalReward: totalReward,
+        // Ce que rapporterait le même tweet avec un abonnement : c'est
+        // l'argument de vente, et les apps l'affichent sur un compte gratuit.
+        potentialReward,
+        monetizable,
+        lockedReason: monetizable ? null : this.PREMIUM_REQUIRED_REASON,
         reasons
       };
 
@@ -172,6 +216,16 @@ class TweetMonetizationService {
    */
   static async distributeReward(tweetId, userId, rewardAmount = null) {
     try {
+      // ⚠ Le verrou est posé ICI, sur la fonction qui bouge réellement les
+      // fonds, et pas seulement dans le calcul d'éligibilité. `rewardAmount`
+      // court-circuite tout le calcul quand il est fourni : se contenter de
+      // mettre `totalReward` à zéro en amont laissait un chemin de paiement
+      // grand ouvert pour tout appelant qui passe un montant à la main.
+      if (!(await this.isAuthorMonetizable(userId))) {
+        logger.info(`🔒 Monétisation refusée pour ${userId} (pas d'abonnement actif)`);
+        return { success: false, reason: this.PREMIUM_REQUIRED_REASON };
+      }
+
       let reward = 0;
       if (rewardAmount !== null) {
         reward = parseFloat(rewardAmount) || 0;
@@ -212,6 +266,20 @@ class TweetMonetizationService {
   static async processEligibleTweets(userId = null) {
     try {
       logger.info('🔄 Traitement des tweets éligibles...');
+
+      // Sortie immédiate pour un compte sans abonnement : `distributeReward`
+      // refuserait de toute façon, mais on aurait d'abord parcouru tous ses
+      // tweets et écrit des lignes de log annonçant des gains qui ne seront
+      // jamais versés.
+      if (userId && !(await this.isAuthorMonetizable(userId))) {
+        return {
+          totalRewards: 0,
+          processedCount: 0,
+          locked: true,
+          reason: this.PREMIUM_REQUIRED_REASON,
+        };
+      }
+
       const whereCondition = {
         parent_tweet_id: null,
         monetized: { [Op.ne]: true }
@@ -282,6 +350,11 @@ class TweetMonetizationService {
    */
   static async previewEarnings(userId) {
     try {
+      // L'aperçu reste CALCULÉ pour un compte gratuit — c'est l'argument de
+      // vente de l'abonnement — mais il est marqué comme verrouillé pour que
+      // l'app n'affiche pas un solde à venir qui ne tombera jamais.
+      const monetizable = await this.isAuthorMonetizable(userId);
+
       const tweets = await Tweet.findAll({
         where: { user_id: userId, parent_tweet_id: null, monetized: { [Op.ne]: true } },
         order: [['createdAt', 'DESC']]
@@ -329,10 +402,16 @@ class TweetMonetizationService {
       const currentBalance = wallet ? parseFloat(wallet.balance) : 0;
 
       return {
-        totalRewards,
+        // Sur un compte gratuit, rien ne sera versé : `totalRewards` tombe à
+        // zéro et le montant part dans `potentialRewards`. Le solde projeté ne
+        // doit surtout pas bouger, sinon l'app promet une somme à venir.
+        totalRewards: monetizable ? totalRewards : 0,
+        potentialRewards: totalRewards,
+        monetizable,
+        lockedReason: monetizable ? null : this.PREMIUM_REQUIRED_REASON,
         eligibleTweets: details.length,
         currentBalance,
-        newBalance: currentBalance + totalRewards,
+        newBalance: currentBalance + (monetizable ? totalRewards : 0),
         tweetDetails: details
       };
     } catch (error) {

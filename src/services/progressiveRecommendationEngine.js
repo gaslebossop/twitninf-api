@@ -15,6 +15,7 @@
 const { Op, fn, col, literal, Sequelize } = require('sequelize');
 const logger = require('../utils/logger');
 const { User, Tweet, TweetLike, TweetRetweet, UserFollow, UserBehaviorData, Notification, sequelize } = require('../models');
+const { engagementTargetId } = require('../utils/engagementTarget');
 
 /**
  * Classe pour le tracking en temps réel des tweets
@@ -1930,27 +1931,33 @@ class ProgressiveRecommendationEngine {
       return await Promise.all(tweets.map(async (tweet) => {
         const enrichedTweet = { ...tweet };
 
+        // Un retweet pur n'a pas d'engagement propre : compteurs et état
+        // d'interaction sont ceux du tweet d'origine.
+        const statsId = tweet.id ? engagementTargetId(tweet) : null;
+
         // Enrichir les statistiques si demandé
-        if (includeStats && tweet.id) {
+        if (includeStats && statsId) {
           const [likeCount, retweetCount, replyCount] = await Promise.all([
-            TweetLike.countTweetLikes(tweet.id).catch(() => 0),
-            TweetRetweet.countTweetRetweets(tweet.id).catch(() => 0),
-            Tweet.count({ where: { parent_tweet_id: tweet.id } }).catch(() => 0)
+            TweetLike.countTweetLikes(statsId).catch(() => 0),
+            TweetRetweet.countTweetRetweets(statsId).catch(() => 0),
+            Tweet.count({ where: { parent_tweet_id: statsId } }).catch(() => 0)
           ]);
 
           enrichedTweet.stats = {
             likes: likeCount,
             retweets: retweetCount,
             replies: replyCount,
-            views: tweet.view_count || 0
+            views: (statsId === String(tweet.id)
+              ? tweet.view_count
+              : (tweet.originalTweet || tweet.original_tweet)?.view_count) || 0
           };
         }
 
         // Enrichir les interactions utilisateur si demandé
-        if (userId && tweet.id) {
+        if (userId && statsId) {
           const [isLiked, isRetweeted] = await Promise.all([
-            TweetLike.hasUserLikedTweet(userId, tweet.id).catch(() => false),
-            TweetRetweet.hasUserRetweetedTweet(userId, tweet.id).catch(() => false)
+            TweetLike.hasUserLikedTweet(userId, statsId).catch(() => false),
+            TweetRetweet.hasUserRetweetedTweet(userId, statsId).catch(() => false)
           ]);
 
           enrichedTweet.user_interaction = {

@@ -7,14 +7,13 @@
  * valide. Si l'agent tourne sur Codex, l'avis est demandé à Claude, et
  * inversement — jamais au même modèle que celui qui a produit l'appel.
  *
- * Exception : Codex n'a plus de crédits disponibles (juillet 2026). Tant que
- * seul Claude est opérationnel, on ne peut pas obtenir un second modèle
- * réellement distinct — demander l'avis à Codex échouerait systématiquement
- * et bloquerait toute action destructrice (fail-closed = plus rien ne passe
- * jamais). On dégrade donc vers Claude pour les deux rôles, mais chaque appel
- * `generateWith` reste un tour isolé et sans contexte partagé avec la
- * décision primaire (ClaudeProvider ne garde aucune session) : c'est une
- * nouvelle requête neutre, pas une relecture par le même fil de raisonnement.
+ * La dégradation « Claude vérifie Claude », mise en place quand Codex était à
+ * sec de crédits, est levée : `codex exec` répond de nouveau sur le VPS
+ * (vérifié le 2026-07-26), donc les deux rôles sont à nouveau tenus par deux
+ * modèles réellement distincts. Si Codex venait à retomber en panne, le
+ * verdict deviendrait inobtenable et les actions destructrices seraient
+ * refusées — c'est le comportement fail-closed voulu, pas une régression à
+ * contourner en refaisant valider un modèle par lui-même.
  *
  * Fail-closed par construction : toute impossibilité d'obtenir un verdict
  * clair (provider indisponible, timeout, réponse illisible) refuse l'action.
@@ -26,7 +25,7 @@ const { redact, clip, safeJson } = require('./utils');
 
 function otherProviderName(primaryName) {
   if (primaryName === 'codex') return 'claude';
-  if (primaryName === 'claude') return 'claude';
+  if (primaryName === 'claude') return 'codex';
   return null;
 }
 

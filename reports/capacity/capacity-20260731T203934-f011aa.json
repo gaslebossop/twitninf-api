@@ -1,0 +1,284 @@
+{
+  "ok": true,
+  "run_id": "capacity-20260731T203934-f011aa",
+  "generated_at": "2026-07-31T18:43:30.406Z",
+  "generator": {
+    "host": "http://127.0.0.1:3001",
+    "same_server": true,
+    "token_pool": 12000
+  },
+  "dataset": {
+    "users": 105000,
+    "tweets": 21000
+  },
+  "preflight": {
+    "status": 200,
+    "body": "{\"success\":true,\"data\":{\"healthy\":true,\"db\":\"ok\",\"redis\":\"ok\",\"latencyMs\":4,\"version\":\"1.0.0\",\"uptimeSecs\":189361}}"
+  },
+  "configuration": {
+    "concurrency_steps": [
+      5,
+      10,
+      20,
+      40,
+      80,
+      120,
+      180,
+      260,
+      360
+    ],
+    "step_seconds": 15,
+    "timeout_ms": 10000,
+    "sla_p95_ms": 1000,
+    "sla_p99_ms": 2000,
+    "hard_p95_ms": 5000,
+    "hard_error_rate": 0.05
+  },
+  "started_at": "2026-07-31T18:42:35.473Z",
+  "ended_at": "2026-07-31T18:43:30.406Z",
+  "duration_seconds": 54.93,
+  "stop_reason": "p95>5000ms",
+  "pm2_before": {
+    "pid": 986533,
+    "status": "online",
+    "restarts": 59,
+    "rss_mb": 1429.5,
+    "cpu_percent": 2.9
+  },
+  "pm2_after": {
+    "pid": 986533,
+    "status": "online",
+    "restarts": 59,
+    "rss_mb": 953.7,
+    "cpu_percent": 3.1
+  },
+  "cache_cleanup_before": {
+    "deleted_keys": 0,
+    "deleted_pending_impressions": 0,
+    "matched_keys": 0
+  },
+  "cache_cleanup_after": {
+    "deleted_keys": 1540,
+    "deleted_pending_impressions": 1320,
+    "matched_keys": 1540
+  },
+  "steps": [
+    {
+      "concurrency": 5,
+      "duration_ms": 17614,
+      "requests": 86,
+      "success": 86,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 4.88,
+      "p50_ms": 109,
+      "p95_ms": 2466.51,
+      "p99_ms": 2949.12,
+      "max_ms": 2949.12,
+      "statuses": {
+        "200": 86
+      },
+      "endpoints": {
+        "tweet_detail": {
+          "requests": 17,
+          "rps": 0.97,
+          "error_rate": 0,
+          "p50_ms": 26.47,
+          "p95_ms": 72.98,
+          "p99_ms": 72.98,
+          "engine_p95_ms": null,
+          "cache_hit_rate": 0
+        },
+        "public_feed": {
+          "requests": 26,
+          "rps": 1.48,
+          "error_rate": 0,
+          "p50_ms": 103.07,
+          "p95_ms": 158.57,
+          "p99_ms": 166.73,
+          "engine_p95_ms": null,
+          "cache_hit_rate": 0
+        },
+        "js_recommendations": {
+          "requests": 9,
+          "rps": 0.51,
+          "error_rate": 0,
+          "p50_ms": 31.02,
+          "p95_ms": 89.98,
+          "p99_ms": 89.98,
+          "engine_p95_ms": null,
+          "cache_hit_rate": 0
+        },
+        "neural_rank": {
+          "requests": 34,
+          "rps": 1.93,
+          "error_rate": 0,
+          "p50_ms": 2310.33,
+          "p95_ms": 2653.25,
+          "p99_ms": 2949.12,
+          "engine_p95_ms": 2451,
+          "cache_hit_rate": 0
+        }
+      },
+      "system": {
+        "samples": 18,
+        "max_load_1m": 2.33,
+        "min_mem_available_mb": 8432,
+        "max_api_cpu_percent": 2.1,
+        "max_api_rss_mb": 1446.9,
+        "max_postgres_backends": 19,
+        "max_postgres_active": 7,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 1.99
+      }
+    },
+    {
+      "concurrency": 10,
+      "duration_ms": 17567,
+      "requests": 177,
+      "success": 177,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 10.08,
+      "p50_ms": 224.38,
+      "p95_ms": 4434.98,
+      "p99_ms": 4591.86,
+      "max_ms": 4632.84,
+      "statuses": {
+        "200": 177
+      },
+      "endpoints": {
+        "neural_rank": {
+          "requests": 70,
+          "rps": 3.98,
+          "error_rate": 0,
+          "p50_ms": 2635.53,
+          "p95_ms": 4576.78,
+          "p99_ms": 4632.84,
+          "engine_p95_ms": 3950,
+          "cache_hit_rate": 0.60714
+        },
+        "js_recommendations": {
+          "requests": 18,
+          "rps": 1.02,
+          "error_rate": 0,
+          "p50_ms": 185.91,
+          "p95_ms": 364.04,
+          "p99_ms": 364.04,
+          "engine_p95_ms": null,
+          "cache_hit_rate": 0
+        },
+        "tweet_detail": {
+          "requests": 36,
+          "rps": 2.05,
+          "error_rate": 0,
+          "p50_ms": 183.51,
+          "p95_ms": 344.42,
+          "p99_ms": 494.52,
+          "engine_p95_ms": null,
+          "cache_hit_rate": 0
+        },
+        "public_feed": {
+          "requests": 53,
+          "rps": 3.02,
+          "error_rate": 0,
+          "p50_ms": 242.54,
+          "p95_ms": 463.11,
+          "p99_ms": 512.86,
+          "engine_p95_ms": null,
+          "cache_hit_rate": 0
+        }
+      },
+      "system": {
+        "samples": 18,
+        "max_load_1m": 4.55,
+        "min_mem_available_mb": 8347.4,
+        "max_api_cpu_percent": 2.4,
+        "max_api_rss_mb": 1449.4,
+        "max_postgres_backends": 23,
+        "max_postgres_active": 12,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 2.33
+      }
+    },
+    {
+      "concurrency": 20,
+      "duration_ms": 18543,
+      "requests": 250,
+      "success": 250,
+      "errors": 0,
+      "error_rate": 0,
+      "rps": 13.48,
+      "p50_ms": 508.67,
+      "p95_ms": 7098.02,
+      "p99_ms": 7602.1,
+      "max_ms": 7683.4,
+      "statuses": {
+        "200": 250
+      },
+      "endpoints": {
+        "neural_rank": {
+          "requests": 100,
+          "rps": 5.39,
+          "error_rate": 0,
+          "p50_ms": 276.51,
+          "p95_ms": 7493.53,
+          "p99_ms": 7615.55,
+          "engine_p95_ms": 3599,
+          "cache_hit_rate": 0.85294
+        },
+        "js_recommendations": {
+          "requests": 25,
+          "rps": 1.35,
+          "error_rate": 0,
+          "p50_ms": 416.78,
+          "p95_ms": 968.29,
+          "p99_ms": 1106.4,
+          "engine_p95_ms": null,
+          "cache_hit_rate": 0
+        },
+        "tweet_detail": {
+          "requests": 50,
+          "rps": 2.7,
+          "error_rate": 0,
+          "p50_ms": 507.6,
+          "p95_ms": 1182.45,
+          "p99_ms": 3360.86,
+          "engine_p95_ms": null,
+          "cache_hit_rate": 0
+        },
+        "public_feed": {
+          "requests": 75,
+          "rps": 4.04,
+          "error_rate": 0,
+          "p50_ms": 536.02,
+          "p95_ms": 1188.23,
+          "p99_ms": 3054.8,
+          "engine_p95_ms": null,
+          "cache_hit_rate": 0
+        }
+      },
+      "system": {
+        "samples": 19,
+        "max_load_1m": 5.54,
+        "min_mem_available_mb": 8730,
+        "max_api_cpu_percent": 2.9,
+        "max_api_rss_mb": 954.3,
+        "max_postgres_backends": 24,
+        "max_postgres_active": 12,
+        "max_redis_clients": 15,
+        "max_redis_used_memory_mb": 2.5
+      }
+    }
+  ],
+  "capacity_estimate": {
+    "sustainable_rps": 0,
+    "safe_rps": 0,
+    "note": "aucun palier ne respecte le SLA"
+  },
+  "limitations": [
+    "Le generateur tourne sur le meme VPS : resultat volontairement conservateur.",
+    "Cette estimation porte sur HTTP/API et NeuralRank, pas sur les connexions Socket.IO inactives.",
+    "Les interactions sociales sont pre-semees en base ; la charge soutenue reste en lecture pour ne pas polluer le modele CTR."
+  ]
+}

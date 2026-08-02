@@ -9,7 +9,7 @@ const logger = require('../utils/logger');
  */
 router.post('/', [authenticateToken], async (req, res) => {
   try {
-    const { tweet_id, action, dwell_ms } = req.body;
+    const { tweet_id, action, dwell_ms, experiment_id, variant_id } = req.body;
     const userId = req.user.id;
 
     if (!tweet_id || !action) {
@@ -44,6 +44,8 @@ router.post('/', [authenticateToken], async (req, res) => {
           tweet_id: tweet_id,
           interaction_type: action,
           dwell_ms: dwell_ms || null,
+          experiment_id: experiment_id || null,
+          variant_id: variant_id || null,
         }),
       });
 

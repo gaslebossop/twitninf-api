@@ -3,9 +3,10 @@ const router = express.Router();
 const authMiddleware = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
 const similarity = require('../services/similarity');
-const { Tweet, User, TweetLike, TweetRetweet } = require('../models');
+const { Tweet, User, UserFollow, TweetLike, TweetRetweet } = require('../models');
 const { Op, fn, col, literal } = require('sequelize');
 const { ultraSafeClean } = require('../utils/circularRefCleaner');
+const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
 const { targetingService } = require('../../../targeting');
 
 // ═══════════════════════════════════════════════════════════════════
@@ -144,7 +145,26 @@ async function batchEnrichTweets(userId, dbTweets, engineRecos) {
 /**
  * Fonction centrale : obtenir les recommandations du moteur + enrichir par batch.
  */
+/**
+ * Enveloppe de `buildSimilarityRecommendations` qui retire les tweets des
+ * comptes privés que ce lecteur ne suit pas.
+ *
+ * Posée ICI et pas dans chaque route : les quatre routes de fil (`/`,
+ * `/following`, `/algorithm/:algorithm`, `/smart`) passent toutes par cette
+ * fonction, et la fonction interne a une demi-douzaine de points de sortie
+ * (court-circuit cache vide, retour anticipé sans pub, retour final…). Filtrer
+ * au seul endroit par lequel tout le monde repasse est la seule façon de ne pas
+ * en oublier un.
+ */
 async function getSimilarityRecommendations(userId, limit, offset, routeName, engineOptions = {}) {
+  const result = await buildSimilarityRecommendations(userId, limit, offset, routeName, engineOptions);
+  return {
+    ...result,
+    tweets: await filterVisibleTweets(result.tweets, userId, { User, UserFollow, Op }),
+  };
+}
+
+async function buildSimilarityRecommendations(userId, limit, offset, routeName, engineOptions = {}) {
   try {
     const engine = similarity.getEngine();
 
@@ -173,13 +193,13 @@ async function getSimilarityRecommendations(userId, limit, offset, routeName, en
         {
           model: User,
           as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'],
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'profile_customization'],
           where: { is_active: true },
         },
         {
           model: Tweet,
           as: 'originalTweet',
-          include: [{ model: User, as: 'author', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'] }],
+          include: [{ model: User, as: 'author', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'profile_customization'] }],
         },
       ],
     });
@@ -222,13 +242,13 @@ async function getSimilarityRecommendations(userId, limit, offset, routeName, en
           {
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'],
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'profile_customization'],
             where: { is_active: true },
           },
           {
             model: Tweet,
             as: 'originalTweet',
-            include: [{ model: User, as: 'author', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'] }],
+            include: [{ model: User, as: 'author', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'profile_customization'] }],
           },
         ],
       });
@@ -245,13 +265,13 @@ async function getSimilarityRecommendations(userId, limit, offset, routeName, en
           {
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'],
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'profile_customization'],
             where: { is_active: true },
           },
           {
             model: Tweet,
             as: 'originalTweet',
-            include: [{ model: User, as: 'author', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'] }],
+            include: [{ model: User, as: 'author', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'profile_customization'] }],
           },
         ],
         order: [['created_at', 'ASC']],
@@ -347,7 +367,7 @@ async function getSimilarityRecommendations(userId, limit, offset, routeName, en
             const { User } = require('../models');
             const adUsers = await User.findAll({ 
               where: { id: userIds },
-              attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium']
+              attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'profile_customization']
             });
             adUsers.forEach(u => { userMap[u.id] = u.toJSON(); });
           } catch(e) {
@@ -430,7 +450,7 @@ async function getFallbackTweets(userId, limit, offset = 0) {
       include: [{
         model: User,
         as: 'author',
-        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'],
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'profile_customization'],
         where: { is_active: true },
       }],
       order: [['created_at', 'DESC']],
@@ -440,8 +460,18 @@ async function getFallbackTweets(userId, limit, offset = 0) {
 
     if (tweets.length === 0) return [];
 
+    // Le fallback d'urgence sert des tweets récents SANS passer par le moteur :
+    // il doit donc refaire lui-même le tri des comptes privés, sinon une panne
+    // du moteur de similarité devient une fuite de confidentialité.
+    const visible = await filterVisibleTweets(
+      tweets.map(t => t.toJSON()),
+      userId,
+      { User, UserFollow, Op },
+    );
+    if (visible.length === 0) return [];
+
     // Enrichissement batch même pour le fallback
-    const tweetIds = tweets.map(t => t.id);
+    const tweetIds = visible.map(t => t.id);
 
     const [userLikes, likeCounts, userRetweets, rtCounts, replyCounts] = await Promise.all([
       userId ? TweetLike.findAll({ where: { user_id: userId, tweet_id: { [Op.in]: tweetIds } }, attributes: ['tweet_id'], raw: true }) : [],
@@ -457,8 +487,7 @@ async function getFallbackTweets(userId, limit, offset = 0) {
     const rtMap = {}; for (const r of rtCounts) rtMap[r.tweet_id] = parseInt(r.cnt) || 0;
     const replyMap = {}; for (const r of replyCounts) replyMap[r.parent_tweet_id] = parseInt(r.cnt) || 0;
 
-    return tweets.map(tweet => {
-      const td = tweet.toJSON();
+    return visible.map(td => {
       const likes = likeMap[td.id] || 0;
       const retweets = rtMap[td.id] || 0;
       const replies = replyMap[td.id] || 0;
@@ -609,10 +638,16 @@ router.get('/user-suggestions', authMiddleware.authenticateToken, async (req, re
     }
 
     // Enrichir avec les données DB (username, avatar, bio, etc.)
+    // Les comptes privés sont écartés ICI et pas en aval : le moteur de
+    // similarité ne connaît que des vecteurs et des arêtes, il ignore tout du
+    // réglage de confidentialité. Un compte privé a demandé à n'être visible
+    // que de ses abonnés — le suggérer à des inconnus est exactement ce qu'il
+    // a refusé. Ces suggestions ne portant que sur des comptes non suivis, il
+    // n'y a pas de cas « privé mais déjà abonné » à préserver.
     const suggestedUserIds = suggestions.map(s => s.userId);
     const dbUsers = await User.findAll({
-      where: { id: { [Op.in]: suggestedUserIds } },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'bio', 'verified', 'verification_style', 'premium', 'stats'],
+      where: { id: { [Op.in]: suggestedUserIds }, is_private_account: false },
+      attributes: ['id', 'username', 'full_name', 'avatar', 'bio', 'verified', 'verification_style', 'premium', 'stats', 'profile_customization'],
       raw: true
     });
 

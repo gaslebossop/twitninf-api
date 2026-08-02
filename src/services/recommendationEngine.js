@@ -2858,6 +2858,9 @@ class RecommendationEngine {
           moderation_status: cleanedRec.moderation_status,
           view_count: cleanedRec.view_count || 0,
           click_count: cleanedRec.click_count || 0,
+          // Idem : ce mapper ne garde que les champs listés, et le sélecteur
+          // de langue de la carte dépend de celui-ci.
+          translation_enabled: !!cleanedRec.translation_enabled,
           author: cleanedRec.author ? {
             id: cleanedRec.author.id,
             username: cleanedRec.author.username,

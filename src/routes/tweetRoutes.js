@@ -12,6 +12,9 @@ const semanticSimilarityService = require('../services/semanticSimilarityService
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
 const { ultraSafeClean } = require('../utils/circularRefCleaner');
+const { engagementTargetId, resolveEngagementTarget } = require('../utils/engagementTarget');
+const { assertTweetLength } = require('../utils/tweetLimits');
+const tweetTranslationService = require('../services/tweetTranslationService');
 const TweetRecommendationService = require('../services/tweetRecommendationService');
 const RealtimeQueueService = require('../services/realtimeQueueService');
 const { upload, videoService } = require('../services/videoService');
@@ -47,6 +50,14 @@ const videoRecommendationService = require('../services/videoRecommendationServi
 
 // 📊 Tracking CTR pour l'algorithme Rust
 const ctrTracker = require('../services/ctrTracker');
+const {
+  AbTestRequestError,
+  normalizeExperimentRequest,
+  assertEligible: assertAbTestEligible,
+  createExperiment: createAbTestExperiment,
+  cancelExperiment: cancelAbTestExperiment,
+  moderateAndActivateExperiment,
+} = require('../services/tweetAbTestService');
 
 // Middleware de validation des erreurs
 const handleValidationErrors = (req, res, next) => {
@@ -60,6 +71,63 @@ const handleValidationErrors = (req, res, next) => {
   }
   next();
 };
+
+/**
+ * Écrit un résultat de modération automatique sans pouvoir écraser un verdict
+ * communautaire déjà rendu.
+ *
+ * Le verrou de ligne règle aussi la course entre les deux traitements :
+ * - si l'automatisation écrit d'abord, la revue passe ensuite et a le dernier mot ;
+ * - si la revue écrit d'abord, l'automatisation voit `community_review.final`
+ *   et abandonne sa mise à jour.
+ */
+async function applyAutomatedTweetUpdate(tweetId, patch) {
+  return Tweet.sequelize.transaction(async (tx) => {
+    const current = await Tweet.findByPk(tweetId, {
+      transaction: tx,
+      lock: tx.LOCK.UPDATE,
+      paranoid: false,
+    });
+    if (!current) return null;
+
+    if (current.metadata?.community_review?.final === true) {
+      logger.info(
+        `[tweetRoutes] résultat automatique ignoré pour ${tweetId} : `
+        + `verdict communautaire final « ${current.metadata.community_review.verdict} »`,
+      );
+      return null;
+    }
+
+    const { metadata, ...fields } = patch;
+    await current.update({
+      ...fields,
+      ...(metadata ? { metadata: { ...(current.metadata || {}), ...metadata } } : {}),
+    }, { transaction: tx });
+    return current;
+  });
+}
+
+/**
+ * Même priorité pour les sanctions de compte automatiques. La lecture du
+ * verdict et l'écriture du ban partagent le verrou du tweet avec la revue :
+ * aucune suspension automatique ne peut donc arriver après son verdict final.
+ */
+async function applyAutomaticSuspension(tweetId, userId, buildPatch) {
+  return Tweet.sequelize.transaction(async (tx) => {
+    const currentTweet = await Tweet.findByPk(tweetId, {
+      transaction: tx,
+      lock: tx.LOCK.UPDATE,
+      paranoid: false,
+    });
+    if (!currentTweet || currentTweet.metadata?.community_review?.final === true) return null;
+
+    const user = await User.findByPk(userId, { transaction: tx, lock: tx.LOCK.UPDATE });
+    if (!user) return null;
+
+    await user.update(buildPatch(user), { transaction: tx });
+    return user;
+  });
+}
 
 // ========================================
 // ROUTES PUBLIQUES (sans authentification)
@@ -113,7 +181,7 @@ router.get('/', [
                 {
                   model: User,
                   as: 'author',
-                  attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'],
+                  attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization'],
                   where: { is_active: true }
                 }
               ]
@@ -222,13 +290,13 @@ router.get('/', [
                 {
                   model: User,
                   as: 'author',
-                  attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'],
+                  attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization'],
                   where: { is_active: true }
                 },
                 {
                   model: Tweet,
                   as: 'originalTweet',
-                  include: [{ model: User, as: 'author', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'] }]
+                  include: [{ model: User, as: 'author', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization'] }]
                 }
               ]
             });
@@ -252,18 +320,21 @@ router.get('/', [
                   tweetData.parentTweet = null;
                 }
 
-                // Calcul des stats (peut être optimisé plus tard via caching)
-                const lCount = await TweetLike.countTweetLikes(tweetData.id);
-                const rtCount = await TweetRetweet.countTweetRetweets(tweetData.id);
-                const repCount = await Tweet.count({ where: { parent_tweet_id: tweetData.id, is_data_test: false } });
-                const iLiked = await TweetLike.hasUserLikedTweet(userId, tweetData.id);
-                const iRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, tweetData.id);
+                // Calcul des stats (peut être optimisé plus tard via caching).
+                // Un retweet pur emprunte les compteurs de son original.
+                const sId = engagementTargetId(tweetData);
+                const ownStats = sId === String(tweetData.id);
+                const lCount = await TweetLike.countTweetLikes(sId);
+                const rtCount = await TweetRetweet.countTweetRetweets(sId);
+                const repCount = await Tweet.count({ where: { parent_tweet_id: sId, is_data_test: false } });
+                const iLiked = await TweetLike.hasUserLikedTweet(userId, sId);
+                const iRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, sId);
 
                 tweetData.stats = {
                   likes: lCount,
                   retweets: rtCount,
                   replies: repCount,
-                  views: tweetData.view_count || 0
+                  views: (ownStats ? tweetData.view_count : tweetData.originalTweet?.view_count) || 0
                 };
 
                 tweetData.user_interaction = {
@@ -295,7 +366,7 @@ router.get('/', [
                   let uMap = {};
                   const adUsers = await User.findAll({
                     where: { id: uIds },
-                    attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium']
+                    attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
                   });
                   adUsers.forEach(u => { uMap[u.id] = u.toJSON(); });
 
@@ -395,7 +466,7 @@ router.get('/', [
         {
           model: User,
           as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'],
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization'],
           where: { is_active: true }
         },
         {
@@ -404,7 +475,7 @@ router.get('/', [
           include: [{
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'verification_style', 'premium']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
           }]
         }
       ],
@@ -428,16 +499,21 @@ router.get('/', [
         tweetData.parentTweet = null;
       }
 
+      // Un retweet pur ne porte aucun engagement propre : ses compteurs et
+      // l'état d'interaction sont ceux du tweet d'origine.
+      const statsId = engagementTargetId(tweetData);
+      const isOwnStats = statsId === String(tweet.id);
+
       // Calculer les statistiques
-      const likeCount = await TweetLike.countTweetLikes(tweet.id);
-      const retweetCount = await TweetRetweet.countTweetRetweets(tweet.id);
+      const likeCount = await TweetLike.countTweetLikes(statsId);
+      const retweetCount = await TweetRetweet.countTweetRetweets(statsId);
       const replyCount = await Tweet.count({
-        where: { parent_tweet_id: tweet.id, is_data_test: false }
+        where: { parent_tweet_id: statsId, is_data_test: false }
       });
 
       // Vérifier si l'utilisateur connecté a liké/retweeté ce tweet (obligatoire)
-      const isLiked = await TweetLike.hasUserLikedTweet(userId, tweet.id);
-      const isRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, tweet.id);
+      const isLiked = await TweetLike.hasUserLikedTweet(userId, statsId);
+      const isRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, statsId);
 
       return {
         ...tweetData,
@@ -445,7 +521,7 @@ router.get('/', [
           likes: likeCount,
           retweets: retweetCount,
           replies: replyCount,
-          views: tweet.view_count || 0
+          views: (isOwnStats ? tweet.view_count : tweetData.originalTweet?.view_count) || 0
         },
         user_interaction: {
           is_liked: isLiked,
@@ -463,7 +539,7 @@ router.get('/', [
           let uMap = {};
           const adUsers = await User.findAll({
             where: { id: uIds },
-            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
           });
           adUsers.forEach(u => { uMap[u.id] = u.toJSON(); });
 
@@ -547,7 +623,7 @@ router.get('/:id', [
       }
 
       const adAuthor = await User.findByPk(ad.user_id, {
-        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium']
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
       });
 
       const fallbackAuthor = {
@@ -590,7 +666,7 @@ router.get('/:id', [
         {
           model: User,
           as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'verification_style', 'premium']
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
         },
         {
           model: Tweet,
@@ -598,7 +674,7 @@ router.get('/:id', [
           include: [{
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'profile_customization']
           }]
         },
         {
@@ -607,7 +683,7 @@ router.get('/:id', [
           include: [{
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'profile_customization']
           }],
           order: [['created_at', 'ASC']],
           limit: 10
@@ -622,23 +698,50 @@ router.get('/:id', [
       });
     }
 
-    // Incrémenter le compteur de vues
-    await tweet.increment('view_count');
+    // Incrémenter le compteur de vues.
+    //
+    // Volontairement pas attendu : personne ne lit le résultat de cette
+    // écriture, et l'attendre ajoutait un aller-retour SQL avant la réponse.
+    // Le `catch` est obligatoire — sans lui, un échec deviendrait un rejet de
+    // promesse non gérée, qui tue le process sous Node 16+.
+    tweet.increment('view_count').catch((err) => {
+      logger.warn(`Increment view_count echoue pour ${tweet.id}: ${err.message}`);
+    });
 
     // Enrichir avec statistiques et état d'interaction pour l'utilisateur courant
     const userId = req.user?.id;
     let enrichedTweet = tweet.toJSON();
 
-    const likeCount = await TweetLike.countTweetLikes(tweet.id);
-    const retweetCount = await TweetRetweet.countTweetRetweets(tweet.id);
-    const replyCount = await Tweet.count({ where: { parent_tweet_id: tweet.id, is_data_test: false } });
+    // Sur un retweet pur, l'engagement appartient au tweet d'origine.
+    const statsId = engagementTargetId(enrichedTweet);
+    const isOwnStats = statsId === String(tweet.id);
 
-    let isLiked = false;
-    let isRetweeted = false;
-    if (userId) {
-      isLiked = await TweetLike.hasUserLikedTweet(userId, tweet.id);
-      isRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, tweet.id);
-    }
+    // Cette route ne charge pas `originalTweet` : on lit le compteur de vues
+    // directement en base plutôt que de le déduire d'une relation absente,
+    // sinon un retweet affiche 0 vue au lieu de celles de l'original.
+    // Ces six lectures sont indépendantes les unes des autres : enchaînées en
+    // `await` successifs, elles coûtaient six allers-retours SQL en série
+    // avant que la réponse ne parte. En parallèle, c'est le temps de la plus
+    // lente.
+    const [
+      statsViewsRow,
+      likeCount,
+      retweetCount,
+      replyCount,
+      isLiked,
+      isRetweeted,
+    ] = await Promise.all([
+      isOwnStats ? null : Tweet.findByPk(statsId, { attributes: ['view_count'] }),
+      TweetLike.countTweetLikes(statsId),
+      TweetRetweet.countTweetRetweets(statsId),
+      Tweet.count({ where: { parent_tweet_id: statsId, is_data_test: false } }),
+      userId ? TweetLike.hasUserLikedTweet(userId, statsId) : false,
+      userId ? TweetRetweet.hasUserRetweetedTweet(userId, statsId) : false,
+    ]);
+
+    const statsViews = isOwnStats
+      ? (enrichedTweet.view_count || 0)
+      : (statsViewsRow?.view_count || 0);
 
     enrichedTweet = {
       ...enrichedTweet,
@@ -646,7 +749,7 @@ router.get('/:id', [
         likes: likeCount,
         retweets: retweetCount,
         replies: replyCount,
-        views: enrichedTweet.view_count || 0
+        views: statsViews
       },
       user_interaction: {
         is_liked: isLiked,
@@ -654,35 +757,108 @@ router.get('/:id', [
       }
     };
 
-    // Enrichir sommairement les réponses (statistiques de base + pas d'agrégats lourds)
-    if (Array.isArray(enrichedTweet.replies)) {
-      enrichedTweet.replies = await Promise.all(enrichedTweet.replies.map(async (reply) => {
-        const rLikeCount = await TweetLike.countTweetLikes(reply.id);
-        const rRetweetCount = await TweetRetweet.countTweetRetweets(reply.id);
-        const rReplyCount = await Tweet.count({ where: { parent_tweet_id: reply.id, is_data_test: false } });
-        let rIsLiked = false;
-        let rIsRetweeted = false;
-        if (userId) {
-          rIsLiked = await TweetLike.hasUserLikedTweet(userId, reply.id);
-          rIsRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, reply.id);
-        }
+    // Enrichir sommairement les réponses (statistiques de base + pas d'agrégats lourds).
+    //
+    // Cinq requêtes par réponse, soit cinquante pour dix réponses, et cinq en
+    // série pour chacune. On agrège maintenant les cinq mêmes informations
+    // pour toutes les réponses d'un coup : cinq requêtes au total, lancées en
+    // parallèle. Le rendu est identique, seul le nombre d'allers-retours change.
+    if (Array.isArray(enrichedTweet.replies) && enrichedTweet.replies.length > 0) {
+      const replyIds = enrichedTweet.replies.map((r) => String(r.id));
+
+      const [rLikes, rRetweets, rReplies, rLikedByMe, rRetweetedByMe] = await Promise.all([
+        TweetLike.countLikesForTweets(replyIds),
+        TweetRetweet.countRetweetsForTweets(replyIds),
+        Tweet.countRepliesForTweets(replyIds),
+        TweetLike.likedTweetIdsForUser(userId, replyIds),
+        TweetRetweet.retweetedTweetIdsForUser(userId, replyIds),
+      ]);
+
+      enrichedTweet.replies = enrichedTweet.replies.map((reply) => {
+        const rid = String(reply.id);
         return {
           ...reply,
           stats: {
-            likes: rLikeCount,
-            retweets: rRetweetCount,
-            replies: rReplyCount,
+            likes: rLikes.get(rid) || 0,
+            retweets: rRetweets.get(rid) || 0,
+            replies: rReplies.get(rid) || 0,
             views: reply.view_count || 0
           },
           user_interaction: {
-            is_liked: rIsLiked,
-            is_retweeted: rIsRetweeted
+            is_liked: rLikedByMe.has(rid),
+            is_retweeted: rRetweetedByMe.has(rid)
           }
         };
-      }));
+      });
     }
 
-    // 📊 Enregistrer la vue pour le CTR tracking (algorithme Rust)
+    // Construire toute la chaine de conversation, de la racine au parent
+    // direct. La relation Sequelize `parentTweet` ne contient qu'un niveau :
+    // sans cette remontee, ouvrir une reponse isolait le message et cassait la
+    // lecture naturelle d'un thread.
+    const ancestorInstances = [];
+    const seenAncestorIds = new Set([String(enrichedTweet.id)]);
+    let nextParentId = enrichedTweet.parent_tweet_id;
+
+    while (nextParentId && ancestorInstances.length < 50) {
+      const normalizedParentId = String(nextParentId);
+      if (seenAncestorIds.has(normalizedParentId)) break;
+      seenAncestorIds.add(normalizedParentId);
+
+      const ancestor = await Tweet.findOne({
+        where: {
+          id: normalizedParentId,
+          is_private: false,
+          moderation_status: { [Op.notIn]: ['not_eligible', 'rejected'] }
+        },
+        include: [{
+          model: User,
+          as: 'author',
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
+        }]
+      });
+
+      if (!ancestor) break;
+      ancestorInstances.push(ancestor);
+      nextParentId = ancestor.parent_tweet_id;
+    }
+
+    // Même regroupement que pour les réponses : cinq requêtes pour toute la
+    // chaîne, au lieu de cinq par ancêtre. Sur un fil profond, c'était la
+    // seconde source d'allers-retours après les réponses.
+    const ancestorsData = ancestorInstances.reverse().map((a) => a.toJSON());
+    const ancestorStatsIds = ancestorsData.map((a) => String(engagementTargetId(a)));
+
+    if (ancestorsData.length > 0) {
+      const [aLikes, aRetweets, aReplies, aLikedByMe, aRetweetedByMe] = await Promise.all([
+        TweetLike.countLikesForTweets(ancestorStatsIds),
+        TweetRetweet.countRetweetsForTweets(ancestorStatsIds),
+        Tweet.countRepliesForTweets(ancestorStatsIds),
+        TweetLike.likedTweetIdsForUser(userId, ancestorStatsIds),
+        TweetRetweet.retweetedTweetIdsForUser(userId, ancestorStatsIds),
+      ]);
+
+      enrichedTweet.thread_ancestors = ancestorsData.map((ancestorData) => {
+        const sid = String(engagementTargetId(ancestorData));
+        return {
+          ...ancestorData,
+          stats: {
+            likes: aLikes.get(sid) || 0,
+            retweets: aRetweets.get(sid) || 0,
+            replies: aReplies.get(sid) || 0,
+            views: ancestorData.view_count || 0
+          },
+          user_interaction: {
+            is_liked: aLikedByMe.has(sid),
+            is_retweeted: aRetweetedByMe.has(sid)
+          }
+        };
+      });
+    } else {
+      enrichedTweet.thread_ancestors = [];
+    }
+
+    // Enregistrer la vue pour le CTR tracking (algorithme Rust).
     if (userId && !id.startsWith('ad-')) {
       ctrTracker.trackTweetView(userId, id).catch(err => {
         logger.warn(`CTR tracking error: ${err.message}`);
@@ -729,6 +905,9 @@ router.get('/:id/similar', [
     }
 
     // 2. Récupérer un pool de candidats récents (50 derniers tweets originaux approuvés)
+    // ⚠️ Sans `include` sur l'auteur, `tweet.toJSON()` plus bas ne contient
+    // aucune clé `author` : côté mobile ça retombait sur les valeurs par
+    // défaut ("Utilisateur", @ vide, pas d'avatar) pour CHAQUE tweet similaire.
     const candidates = await Tweet.findAll({
       where: {
         id: { [Op.ne]: id },
@@ -736,6 +915,13 @@ router.get('/:id/similar', [
         deleted_at: null,
         moderation_status: 'approved'
       },
+      include: [
+        {
+          model: User,
+          as: 'author',
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
+        }
+      ],
       order: [['created_at', 'DESC']],
       limit: 50
     });
@@ -812,16 +998,12 @@ router.post('/', [
   authenticateToken,
   denySuspended,
   body('content').trim().isLength({ min: 1 }).withMessage('Le contenu ne peut pas être vide')
-    .custom((value, { req }) => {
-      if (!req.user?.verified && value.length > 600) {
-        throw new Error('Le contenu doit contenir entre 1 et 600 caractères');
-      }
-      return true;
-    }),
+    .custom(assertTweetLength),
   body('parent_tweet_id').optional().isUUID().withMessage('ID de tweet parent invalide'),
   body('media_urls').optional().isArray().withMessage('Les URLs des médias doivent être un tableau'),
   body('is_private').optional().isBoolean().withMessage('Le statut privé doit être un booléen'),
   body('is_sensitive').optional().isBoolean().withMessage('Le statut sensible doit être un booléen'),
+  body('translation_enabled').optional().isBoolean().withMessage('L\'option de traduction doit être un booléen'),
   handleValidationErrors
 ], async (req, res) => {
   try {
@@ -855,10 +1037,48 @@ router.post('/', [
       is_private = false,
       is_sensitive = false,
       location,
-      language = 'fr'
+      language = 'fr',
+      ab_test,
+      translation_enabled = false
     } = req.body;
 
     const userId = req.user.id;
+
+    /**
+     * « Traduction (bêta) » : option Pro uniquement. Le palier est revérifié
+     * en base (le client peut envoyer n'importe quoi) et un refus est explicite
+     * plutôt que silencieux — sinon l'auteur croirait son tweet traduit alors
+     * qu'aucune traduction n'existerait jamais.
+     */
+    let translationEnabled = false;
+    if (translation_enabled === true) {
+      translationEnabled = await tweetTranslationService.canUseTranslation(req.user);
+      if (!translationEnabled) {
+        return res.status(403).json({
+          success: false,
+          message: 'La traduction automatique est réservée aux abonnés Pro actifs.',
+          code: 'TRANSLATION_REQUIRES_PRO'
+        });
+      }
+    }
+    let experimentRequest = null;
+    try {
+      experimentRequest = normalizeExperimentRequest(ab_test, content);
+      if (experimentRequest) {
+        await assertAbTestEligible({
+          userId,
+          client: req.headers['x-twitninf-client'],
+          parentTweetId: parent_tweet_id,
+          isPrivate: is_private,
+        });
+      }
+    } catch (abError) {
+      if (abError instanceof AbTestRequestError) {
+        return res.status(abError.status).json({ success: false, message: abError.message });
+      }
+      throw abError;
+    }
+
     let original_tweet_id = null;
     let final_tweet_type = 'tweet';
 
@@ -896,33 +1116,59 @@ router.post('/', [
     }
 
     // Créer le tweet en statut "pending" pour traitement asynchrone
-    const tweet = await Tweet.create({
-      content,
-      user_id: userId,
-      parent_tweet_id,
-      original_tweet_id,
-      tweet_type: final_tweet_type,
-      media_urls,
-      is_private,
-      is_sensitive,
-      location,
-      language,
-      moderation_status: 'pending', // En attente de traitement
-      metadata: {
-        source: req.userPlatform || 'web',
-        device: req.headers['user-agent'] || 'unknown',
-        ip_address: req.ip,
-        created_at: new Date().toISOString(),
-        pending_processing: true
+    const creationTransaction = experimentRequest ? await sequelize.transaction() : null;
+    let tweet;
+    let abExperiment = null;
+    try {
+      tweet = await Tweet.create({
+        content,
+        user_id: userId,
+        parent_tweet_id,
+        original_tweet_id,
+        tweet_type: final_tweet_type,
+        media_urls,
+        is_private,
+        is_sensitive,
+        location,
+        language,
+        translation_enabled: translationEnabled,
+        moderation_status: 'pending', // En attente de traitement
+        metadata: {
+          source: req.userPlatform || 'web',
+          device: req.headers['user-agent'] || 'unknown',
+          ip_address: req.ip,
+          created_at: new Date().toISOString(),
+          pending_processing: true,
+          ...(experimentRequest ? {
+            ab_test: {
+              status: 'pending',
+              platform_scope: 'windows',
+              variant_count: experimentRequest.contents.length,
+            },
+          } : {}),
+        }
+      }, creationTransaction ? { transaction: creationTransaction } : undefined);
+
+      if (experimentRequest) {
+        abExperiment = await createAbTestExperiment({
+          tweetId: tweet.id,
+          authorId: userId,
+          contents: experimentRequest.contents,
+          transaction: creationTransaction,
+        });
       }
-    });
+      if (creationTransaction) await creationTransaction.commit();
+    } catch (creationError) {
+      if (creationTransaction) await creationTransaction.rollback();
+      throw creationError;
+    }
 
     // Récupérer le tweet avec l'auteur
     const tweetWithAuthor = await Tweet.findByPk(tweet.id, {
       include: [{
         model: User,
         as: 'author',
-        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'verification_style', 'premium']
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
       }]
     });
 
@@ -960,18 +1206,43 @@ router.post('/', [
         );
 
         if (processResult.success) {
-          // Mettre à jour le statut de modération
-          await tweet.update({
+          // Le verdict communautaire, s'il existe déjà, reste prioritaire.
+          const automatedUpdate = await applyAutomatedTweetUpdate(tweet.id, {
             moderation_status: processResult.moderation_status,
             moderation_reason: processResult.moderation_reason,
             metadata: {
-              ...tweet.metadata,
               processing_result: processResult,
               processed_at: processResult.processed_at
             }
           });
+          if (!automatedUpdate) {
+            if (abExperiment) {
+              await cancelAbTestExperiment(abExperiment.id, 'community_verdict_final');
+            }
+            return;
+          }
+
+          if (abExperiment) {
+            if (processResult.moderation_status === 'approved') {
+              await moderateAndActivateExperiment(abExperiment.id, author.username);
+            } else {
+              await cancelAbTestExperiment(
+                abExperiment.id,
+                `control_${processResult.moderation_status || 'not_approved'}`,
+              );
+            }
+          }
 
           logger.info(`✅ Tweet ${tweet.id} traité avec succès: ${processResult.moderation_status}`);
+
+          // 🌍 Traduction (bêta) — seulement après un verdict « approved » :
+          // traduire un tweet rejeté ou non éligible dépenserait du LLM pour un
+          // contenu que personne ne verra jamais dans le fil.
+          if (translationEnabled && processResult.moderation_status === 'approved') {
+            tweetTranslationService.translateTweet(tweet.id).catch((err) => {
+              logger.warn(`[translation] Traduction du tweet ${tweet.id} échouée: ${err.message}`);
+            });
+          }
 
           // 🎬 [VideoReco] Notify the engine if it's a video
           if (tweet.tweet_type === 'video' && processResult.moderation_status === 'approved') {
@@ -986,11 +1257,10 @@ router.post('/', [
           if (processResult.moderation_status === 'approved') {
             try {
               // Marquer le tweet comme tweet à tester dans le système progressif
-              await tweet.update({
+              await applyAutomatedTweetUpdate(tweet.id, {
                 recommendation_group: 'initial', // Groupe initial pour test
                 view_count: 0, // Commencer à 0 vues
                 metadata: {
-                  ...tweet.metadata,
                   progressive_testing: {
                     added_at: new Date().toISOString(),
                     status: 'testing',
@@ -1037,29 +1307,30 @@ router.post('/', [
             // 🚨 BAN AUTOMATIQUE si Gemini dit "ban"
             if (processResult.gemini_result?.decision === 'ban') {
               try {
-                // Récupérer l'utilisateur et le bannir directement
-                const user = await User.findByPk(userId);
-
-                if (user) {
-                  logger.info(`🚨 BAN AUTOMATIQUE pour @${user.username}`);
-
-                  // Bannir pour une semaine
+                const user = await applyAutomaticSuspension(tweet.id, userId, (currentUser) => {
                   const oneWeekFromNow = new Date();
                   oneWeekFromNow.setDate(oneWeekFromNow.getDate() + 7);
-
-                  await user.update({
+                  return {
                     is_suspended: true,
                     suspended_at: new Date(),
                     suspended_until: oneWeekFromNow,
                     suspension_reason: `Ban automatique: ${processResult.gemini_result.reason || 'Contenu interdit'}`,
                     suspension_meta: {
+                      ...(currentUser.suspension_meta || {}),
                       auto_ban: true,
                       gemini_decision: 'ban',
                       tweet_id: tweet.id
                     }
-                  });
-
+                  };
+                });
+                if (user) {
+                  logger.info(`🚨 BAN AUTOMATIQUE pour @${user.username}`);
                   logger.info(`🔒 UTILISATEUR @${user.username} BANNI POUR 1 SEMAINE`);
+                } else {
+                  logger.info(
+                    `[tweetRoutes] ban automatique ignoré pour ${tweet.id} : `
+                    + 'verdict communautaire final déjà rendu',
+                  );
                 }
               } catch (banError) {
                 logger.error(`❌ Erreur lors du ban automatique pour l'utilisateur ${userId}:`, banError);
@@ -1101,7 +1372,7 @@ router.post('/', [
                 logger.info(`Fanout followers ignoré (non original): tweet ${tweet.id}`);
               } else {
                 const followers = await User.sequelize.models.UserFollow.findAll({
-                  where: { following_id: userId },
+                  where: { following_id: userId, status: 'active' },
                   attributes: ['follower_id']
                 });
                 if (Array.isArray(followers) && followers.length > 0) {
@@ -1140,24 +1411,28 @@ router.post('/', [
           }
 
         } else {
+          if (abExperiment) {
+            await cancelAbTestExperiment(abExperiment.id, 'control_moderation_failed');
+          }
           logger.error(`❌ Échec du traitement du tweet ${tweet.id}:`, processResult.error);
           // Fallback: approuver le tweet en cas d'erreur
-          await tweet.update({
+          await applyAutomatedTweetUpdate(tweet.id, {
             moderation_status: 'approved',
             metadata: {
-              ...tweet.metadata,
               processing_error: processResult.error,
               processed_at: processResult.processed_at
             }
           });
         }
       } catch (error) {
+        if (abExperiment) {
+          await cancelAbTestExperiment(abExperiment.id, 'processing_error').catch(() => {});
+        }
         logger.error(`❌ Erreur lors du traitement asynchrone du tweet ${tweet.id}:`, error);
         // Fallback: approuver le tweet en cas d'erreur
-        await tweet.update({
+        await applyAutomatedTweetUpdate(tweet.id, {
           moderation_status: 'approved',
           metadata: {
-            ...tweet.metadata,
             processing_error: error.message,
             processed_at: new Date().toISOString()
           }
@@ -1229,7 +1504,14 @@ router.post('/', [
     res.status(201).json({
       success: true,
       message: 'Tweet créé avec succès',
-      data: tweetWithAuthor
+      data: abExperiment ? {
+        ...tweetWithAuthor.toJSON(),
+        ab_test: {
+          experiment_id: abExperiment.id,
+          status: 'pending',
+          variant_count: abExperiment.variants.length,
+        },
+      } : tweetWithAuthor
     });
 
   } catch (error) {
@@ -1370,12 +1652,7 @@ router.put('/:id', [
   authenticateToken,
   param('id').isUUID().withMessage('ID de tweet invalide'),
   body('content').trim().isLength({ min: 1 }).withMessage('Le contenu ne peut pas être vide')
-    .custom((value, { req }) => {
-      if (!req.user?.verified && value.length > 600) {
-        throw new Error('Le contenu doit contenir entre 1 et 600 caractères');
-      }
-      return true;
-    }),
+    .custom(assertTweetLength),
   body('media_urls').optional().isArray().withMessage('Les URLs des médias doivent être un tableau'),
   body('is_private').optional().isBoolean().withMessage('Le statut privé doit être un booléen'),
   body('is_sensitive').optional().isBoolean().withMessage('Le statut sensible doit être un booléen'),
@@ -1421,7 +1698,7 @@ router.put('/:id', [
       include: [{
         model: User,
         as: 'author',
-        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'verification_style', 'premium']
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
       }]
     });
 
@@ -1502,12 +1779,14 @@ router.post('/:id/like', [
   handleValidationErrors
 ], async (req, res) => {
   try {
-    const { id } = req.params;
     const userId = req.user.id;
 
-    // Vérifier que le tweet existe
-    const tweet = await Tweet.findByPk(id);
-    if (!tweet) {
+    // Un like posé sur un retweet appartient au tweet d'origine : les
+    // compteurs affichés sont ceux de l'original, l'écriture doit donc viser
+    // la même ligne sous peine de ne jamais faire bouger le nombre affiché.
+    const { tweet: requested, targetTweet: tweet, targetId: id } =
+      await resolveEngagementTarget(Tweet, req.params.id);
+    if (!requested) {
       return res.status(404).json({
         success: false,
         message: 'Tweet non trouvé'
@@ -1631,13 +1910,15 @@ router.post('/:id/retweet', [
   handleValidationErrors
 ], async (req, res) => {
   try {
-    const { id } = req.params;
     const { comment } = req.body;
     const userId = req.user.id;
 
-    // Vérifier que le tweet existe
-    const tweet = await Tweet.findByPk(id);
-    if (!tweet) {
+    // Retweeter un retweet retweete l'original (sémantique Twitter) : sans
+    // cette résolution on empilait des retweets de retweets, chacun avec ses
+    // propres compteurs à zéro.
+    const { tweet: requested, targetTweet: tweet, targetId: id } =
+      await resolveEngagementTarget(Tweet, req.params.id);
+    if (!requested) {
       return res.status(404).json({
         success: false,
         message: 'Tweet non trouvé'
@@ -1766,15 +2047,15 @@ router.post('/:id/retweet', [
             );
 
             if (processResult.success) {
-              await childTweet.update({
+              const automatedUpdate = await applyAutomatedTweetUpdate(childTweet.id, {
                 moderation_status: processResult.moderation_status,
                 moderation_reason: processResult.moderation_reason,
                 metadata: {
-                  ...childTweet.metadata,
                   processing_result: processResult,
                   processed_at: processResult.processed_at
                 }
               });
+              if (!automatedUpdate) return;
 
               logger.info(`✅ Tweet cité ${childTweet.id} traité avec succès: ${processResult.moderation_status}`);
 
@@ -1822,10 +2103,9 @@ router.post('/:id/retweet', [
               }
             } else {
               logger.error(`❌ Échec du traitement du tweet cité ${childTweet.id}:`, processResult.error);
-              await childTweet.update({
+              await applyAutomatedTweetUpdate(childTweet.id, {
                 moderation_status: 'approved',
                 metadata: {
-                  ...childTweet.metadata,
                   processing_error: processResult.error,
                   processed_at: processResult.processed_at
                 }
@@ -1833,10 +2113,9 @@ router.post('/:id/retweet', [
             }
           } catch (error) {
             logger.error(`❌ Erreur lors du traitement asynchrone du tweet cité ${childTweet.id}:`, error);
-            await childTweet.update({
+            await applyAutomatedTweetUpdate(childTweet.id, {
               moderation_status: 'approved',
               metadata: {
-                ...childTweet.metadata,
                 processing_error: error.message,
                 processed_at: new Date().toISOString()
               }
@@ -1917,6 +2196,89 @@ router.post('/:id/retweet', [
 });
 
 /**
+ * POST /api/tweets/translations/batch
+ * Traductions de plusieurs tweets dans UNE langue.
+ *
+ * C'est la route du fil : sans elle, afficher une page de tweets dans la
+ * langue du lecteur coûterait un appel par carte.
+ */
+router.post('/translations/batch', [
+  authenticateToken,
+  body('tweet_ids').isArray({ min: 1, max: 100 }).withMessage('tweet_ids doit être un tableau de 1 à 100 identifiants'),
+  body('language').isString().withMessage('Langue invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const language = String(req.body.language || '').trim().toLowerCase();
+    const translations = await tweetTranslationService.getTranslationsForLanguage(
+      req.body.tweet_ids,
+      language,
+    );
+
+    res.json({
+      success: true,
+      message: 'Traductions récupérées avec succès',
+      data: { language, translations }
+    });
+  } catch (error) {
+    logger.error('Erreur lors de la récupération groupée des traductions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * GET /api/tweets/:id/translations
+ * Traductions IA disponibles d'un tweet (fonctionnalité « Traduction bêta »).
+ *
+ * Lecture seule et sans appel au LLM : tout a été généré à la publication.
+ * Un retweet renvoie les traductions du tweet d'origine — c'est bien ce
+ * texte-là qui s'affiche sur la carte.
+ */
+router.get('/:id/translations', [
+  param('id').isUUID().withMessage('ID de tweet invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    // `targetTweet` et pas `tweet` : sur un retweet pur, c'est l'original qui
+    // porte l'option et la langue source, comme il porte déjà son contenu.
+    const { tweet, targetTweet, targetId } = await resolveEngagementTarget(Tweet, req.params.id);
+    if (!tweet) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tweet non trouvé'
+      });
+    }
+
+    const source = targetTweet || tweet;
+    const translations = await tweetTranslationService.getTranslations(targetId);
+
+    res.json({
+      success: true,
+      message: 'Traductions récupérées avec succès',
+      data: {
+        tweet_id: targetId,
+        source_language: source.language || null,
+        // Faux vide et vrai vide ne se soignent pas pareil côté app : sans ce
+        // drapeau, un tweet dont la génération vient d'échouer serait présenté
+        // comme un tweet sans option de traduction.
+        translation_enabled: !!source.translation_enabled,
+        translations
+      }
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des traductions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
  * GET /api/tweets/:id/likes
  * Récupérer la liste des utilisateurs qui ont liké un tweet
  */
@@ -1927,11 +2289,11 @@ router.get('/:id/likes', [
   handleValidationErrors
 ], async (req, res) => {
   try {
-    const { id } = req.params;
     const { limit = 20, offset = 0 } = req.query;
 
-    // Vérifier que le tweet existe
-    const tweet = await Tweet.findByPk(id);
+    // La liste des likeurs d'un retweet est celle du tweet d'origine, en
+    // cohérence avec le compteur affiché sur la carte.
+    const { tweet, targetId: id } = await resolveEngagementTarget(Tweet, req.params.id);
     if (!tweet) {
       return res.status(404).json({
         success: false,
@@ -1981,11 +2343,10 @@ router.get('/:id/retweets', [
   handleValidationErrors
 ], async (req, res) => {
   try {
-    const { id } = req.params;
     const { limit = 20, offset = 0 } = req.query;
 
-    // Vérifier que le tweet existe
-    const tweet = await Tweet.findByPk(id);
+    // Même logique que /likes : les retweeteurs listés sont ceux de l'original.
+    const { tweet, targetId: id } = await resolveEngagementTarget(Tweet, req.params.id);
     if (!tweet) {
       return res.status(404).json({
         success: false,
@@ -2049,7 +2410,7 @@ router.get('/:id/retweets', [
           {
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
           }
         ]
       });
@@ -2093,7 +2454,7 @@ router.get('/:id/retweets', [
         {
           model: User,
           as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium'],
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization'],
           where: { is_active: true }
         }
       ];
@@ -2119,39 +2480,53 @@ router.get('/:id/retweets', [
         offset: parseInt(offset)
       });
 
-      // Enrichir les réponses avec les statistiques et l'état des interactions
-      const enrichedReplies = await Promise.all(replies.map(async (reply) => {
+      // Enrichir les réponses avec les statistiques et l'état des interactions.
+      //
+      // Cinq requêtes par réponse, soit cent pour une page de vingt, et cinq
+      // en série pour chacune. On agrège les cinq mêmes informations pour
+      // toute la page d'un coup, et on y joint les deux compteurs du parent
+      // ainsi que le total de pagination — tout est indépendant, donc lancé en
+      // parallèle. Résultat identique, huit requêtes au lieu de cent trois.
+      const replyIds = replies.map((r) => String(r.id));
+      const parentId = String(parentTweet.id);
+
+      const [
+        rLikes,
+        rRetweets,
+        rReplies,
+        rLikedByMe,
+        rRetweetedByMe,
+        totalReplies,
+        parentLikes,
+        parentRetweets,
+      ] = await Promise.all([
+        TweetLike.countLikesForTweets(replyIds),
+        TweetRetweet.countRetweetsForTweets(replyIds),
+        Tweet.countRepliesForTweets(replyIds),
+        TweetLike.likedTweetIdsForUser(userId, replyIds),
+        TweetRetweet.retweetedTweetIdsForUser(userId, replyIds),
+        Tweet.count({ where: whereClause }),
+        TweetLike.countTweetLikes(parentId),
+        TweetRetweet.countTweetRetweets(parentId),
+      ]);
+
+      const enrichedReplies = replies.map((reply) => {
         const replyData = reply.toJSON();
-
-        // Calculer les statistiques
-        const likeCount = await TweetLike.countTweetLikes(reply.id);
-        const retweetCount = await TweetRetweet.countTweetRetweets(reply.id);
-        const replyCount = await Tweet.count({
-          where: { parent_tweet_id: reply.id, is_data_test: false }
-        });
-
-        // Vérifier si l'utilisateur connecté a liké/retweeté cette réponse
-        const isLiked = await TweetLike.hasUserLikedTweet(userId, reply.id);
-        const isRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, reply.id);
+        const rid = String(reply.id);
 
         return {
           ...replyData,
           stats: {
-            likes: likeCount,
-            retweets: retweetCount,
-            replies: replyCount,
+            likes: rLikes.get(rid) || 0,
+            retweets: rRetweets.get(rid) || 0,
+            replies: rReplies.get(rid) || 0,
             views: reply.view_count || 0
           },
           user_interaction: {
-            is_liked: isLiked,
-            is_retweeted: isRetweeted
+            is_liked: rLikedByMe.has(rid),
+            is_retweeted: rRetweetedByMe.has(rid)
           }
         };
-      }));
-
-      // Compter le total des réponses pour la pagination (avec la même clause que le fetch)
-      const totalReplies = await Tweet.count({
-        where: whereClause
       });
 
       // Informations sur le tweet parent
@@ -2161,8 +2536,8 @@ router.get('/:id/retweets', [
         author: parentTweet.author,
         created_at: parentTweet.created_at,
         stats: {
-          likes: await TweetLike.countTweetLikes(parentTweet.id),
-          retweets: await TweetRetweet.countTweetRetweets(parentTweet.id),
+          likes: parentLikes,
+          retweets: parentRetweets,
           replies: totalReplies,
           views: parentTweet.view_count || 0
         }
@@ -2236,15 +2611,20 @@ router.get('/:id/retweets', [
       logger.info(`🚫 Comptage des bans pour l'utilisateur ${userId}: ${banCount}`);
 
       if (banCount >= 3) {
-        const authorUser = await User.findByPk(userId);
+        const authorUser = await applyAutomaticSuspension(tweet.id, userId, (currentUser) => ({
+          is_active: true,
+          is_suspended: true,
+          suspended_at: new Date(),
+          suspension_reason: 'Récurrence de contenus interdits (>=3) détectés par KOSPORAI',
+          suspension_meta: {
+            ...(currentUser.suspension_meta || {}),
+            auto_ban: true,
+            auto_ban_source: 'rejected_content_threshold',
+            tweet_id: tweet.id,
+            rejected_count: banCount,
+          },
+        }));
         if (authorUser) {
-          authorUser.is_active = true;
-          authorUser.is_suspended = true;
-          authorUser.suspended_at = new Date();
-          authorUser.suspension_reason = 'Récurrence de contenus interdits (>=3) détectés par KOSPORAI';
-          // Plus de logique de ban_count, seulement is_suspended
-          await authorUser.save();
-
           logger.warn(`🚫 Compte suspendu pour l'utilisateur ${userId} après ${banCount} bans`);
 
           // Notification de suspension
@@ -2441,12 +2821,12 @@ router.post('/:id/bookmark', [
   handleValidationErrors
 ], async (req, res) => {
   try {
-    const { id } = req.params;
     const userId = req.user.id;
 
-    // Vérifier que le tweet existe
-    const tweet = await Tweet.findByPk(id);
-    if (!tweet) {
+    // Comme le like, un favori posé sur un retweet vise l'original.
+    const { tweet: requested, targetId: id } =
+      await resolveEngagementTarget(Tweet, req.params.id);
+    if (!requested) {
       return res.status(404).json({
         success: false,
         message: 'Tweet non trouvé'
@@ -2493,12 +2873,13 @@ router.post('/:id/share', [
   handleValidationErrors
 ], async (req, res) => {
   try {
-    const { id } = req.params;
     const userId = req.user.id;
 
-    // Vérifier que le tweet existe
-    const tweet = await Tweet.findByPk(id);
-    if (!tweet) {
+    // Partager un retweet doit produire le lien du tweet d'origine, pas celui
+    // d'une ligne de retweet qui n'affiche rien par elle-même.
+    const { tweet: requested, targetId: id } =
+      await resolveEngagementTarget(Tweet, req.params.id);
+    if (!requested) {
       return res.status(404).json({
         success: false,
         message: 'Tweet non trouvé'

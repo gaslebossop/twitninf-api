@@ -1,6 +1,14 @@
 /**
  * Abonnements payants (2 paliers au-dessus du gratuit).
- * Les montants sont en TWC (TwitCoins) pour une période par défaut de 30 jours.
+ *
+ * Les tarifs sont libellés en EUROS : c'est ça, le prix de l'offre. Le
+ * montant réellement débité en NF est recalculé AU COURS DU MOMENT, à chaque
+ * affichage comme à chaque achat — 15 € restent 15 € quand le cours bouge,
+ * seul le nombre de NF change.
+ *
+ * Les anciens montants (299 / 599) étaient figés en unités : ils dataient
+ * d'une époque où l'unité valait ~0,01 €, et représentaient des milliers
+ * d'euros au cours actuel du NF (~10 €).
  */
 const TIER = {
   FREE: 'free',
@@ -8,13 +16,37 @@ const TIER = {
   PRO: 'pro',
 };
 
-const DEFAULT_DURATION_DAYS = 30;
+const DEFAULT_DURATION_DAYS = 5;
 
-/** Prix catalogue pour une nouvelle souscription (30 j.) */
+/** Prix catalogue en euros pour une souscription (voir DEFAULT_DURATION_DAYS). */
+const TIER_PRICES_EUR = {
+  [TIER.PLUS]: 15,
+  [TIER.PRO]: 30,
+};
+
+/**
+ * Prix historiques en unités NF. Conservés uniquement comme filet de
+ * sécurité si le cours du NF est indisponible — ne rien tarifer dessus.
+ * @deprecated Utiliser TIER_PRICES_EUR + nfAmountForEur.
+ */
 const TIER_PRICES_TWC = {
   [TIER.PLUS]: 299,
   [TIER.PRO]: 599,
 };
+
+/**
+ * Convertit un prix en euros vers un montant de NF au cours donné.
+ * Arrondi au dix-millième : le débit reste juste à ~0,001 € près, et le
+ * montant affiché ne traîne pas quinze décimales.
+ * @returns {number|null} null si le cours est inexploitable.
+ */
+function nfAmountForEur(amountEur, nfPriceEur) {
+  const price = Number(nfPriceEur);
+  const amount = Number(amountEur);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return Math.round((amount / price) * 10000) / 10000;
+}
 
 function tierRank(tier) {
   if (tier === TIER.PRO) return 2;
@@ -25,6 +57,8 @@ function tierRank(tier) {
 module.exports = {
   TIER,
   DEFAULT_DURATION_DAYS,
+  TIER_PRICES_EUR,
   TIER_PRICES_TWC,
+  nfAmountForEur,
   tierRank,
 };

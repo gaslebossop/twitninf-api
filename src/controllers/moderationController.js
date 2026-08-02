@@ -1,8 +1,12 @@
 const { validationResult } = require('express-validator');
 const { Op, Sequelize } = require('sequelize');
-const { User, Tweet, Report, ModerationAction, VerificationRequest, UnbanTicket } = require('../models');
+const { sequelize, User, Tweet, Report, ModerationAction, VerificationRequest, UnbanTicket } = require('../models');
 const logger = require('../utils/logger');
 const ctrTracker = require('../services/ctrTracker');
+const reportScoring = require('../services/reportScoringService');
+const modNotif = require('../services/moderationNotificationService');
+const communityModeration = require('../services/communityModerationService');
+const { REPORT_CATEGORIES, categoriesFor } = require('../config/reportCategories');
 
 class ModerationController {
   // ===== GESTION DES SIGNALEMENTS =====
@@ -19,17 +23,51 @@ class ModerationController {
         });
       }
 
-      const { target_id, target_type, reason, severity = 'medium' } = req.body;
+      const { target_id, target_type, category, details, source } = req.body;
       const reporter_id = req.user.id;
 
-      // Vérifier que la cible existe
+      const catDef = REPORT_CATEGORIES[category];
+      if (!catDef) {
+        return res.status(400).json({
+          success: false,
+          message: 'Catégorie de signalement invalide'
+        });
+      }
+      if (!catDef.targets.includes(target_type)) {
+        return res.status(400).json({
+          success: false,
+          message: `La catégorie « ${catDef.label} » ne s'applique pas à ce type de contenu`
+        });
+      }
+      if (catDef.requiresDetails && !String(details || '').trim()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Merci de préciser le motif du signalement'
+        });
+      }
+
+      // Quotas : un compte seul ne doit pas pouvoir ensevelir la file.
+      const rate = await reportScoring.checkRateLimit(reporter_id);
+      if (!rate.allowed) {
+        return res.status(429).json({
+          success: false,
+          message: rate.message,
+          retry_after_minutes: rate.retryAfterMin
+        });
+      }
+
+      // Vérifier que la cible existe, et récupérer son propriétaire pour
+      // pouvoir refuser l'auto-signalement.
       let targetExists = false;
+      let targetOwnerId = null;
       if (target_type === 'tweet') {
-        const tweet = await Tweet.findByPk(target_id);
+        const tweet = await Tweet.findByPk(target_id, { attributes: ['id', 'user_id'] });
         targetExists = !!tweet;
+        targetOwnerId = tweet?.user_id || null;
       } else if (target_type === 'user') {
-        const user = await User.findByPk(target_id);
+        const user = await User.findByPk(target_id, { attributes: ['id'] });
         targetExists = !!user;
+        targetOwnerId = user?.id || null;
       }
 
       if (!targetExists) {
@@ -39,7 +77,17 @@ class ModerationController {
         });
       }
 
-      // Vérifier si l'utilisateur a déjà signalé cette cible
+      // Auto-signalement : la base en contenait déjà un. Sans intérêt pour la
+      // modération, et c'est un moyen simple de polluer ses propres métriques.
+      if (targetOwnerId && String(targetOwnerId) === String(reporter_id)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Vous ne pouvez pas signaler votre propre contenu'
+        });
+      }
+
+      // Doublon : ne bloque que si un signalement du même signaleur sur la
+      // même cible est encore ouvert.
       const existingReport = await Report.findOne({
         where: {
           reporter_id,
@@ -50,50 +98,116 @@ class ModerationController {
       });
 
       if (existingReport) {
-        return res.status(400).json({
+        return res.status(409).json({
           success: false,
-          message: 'Vous avez déjà signalé cette cible'
+          message: 'Vous avez déjà signalé ce contenu, notre équipe l\'examine.',
+          data: { report: { id: existingReport.id, status: existingReport.status } }
         });
       }
 
-                          // Créer le signalement
-        const reportData = {
-          reporter_id,
-          target_id,
-          target_type,
-          type: target_type, // Le type doit être 'user' ou 'tweet'
-          reason,
-          severity,
-          status: 'pending',
-          priority: 1
-        };
-       
-       console.log('📝 Données du signalement à créer:', reportData);
-       
-       const report = await Report.create(reportData);
+      // ── Notation ────────────────────────────────────────────────────
+      // La gravité n'est plus fournie par le client : elle découle de la
+      // catégorie, de la fiabilité du signaleur et de la convergence des
+      // signalements sur la même cible.
+      const reporterWeight = await reportScoring.getReporterWeight(reporter_id);
+      const weightedScore = reportScoring.scoreSingleReport(category, reporterWeight);
+
+      const reportData = {
+        reporter_id,
+        target_id,
+        target_type,
+        type: target_type,
+        category,
+        details: details ? String(details).trim().slice(0, 1000) : null,
+        source: source || 'unknown',
+        // `reason` reste renseigné : colonne NOT NULL, et les écrans de
+        // modération existants l'affichent encore.
+        reason: details ? `[${category}] ${String(details).trim().slice(0, 900)}` : `[${category}] ${catDef.label}`,
+        reporter_weight: reporterWeight,
+        weighted_score: weightedScore,
+        severity: catDef.baseSeverity,
+        priority: catDef.basePriority,
+        status: 'pending'
+      };
+
+      const report = await Report.create(reportData);
+
+      // ── Agrégation & escalade ───────────────────────────────────────
+      // Se fait APRÈS création pour que le signalement courant compte dans
+      // l'agrégat de la cible.
+      let escalation = null;
+      try {
+        const aggregate = await reportScoring.aggregateTarget(target_id, target_type);
+        escalation = reportScoring.evaluateEscalation({ category, aggregate });
+
+        await report.update({
+          severity: escalation.severity,
+          priority: escalation.priority,
+          status: escalation.status,
+          target_score: aggregate.totalScore,
+          auto_escalated: escalation.escalated,
+          escalated_at: escalation.escalated ? new Date() : null,
+          escalation_reason: escalation.escalationReasons.join(' · ') || null
+        });
+
+        // Une cible qui bascule en revue fait basculer TOUS ses signalements
+        // ouverts : sinon la file de modération montre le même contenu à deux
+        // priorités différentes selon le signalement regardé.
+        if (escalation.escalated && aggregate.reportIds.length > 1) {
+          await Report.update(
+            { status: 'investigating', priority: escalation.priority, target_score: aggregate.totalScore },
+            { where: { id: { [Op.in]: aggregate.reportIds }, status: 'pending' } }
+          );
+        }
+
+        if (escalation.escalated) {
+          logger.warn(
+            `[report] ESCALADE ${target_type} ${target_id} — ${escalation.escalationReasons.join(' · ')}`
+          );
+        }
+      } catch (scoreError) {
+        // Un échec de notation ne doit jamais faire perdre le signalement.
+        logger.error(`[report] escalade impossible pour ${report.id}: ${scoreError.message}`);
+      }
 
       // 📊 Track report pour l'algorithme Rust (si c'est un tweet)
       if (target_type === 'tweet') {
         ctrTracker.trackReport(reporter_id, target_id).catch(err => {
           logger.warn(`CTR tracking error: ${err.message}`);
         });
+
+        // Un signalement doit atterrir aux DEUX endroits : la file de
+        // modération (ci-dessus) et la revue communautaire. En tâche de fond —
+        // la mise en file anonymise via Gemini, et personne ne doit attendre un
+        // aller-retour LLM pour voir son signalement accusé réception. Un échec
+        // ne coûte rien : le rattrapage par lot (`enqueueReportedTweets`) reste
+        // en place derrière.
+        communityModeration.enqueueTweet(target_id).catch(err => {
+          logger.warn(`[report] mise en revue de ${target_id} impossible: ${err.message}`);
+        });
       }
 
-      logger.info(`Nouveau signalement créé: ${report.id} par ${req.user.username} sur ${target_type} ${target_id}`);
+      logger.info(
+        `Nouveau signalement ${report.id} [${category}] par ${req.user.username} `
+        + `sur ${target_type} ${target_id} (poids ${reporterWeight}, score ${weightedScore})`
+      );
 
       res.status(201).json({
         success: true,
-        message: 'Signalement créé avec succès',
+        message: 'Signalement envoyé. Merci, notre équipe va l\'examiner.',
         data: {
           report: {
             id: report.id,
             target_id: report.target_id,
             target_type: report.target_type,
-            reason: report.reason,
+            category: report.category,
             severity: report.severity,
             status: report.status,
             created_at: report.created_at
-          }
+          },
+          // Le client affiche des ressources d'aide pour les catégories de
+          // détresse plutôt qu'un simple accusé de réception.
+          support_resources: !!catDef.supportResources
         }
       });
     } catch (error) {
@@ -102,6 +216,285 @@ class ModerationController {
         success: false,
         message: 'Erreur lors de la création du signalement'
       });
+    }
+  }
+
+  /**
+   * Dossier d'enquête complet sur un signalement.
+   *
+   * Le panneau de modération n'offrait que trois boutons (résoudre / rejeter /
+   * escalader) et, pour toute information, le nom de la cible et un motif en
+   * texte libre. Impossible de décider : ni le contenu incriminé, ni
+   * l'historique du compte visé, ni les autres signalements sur la même cible.
+   *
+   * Tout est servi en UN appel — un modérateur qui doit ouvrir cinq écrans
+   * pour trancher finit par cliquer au hasard.
+   */
+  async getReportContext(req, res) {
+    try {
+      const { reportId } = req.params;
+
+      const report = await Report.findByPk(reportId, {
+        include: [
+          { model: User, as: 'reporter', attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'created_at'] },
+          { model: User, as: 'resolver', attributes: ['id', 'username', 'full_name'] }
+        ]
+      });
+      if (!report) {
+        return res.status(404).json({ success: false, message: 'Signalement non trouvé' });
+      }
+
+      const r = report.toJSON();
+      const isTweet = r.target_type === 'tweet';
+
+      // ── Cible + son auteur ────────────────────────────────────────
+      let tweet = null;
+      let targetUser = null;
+
+      if (isTweet) {
+        const t = await Tweet.findByPk(r.target_id, {
+          include: [{
+            model: User,
+            as: 'author',
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'role',
+              'is_suspended', 'suspended_until', 'suspension_reason', 'ban_count',
+              'created_at', 'subscription_tier', 'stats']
+          }]
+        });
+        if (t) {
+          tweet = t.toJSON();
+          targetUser = tweet.author || null;
+        }
+      } else {
+        const u = await User.findByPk(r.target_id, {
+          attributes: ['id', 'username', 'full_name', 'avatar', 'bio', 'verified', 'role',
+            'is_suspended', 'suspended_until', 'suspension_reason', 'ban_count',
+            'created_at', 'last_activity', 'subscription_tier', 'stats', 'email_verified']
+        });
+        if (u) targetUser = u.toJSON();
+      }
+
+      const authorId = targetUser?.id || null;
+
+      // Annotation LLM du tweet : le jugement automatique déjà porté sur ce
+      // contenu, que le modérateur avait jusqu'ici aucun moyen de consulter.
+      let llm = null;
+      if (isTweet && tweet) {
+        const [rows] = await sequelize.query(
+          `SELECT theme, toxicity_score, toxicity_category, quality_score, quality_class,
+                  tone, confidence, model, annotated_at
+           FROM tweet_llm_labels WHERE tweet_id = :id LIMIT 1`,
+          { replacements: { id: r.target_id } }
+        );
+        llm = rows?.[0] || null;
+      }
+
+      // Engagement réel du tweet — un contenu très diffusé n'a pas le même
+      // enjeu qu'un tweet vu par trois personnes.
+      let engagement = null;
+      if (isTweet && tweet) {
+        const [rows] = await sequelize.query(
+          `SELECT
+             (SELECT count(*) FROM tweet_likes    WHERE tweet_id = :id) AS likes,
+             (SELECT count(*) FROM tweet_retweets WHERE tweet_id = :id) AS retweets,
+             (SELECT count(*) FROM tweets WHERE parent_tweet_id = :id AND deleted_at IS NULL) AS replies,
+             (SELECT count(*) FROM user_behavior_data
+               WHERE action_type = 'tweet_view' AND target_type = 'tweet' AND target_id = :idtxt) AS impressions`,
+          { replacements: { id: r.target_id, idtxt: String(r.target_id) } }
+        );
+        engagement = rows?.[0] || null;
+      }
+
+      // ── Antécédents du compte visé ────────────────────────────────
+      let history = null;
+      if (authorId) {
+        const [[counts], [byCat], [sanctions], [recent]] = await Promise.all([
+          sequelize.query(
+            `SELECT
+               count(*) FILTER (WHERE target_type = 'user'  AND target_id = :uid) AS on_account,
+               count(*) FILTER (WHERE target_type = 'tweet' AND target_id IN
+                 (SELECT id FROM tweets WHERE user_id = :uid)) AS on_content,
+               count(*) FILTER (WHERE status IN ('pending','investigating')) AS still_open,
+               count(*) FILTER (WHERE status = 'resolved'
+                 AND resolution_action IS NOT NULL AND resolution_action <> 'none') AS upheld,
+               count(*) FILTER (WHERE status = 'dismissed') AS dismissed
+             FROM reports
+             WHERE (target_type = 'user' AND target_id = :uid)
+                OR (target_type = 'tweet' AND target_id IN (SELECT id FROM tweets WHERE user_id = :uid))`,
+            { replacements: { uid: authorId } }
+          ),
+          sequelize.query(
+            `SELECT category, count(*) AS n FROM reports
+             WHERE ((target_type = 'user' AND target_id = :uid)
+                 OR (target_type = 'tweet' AND target_id IN (SELECT id FROM tweets WHERE user_id = :uid)))
+               AND category IS NOT NULL
+             GROUP BY category ORDER BY n DESC`,
+            { replacements: { uid: authorId } }
+          ),
+          // Sanctions RÉELLEMENT subies : `moderation_actions.type` couvre
+          // aussi les validations de contenu ('approve'), qui n'en sont pas.
+          sequelize.query(
+            `SELECT type, reason, status, created_at, expires_at, reversed_at
+             FROM moderation_actions
+             WHERE target_type = 'user' AND target_id = :uid
+               AND type IN ('ban','suspend','warn','delete')
+             ORDER BY created_at DESC LIMIT 20`,
+            { replacements: { uid: authorId } }
+          ),
+          // Publications récentes : sert à voir si l'abus est isolé ou répété.
+          sequelize.query(
+            `SELECT t.id, left(t.content, 280) AS content, t.created_at, t.moderation_status,
+                    l.toxicity_score, l.quality_class, l.theme
+             FROM tweets t
+             LEFT JOIN tweet_llm_labels l ON l.tweet_id = t.id
+             WHERE t.user_id = :uid AND t.deleted_at IS NULL
+             ORDER BY t.created_at DESC LIMIT 10`,
+            { replacements: { uid: authorId } }
+          )
+        ]);
+
+        history = {
+          reports: counts?.[0] || {},
+          by_category: (byCat || []).map((c) => ({
+            category: c.category,
+            label: REPORT_CATEGORIES[c.category]?.label || c.category,
+            count: Number(c.n)
+          })),
+          sanctions: sanctions || [],
+          recent_tweets: recent || []
+        };
+      }
+
+      // ── Autres signalements sur la même cible ─────────────────────
+      const siblings = await Report.findAll({
+        where: {
+          target_id: r.target_id,
+          target_type: r.target_type,
+          id: { [Op.ne]: r.id }
+        },
+        include: [{ model: User, as: 'reporter', attributes: ['id', 'username', 'avatar'] }],
+        order: [['created_at', 'DESC']],
+        limit: 50
+      });
+
+      const aggregate = await reportScoring.aggregateTarget(r.target_id, r.target_type);
+
+      // ── Fiabilité du signaleur ────────────────────────────────────
+      const [reporterUpheld, reporterDismissed, reporterTotal] = await Promise.all([
+        Report.count({
+          where: {
+            reporter_id: r.reporter_id,
+            status: 'resolved',
+            resolution_action: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: 'none' }] }
+          }
+        }),
+        Report.count({ where: { reporter_id: r.reporter_id, status: 'dismissed' } }),
+        Report.count({ where: { reporter_id: r.reporter_id } })
+      ]);
+
+      res.json({
+        success: true,
+        data: {
+          report: {
+            ...r,
+            category_label: REPORT_CATEGORIES[r.category]?.label || r.category || 'Signalement'
+          },
+          reporter: {
+            ...(r.reporter || {}),
+            // Poids figé au moment du signalement + fiabilité actuelle : un
+            // signaleur peut s'être discrédité depuis.
+            weight_at_report: r.reporter_weight,
+            weight_now: await reportScoring.getReporterWeight(r.reporter_id),
+            stats: {
+              total: reporterTotal,
+              upheld: reporterUpheld,
+              dismissed: reporterDismissed
+            }
+          },
+          target: { type: r.target_type, tweet, user: targetUser, llm, engagement },
+          history,
+          siblings: siblings.map((s) => {
+            const sj = s.toJSON();
+            return {
+              id: sj.id,
+              category: sj.category,
+              category_label: REPORT_CATEGORIES[sj.category]?.label || sj.category,
+              details: sj.details,
+              severity: sj.severity,
+              status: sj.status,
+              weighted_score: sj.weighted_score,
+              created_at: sj.created_at,
+              reporter: sj.reporter
+            };
+          }),
+          aggregate
+        }
+      });
+    } catch (error) {
+      logger.error('Erreur lors de la récupération du dossier de signalement:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors de la récupération du dossier'
+      });
+    }
+  }
+
+  /**
+   * Taxonomie des signalements, servie aux clients.
+   * Les libellés vivent côté serveur : mobile et Windows n'ont pas à
+   * embarquer chacun leur copie qui divergera au premier ajout de catégorie.
+   */
+  async getReportCategories(req, res) {
+    try {
+      const targetType = ['tweet', 'user', 'comment'].includes(req.query.target_type)
+        ? req.query.target_type
+        : 'tweet';
+      res.json({
+        success: true,
+        data: { target_type: targetType, categories: categoriesFor(targetType) }
+      });
+    } catch (error) {
+      logger.error('Erreur lors de la récupération des catégories:', error);
+      res.status(500).json({ success: false, message: 'Erreur lors de la récupération des catégories' });
+    }
+  }
+
+  /**
+   * Signalements envoyés PAR l'utilisateur courant, avec leur statut.
+   * Volontairement dépouillé : ni identité du compte visé, ni sanction
+   * appliquée — le signaleur n'a pas à savoir ce qui a été infligé à qui.
+   */
+  async getMyReports(req, res) {
+    try {
+      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+
+      const { count, rows } = await Report.findAndCountAll({
+        where: { reporter_id: req.user.id },
+        attributes: ['id', 'target_type', 'category', 'status', 'created_at', 'resolved_at'],
+        order: [['created_at', 'DESC']],
+        limit,
+        offset: (page - 1) * limit
+      });
+
+      res.json({
+        success: true,
+        data: {
+          reports: rows.map((r) => ({
+            id: r.id,
+            target_type: r.target_type,
+            category: r.category,
+            category_label: REPORT_CATEGORIES[r.category]?.label || 'Signalement',
+            status: r.status,
+            created_at: r.created_at,
+            resolved_at: r.resolved_at
+          })),
+          pagination: { page, limit, total: count, pages: Math.ceil(count / limit) }
+        }
+      });
+    } catch (error) {
+      logger.error('Erreur lors de la récupération de mes signalements:', error);
+      res.status(500).json({ success: false, message: 'Erreur lors de la récupération des signalements' });
     }
   }
 
@@ -480,11 +873,20 @@ class ModerationController {
 
       logger.info(`Utilisateur suspendu: ${user.username} par ${req.user.username}`);
 
+      // Prévenir la personne suspendue : sans notification, elle découvre la
+      // sanction en butant sur un écran d'erreur, sans motif ni échéance.
+      const notified = await modNotif.notifyAccountSuspended(userId, {
+        reason,
+        until: suspendedUntil,
+        durationHours: duration
+      });
+
       res.json({
         success: true,
         message: 'Utilisateur suspendu avec succès',
         data: {
           user: user.getPublicProfile(),
+          notified_user: notified,
           suspension_details: {
             reason,
             duration,
@@ -570,6 +972,10 @@ class ModerationController {
       await user.update({ moderation_history: currentHistory });
 
       logger.info(`Suspension levée: ${user.username} par ${req.user.username}`);
+
+      // La bonne nouvelle mérite le même traitement que la sanction : sans
+      // message, l'utilisateur ne sait pas qu'il peut de nouveau publier.
+      await modNotif.notifySanctionLifted(user.id, { kind: 'suspension' });
 
       res.json({
         success: true,
@@ -669,6 +1075,14 @@ class ModerationController {
 
       logger.info(`Utilisateur banni: ${user.username} par ${req.user.username}`);
 
+      // Prévenir la personne bannie, avec le motif et la voie de recours
+      // (`unban_tickets` existe — le réexamen est un vrai parcours).
+      await modNotif.notifyAccountBanned(userId, {
+        reason,
+        permanent,
+        until: banUntil
+      });
+
       res.json({
         success: true,
         message: 'Utilisateur banni avec succès',
@@ -751,6 +1165,8 @@ class ModerationController {
       await user.update({ moderation_history: currentHistory });
 
       logger.info(`Utilisateur débanni: ${user.username} par ${req.user.username}`);
+
+      await modNotif.notifySanctionLifted(user.id, { kind: 'ban' });
 
       res.json({
         success: true,
@@ -936,6 +1352,141 @@ class ModerationController {
   // ===== MODÉRATION DE CONTENU =====
 
   // Obtenir la liste des tweets à modérer
+  async getRecentTweetAnnotations(req, res) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Données invalides',
+          errors: errors.array()
+        });
+      }
+
+      const page = Number(req.query.page || 1);
+      const limit = Number(req.query.limit || 50);
+      const offset = (page - 1) * limit;
+      const annotationStatus = req.query.status || 'all';
+      const search = String(req.query.search || '').trim();
+
+      const statusSql = annotationStatus === 'annotated'
+        ? 'AND labels.tweet_id IS NOT NULL'
+        : annotationStatus === 'pending'
+          ? 'AND labels.tweet_id IS NULL'
+          : '';
+      const searchSql = search
+        ? 'AND (tweets.content ILIKE :search OR users.username ILIKE :search)'
+        : '';
+      const replacements = {
+        limit,
+        offset,
+        ...(search ? { search: `%${search}%` } : {})
+      };
+      const fromAndWhere = `
+        FROM tweets
+        INNER JOIN users ON users.id = tweets.user_id
+        LEFT JOIN tweet_llm_labels AS labels ON labels.tweet_id = tweets.id
+        WHERE tweets.deleted_at IS NULL
+          ${statusSql}
+          ${searchSql}
+      `;
+
+      const [tweets, countRows, summaryRows] = await Promise.all([
+        sequelize.query(`
+          SELECT
+            tweets.id,
+            tweets.content,
+            tweets.created_at,
+            tweets.parent_tweet_id,
+            users.id AS author_id,
+            users.username AS author_username,
+            users.full_name AS author_full_name,
+            users.avatar AS author_avatar,
+            users.verified AS author_verified,
+            labels.theme,
+            labels.toxicity_score,
+            labels.toxicity_category,
+            labels.quality_score,
+            labels.quality_class,
+            labels.tone,
+            labels.confidence,
+            labels.model,
+            labels.annotated_at
+          ${fromAndWhere}
+          ORDER BY tweets.created_at DESC
+          LIMIT :limit OFFSET :offset
+        `, { replacements, type: Sequelize.QueryTypes.SELECT }),
+        sequelize.query(`
+          SELECT COUNT(*)::integer AS total
+          ${fromAndWhere}
+        `, { replacements, type: Sequelize.QueryTypes.SELECT }),
+        sequelize.query(`
+          SELECT
+            COUNT(*)::integer AS total,
+            COUNT(labels.tweet_id)::integer AS annotated,
+            (COUNT(*) - COUNT(labels.tweet_id))::integer AS pending,
+            AVG(labels.quality_score)::float AS average_quality,
+            AVG(labels.toxicity_score)::float AS average_toxicity,
+            AVG(labels.confidence)::float AS average_confidence
+          ${fromAndWhere}
+        `, { replacements, type: Sequelize.QueryTypes.SELECT })
+      ]);
+
+      const total = Number(countRows[0]?.total || 0);
+      const summary = summaryRows[0] || {};
+
+      res.json({
+        success: true,
+        data: {
+          tweets: tweets.map(tweet => ({
+            id: tweet.id,
+            content: tweet.content,
+            created_at: tweet.created_at,
+            parent_tweet_id: tweet.parent_tweet_id,
+            author: {
+              id: tweet.author_id,
+              username: tweet.author_username,
+              full_name: tweet.author_full_name,
+              avatar: tweet.author_avatar,
+              verified: tweet.author_verified
+            },
+            annotation: tweet.annotated_at ? {
+              theme: tweet.theme,
+              toxicity_score: Number(tweet.toxicity_score),
+              toxicity_category: tweet.toxicity_category,
+              quality_score: Number(tweet.quality_score),
+              quality_class: tweet.quality_class,
+              tone: tweet.tone,
+              confidence: Number(tweet.confidence),
+              model: tweet.model,
+              annotated_at: tweet.annotated_at
+            } : null
+          })),
+          summary: {
+            total: Number(summary.total || 0),
+            annotated: Number(summary.annotated || 0),
+            pending: Number(summary.pending || 0),
+            average_quality: summary.average_quality == null ? null : Number(summary.average_quality),
+            average_toxicity: summary.average_toxicity == null ? null : Number(summary.average_toxicity),
+            average_confidence: summary.average_confidence == null ? null : Number(summary.average_confidence)
+          },
+          pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.ceil(total / limit)
+          }
+        }
+      });
+    } catch (error) {
+      logger.error('Erreur lors de la récupération des annotations des tweets:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Annotations des publications indisponibles'
+      });
+    }
+  }
+
   async getTweetsForModeration(req, res) {
     try {
       const errors = validationResult(req);
@@ -1210,6 +1761,18 @@ class ModerationController {
         }
       });
 
+      // Prévenir l'auteur AVANT la suppression : `tweet.content` doit encore
+      // être lisible pour recopier l'extrait dans la notification. Sans lui,
+      // l'auteur reçoit « une publication a été retirée » sans savoir laquelle.
+      let notified = false;
+      if (notify_user) {
+        notified = await modNotif.notifyContentRemoved(tweet.user_id, {
+          tweetId,
+          content: tweet.content,
+          reason
+        });
+      }
+
       // Supprimer le tweet
       await tweet.destroy();
 
@@ -1221,7 +1784,9 @@ class ModerationController {
         data: {
           tweet_id: tweetId,
           reason,
-          notified_user: notify_user
+          // Reflète l'envoi RÉEL. Ce champ renvoyait jusqu'ici la valeur
+          // demandée par l'appelant alors qu'aucune notification n'existait.
+          notified_user: notified
         }
       });
     } catch (error) {
@@ -1474,20 +2039,11 @@ class ModerationController {
     }
   }
 
-  async getReportDetails(req, res) {
-    res.json({
-      success: true,
-      message: 'Détails du signalement (à implémenter)',
-      data: { report: {} }
-    });
-  }
-
-  async updateReportStatus(req, res) {
-    res.json({
-      success: true,
-      message: 'Statut du signalement mis à jour (à implémenter)'
-    });
-  }
+  // NOTE — Deux stubs « à implémenter » de `getReportDetails` et
+  // `updateReportStatus` se trouvaient ici. Ils étaient morts : cette classe
+  // définit ces méthodes plusieurs fois et, en JavaScript, c'est la DERNIÈRE
+  // définition qui l'emporte. Les implémentations réelles sont plus bas dans
+  // le fichier. Supprimés pour qu'on cesse de les prendre pour le code actif.
 
   async getModerationStats(req, res) {
     try {
@@ -2219,6 +2775,58 @@ class ModerationController {
 
       await report.update(updateData);
       logger.info(`Signalement ${reportId} traite par ${req.user.username}: ${status}`);
+
+      // L'avertissement n'a pas d'endpoint propre — contrairement à
+      // suspend/ban/delete, il n'existe qu'à travers la clôture d'un
+      // signalement. On le matérialise ici, sinon « avertir » ne fait
+      // strictement rien : ni trace, ni message à l'intéressé.
+      if (resolution_action === 'warn') {
+        try {
+          let warnedUserId = null;
+          let warnedTweetId = null;
+
+          if (report.target_type === 'tweet') {
+            const t = await Tweet.findByPk(report.target_id, { attributes: ['id', 'user_id'] });
+            warnedUserId = t?.user_id || null;
+            warnedTweetId = t?.id || null;
+          } else if (report.target_type === 'user') {
+            warnedUserId = report.target_id;
+          }
+
+          if (warnedUserId) {
+            await ModerationAction.create({
+              type: 'warn',
+              target_type: 'user',
+              target_id: warnedUserId,
+              moderator_id: req.user.id,
+              reason: resolution_reason || moderator_notes || 'Avertissement suite à signalement',
+              status: 'active',
+              metadata: { report_id: report.id, category: report.category }
+            });
+            await modNotif.notifyWarning(warnedUserId, {
+              reason: resolution_reason || moderator_notes || null,
+              tweetId: warnedTweetId
+            });
+          }
+        } catch (warnError) {
+          // Un avertissement raté ne doit pas empêcher la clôture.
+          logger.warn(`[modNotif] avertissement non appliqué (${reportId}): ${warnError.message}`);
+        }
+      }
+
+      // Informer le signaleur du sort de son signalement. Sans ce retour,
+      // signaler revient à parler dans le vide — c'est la première raison
+      // pour laquelle les gens cessent de le faire.
+      if ((status === 'resolved' || status === 'dismissed') && !report.reporter_notified_at) {
+        const upheld = status === 'resolved'
+          && !!report.resolution_action
+          && report.resolution_action !== 'none';
+        await reportScoring.notifyReporterOfResolution(report, {
+          action: report.resolution_action,
+          upheld
+        });
+        await report.update({ reporter_notified_at: new Date() });
+      }
 
       res.json({
         success: true,

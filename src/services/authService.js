@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { Op } = require('sequelize');
 const User = require('../models/User');
 const config = require('../config/config');
@@ -7,7 +8,92 @@ const logger = require('../utils/logger');
 const BanService = require('./banService');
 const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
 
+// Durée de vie d'une session inactive. Chaque rotation la fait glisser :
+// une session utilisée régulièrement ne se coupe donc jamais.
+const SESSION_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 jours
+
+// Chargé paresseusement : models/index initialise l'ensemble des modèles et
+// dépend indirectement d'autres services.
+function getSessionModel() {
+  return require('../models').Session;
+}
+
 class AuthService {
+  // ─── Sessions (jetons de rafraîchissement opaques, hachés, à rotation) ──────
+
+  /** Hachage stocké en base — le jeton en clair ne quitte jamais le client. */
+  hashRefreshToken(token) {
+    return crypto.createHash('sha256').update(String(token)).digest('hex');
+  }
+
+  /**
+   * Crée une session et renvoie le jeton de rafraîchissement en clair.
+   * `familyId` permet de chaîner les rotations successives d'une connexion.
+   */
+  async createSession(userId, context = {}, familyId = null) {
+    const Session = getSessionModel();
+    const token = crypto.randomBytes(48).toString('base64url');
+
+    const session = await Session.create({
+      user_id: userId,
+      refresh_token_hash: this.hashRefreshToken(token),
+      family_id: familyId || crypto.randomUUID(),
+      device_id: context.deviceId ? String(context.deviceId).slice(0, 128) : null,
+      platform: context.platform ? String(context.platform).slice(0, 32) : null,
+      app_version: context.appVersion ? String(context.appVersion).slice(0, 32) : null,
+      user_agent: context.userAgent ? String(context.userAgent).slice(0, 255) : null,
+      ip: context.ip ? String(context.ip).slice(0, 64) : null,
+      last_used_at: new Date(),
+      expires_at: new Date(Date.now() + SESSION_TTL_MS),
+    });
+
+    return { token, session };
+  }
+
+  /** Révoque toutes les sessions d'une famille (rejeu détecté, déconnexion). */
+  async revokeSessionFamily(familyId, reason) {
+    const Session = getSessionModel();
+    await Session.update(
+      { revoked_at: new Date(), revoked_reason: reason },
+      { where: { family_id: familyId, revoked_at: null } }
+    );
+  }
+
+  /**
+   * Révoque toutes les sessions d'un utilisateur.
+   * À appeler sur changement de mot de passe et sur bannissement — jusqu'ici
+   * aucun de ces événements n'invalidait les jetons déjà émis.
+   */
+  async revokeAllSessions(userId, reason = 'revoked') {
+    const Session = getSessionModel();
+    await Session.update(
+      { revoked_at: new Date(), revoked_reason: reason },
+      { where: { user_id: userId, revoked_at: null } }
+    );
+  }
+
+  /** Sessions actives d'un utilisateur (liste des appareils connectés). */
+  async listSessions(userId) {
+    const Session = getSessionModel();
+    return Session.findAll({
+      where: { user_id: userId, revoked_at: null, expires_at: { [Op.gt]: new Date() } },
+      attributes: [
+        'id', 'device_id', 'platform', 'app_version',
+        'user_agent', 'ip', 'last_used_at', 'created_at', 'expires_at',
+      ],
+      order: [['last_used_at', 'DESC']],
+    });
+  }
+
+  async revokeSessionById(userId, sessionId) {
+    const Session = getSessionModel();
+    const [count] = await Session.update(
+      { revoked_at: new Date(), revoked_reason: 'user_revoked' },
+      { where: { id: sessionId, user_id: userId, revoked_at: null } }
+    );
+    return count > 0;
+  }
+
   // Générer un token JWT
   generateToken(user) {
     const payload = {
@@ -30,7 +116,12 @@ class AuthService {
     });
   }
 
-  // Générer un token de rafraîchissement
+  /**
+   * @deprecated Les jetons de rafraîchissement sont désormais opaques et
+   * adossés à une ligne `sessions` — voir `createSession`. Un JWT signé avec
+   * le même secret que l'access token ne pouvait être ni révoqué ni distingué
+   * de celui-ci.
+   */
   generateRefreshToken(user) {
     const payload = {
       id: user.id,
@@ -53,7 +144,7 @@ class AuthService {
   }
 
   // Inscription d'un utilisateur
-  async register(userData) {
+  async register(userData, sessionContext = {}) {
     try {
       logger.info('Début de l\'inscription:', { username: userData.username });
       
@@ -82,7 +173,7 @@ class AuthService {
 
       // Générer les tokens
       const token = this.generateToken(user);
-      const refreshToken = this.generateRefreshToken(user);
+      const { token: refreshToken } = await this.createSession(user.id, sessionContext);
 
       // Mettre à jour la dernière activité
       await user.updateLastActivity();
@@ -105,7 +196,7 @@ class AuthService {
   }
 
   // Connexion d'un utilisateur
-  async login(credentials) {
+  async login(credentials, sessionContext = {}) {
     try {
       // Rechercher l'utilisateur par username
       const user = await User.findOne({
@@ -137,7 +228,7 @@ class AuthService {
 
       // Générer les tokens
       const token = this.generateToken(user);
-      const refreshToken = this.generateRefreshToken(user);
+      const { token: refreshToken } = await this.createSession(user.id, sessionContext);
 
       logger.info(`Utilisateur connecté: ${user.username}`);
 
@@ -148,7 +239,10 @@ class AuthService {
           user: {
             ...user.getPublicProfile(),
             // Ajouter explicitement is_suspended pour l'app
-            is_suspended: user.is_suspended || false
+            is_suspended: user.is_suspended || false,
+            // `null` = langue de lecture jamais choisie : c'est ce que l'app
+            // attend juste après la connexion pour poser la question une fois.
+            preferred_language: user.preferred_language || null
           },
           token,
           refreshToken
@@ -160,46 +254,94 @@ class AuthService {
     }
   }
 
-  // Rafraîchir un token
-  async refreshToken(refreshToken) {
-    try {
-      const decoded = this.verifyToken(refreshToken);
-      if (!decoded || decoded.type !== 'refresh') {
-        throw new Error('Token de rafraîchissement invalide');
-      }
+  /**
+   * Rafraîchit le couple de jetons, avec rotation.
+   *
+   * La session présentée est révoquée et remplacée par une nouvelle de la même
+   * famille. Présenter un jeton déjà tourné est un rejeu : toute la famille est
+   * alors révoquée, ce qui coupe la session légitime comme celle de l'attaquant.
+   */
+  async refreshToken(refreshToken, sessionContext = {}) {
+    const Session = getSessionModel();
 
-      const user = await User.findByPk(decoded.id);
-      if (!user || !user.is_active) {
-        throw new Error('Utilisateur non trouvé ou inactif');
-      }
-
-      const newToken = this.generateToken(user);
-      const newRefreshToken = this.generateRefreshToken(user);
-
-      return {
-        success: true,
-        message: 'Token rafraîchi avec succès',
-        data: {
-          token: newToken,
-          refreshToken: newRefreshToken
-        }
-      };
-    } catch (error) {
-      logger.error('Erreur lors du rafraîchissement du token:', error);
-      throw error;
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      throw new Error('Token de rafraîchissement invalide');
     }
+
+    const hash = this.hashRefreshToken(refreshToken);
+    const session = await Session.findOne({ where: { refresh_token_hash: hash } });
+
+    if (!session) {
+      throw new Error('Token de rafraîchissement invalide');
+    }
+
+    if (session.revoked_at) {
+      logger.warn(`[auth] Rejeu d'un refresh token révoqué (famille ${session.family_id})`);
+      await this.revokeSessionFamily(session.family_id, 'reuse_detected');
+      throw new Error('Token de rafraîchissement invalide');
+    }
+
+    if (session.expires_at && session.expires_at.getTime() < Date.now()) {
+      await session.update({ revoked_at: new Date(), revoked_reason: 'expired' });
+      throw new Error('Session expirée');
+    }
+
+    const user = await User.findByPk(session.user_id);
+    if (!user || !user.is_active) {
+      await this.revokeSessionFamily(session.family_id, 'user_inactive');
+      throw new Error('Utilisateur non trouvé ou inactif');
+    }
+
+    // Rotation : l'ancienne ligne est close, une nouvelle prend le relais.
+    await session.update({ revoked_at: new Date(), revoked_reason: 'rotated' });
+
+    const { token: newRefreshToken } = await this.createSession(
+      user.id,
+      {
+        deviceId: sessionContext.deviceId || session.device_id,
+        platform: sessionContext.platform || session.platform,
+        appVersion: sessionContext.appVersion || session.app_version,
+        userAgent: sessionContext.userAgent || session.user_agent,
+        ip: sessionContext.ip || session.ip,
+      },
+      session.family_id
+    );
+
+    return {
+      success: true,
+      message: 'Token rafraîchi avec succès',
+      data: {
+        token: this.generateToken(user),
+        refreshToken: newRefreshToken,
+      }
+    };
   }
 
-  // Déconnexion
-  async logout(userId) {
+  /**
+   * Déconnexion. Avec un jeton de rafraîchissement, seule CETTE session est
+   * révoquée — indispensable au multi-compte, où se déconnecter d'un compte ne
+   * doit pas couper les autres.
+   */
+  async logout(userId, refreshToken = null) {
     try {
+      if (refreshToken) {
+        const Session = getSessionModel();
+        const hash = this.hashRefreshToken(refreshToken);
+        const session = await Session.findOne({ where: { refresh_token_hash: hash } });
+
+        // On ne révoque que si la session appartient bien à l'appelant.
+        if (session && String(session.user_id) === String(userId)) {
+          await this.revokeSessionFamily(session.family_id, 'logout');
+        }
+      }
+
       const user = await User.findByPk(userId);
       if (user) {
         await user.updateLastActivity();
         logger.info(`Utilisateur déconnecté: ${user.username}`);
       }
 
-      return { 
+      return {
         success: true,
         message: 'Déconnexion réussie'
       };
@@ -318,9 +460,10 @@ class AuthService {
         attributes: [
           'id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium',
           'subscription_tier', 'subscription_expires_at',
-          'role', 'moderation_permissions',
+          'role', 'moderation_permissions', 'is_private_account',
           'stats', 'created_at', 'last_activity', 'is_active',
-          'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until'
+          'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
+          'preferred_language'
         ]
       });
       if (!user || !user.is_active) {
@@ -340,9 +483,10 @@ class AuthService {
         attributes: [
           'id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium',
           'subscription_tier', 'subscription_expires_at',
-          'role', 'moderation_permissions',
+          'role', 'moderation_permissions', 'is_private_account',
           'stats', 'created_at', 'last_activity', 'is_active',
-          'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until'
+          'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
+          'preferred_language'
         ]
       });
 
@@ -351,16 +495,23 @@ class AuthService {
         attributes: [
           'id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium',
           'subscription_tier', 'subscription_expires_at',
-          'role', 'moderation_permissions',
+          'role', 'moderation_permissions', 'is_private_account',
           'stats', 'created_at', 'last_activity', 'is_active',
-          'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until'
+          'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
+          'preferred_language'
         ]
       });
 
       return {
         success: true,
         message: 'Profil récupéré avec succès',
-        data: updatedUser.getPublicProfile()
+        data: {
+          ...updatedUser.getPublicProfile(),
+          // Volontairement hors de `getPublicProfile()` : la langue de lecture
+          // ne regarde que son propriétaire, elle n'a pas à voyager avec
+          // l'auteur d'un tweet dans le fil de tout le monde.
+          preferred_language: updatedUser.preferred_language || null
+        }
       };
     } catch (error) {
       logger.error('Erreur lors de la récupération du profil:', error);
@@ -387,7 +538,7 @@ class AuthService {
       }
 
       // Mettre à jour les champs autorisés
-      const allowedFields = ['username', 'full_name', 'avatar', 'banner', 'bio', 'preferences'];
+      const allowedFields = ['username', 'full_name', 'avatar', 'banner', 'bio', 'preferences', 'is_private_account'];
       for (const field of allowedFields) {
         if (updateData[field] === undefined) continue;
         if (field === 'bio') {

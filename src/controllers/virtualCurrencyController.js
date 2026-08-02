@@ -1,7 +1,9 @@
-const { VirtualCurrency, UserWallet, Transaction, User } = require('../models');
+const { VirtualCurrency, UserWallet, Transaction, User, sequelize } = require('../models');
 const { validationResult } = require('express-validator');
 const crypto = require('crypto');
 const logger = require('../utils/logger');
+const NewEconomyService = require('../services/newEconomyService');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 
 class VirtualCurrencyController {
   // Obtenir les informations d'une cryptomonnaie par symbole
@@ -340,107 +342,21 @@ class VirtualCurrencyController {
         });
       }
 
-      // Récupérer les portefeuilles
-      const [fromWallet, toWallet] = await Promise.all([
-        UserWallet.findOne({ where: { userId: fromUserId, currencyId } }),
-        UserWallet.findOne({ where: { userId: toUserId, currencyId } })
-      ]);
-
-      if (!fromWallet) {
-        return res.status(404).json({
-          success: false,
-          message: 'Portefeuille expéditeur non trouvé'
-        });
-      }
-
-      if (!toWallet) {
-        return res.status(404).json({
-          success: false,
-          message: 'Portefeuille destinataire non trouvé'
-        });
-      }
-
-      // Vérifier les verrouillages
-      if (fromWallet.isLocked) {
-        return res.status(403).json({
-          success: false,
-          message: `Portefeuille expéditeur verrouillé: ${fromWallet.lockReason}`
-        });
-      }
-
-      if (toWallet.isLocked) {
-        return res.status(403).json({
-          success: false,
-          message: `Portefeuille destinataire verrouillé: ${toWallet.lockReason}`
-        });
-      }
-
-      // Vérifier le solde
-      if (fromWallet.balance < amount) {
-        return res.status(400).json({
-          success: false,
-          message: 'Solde insuffisant'
-        });
-      }
-
-      // Calculer les frais de transaction (0.1%)
-      const fee = amount * 0.001;
-      const totalAmount = amount + fee;
-
-      if (fromWallet.balance < totalAmount) {
-        return res.status(400).json({
-          success: false,
-          message: `Solde insuffisant (frais inclus: ${fee.toFixed(8)} ${currency.symbol})`
-        });
-      }
-
-      // Créer la transaction
-      const transactionHash = crypto.randomBytes(32).toString('hex');
-      
-      const transaction = await Transaction.create({
-        transactionHash,
+      const result = await NewEconomyService.transferCoins(
         fromUserId,
         toUserId,
         currencyId,
-        amount,
-        amountInEur: amount * currency.currentPrice,
-        type: 'TRANSFER',
-        status: 'COMPLETED',
-        fee,
-        description: description || `Transfert de ${amount} ${currency.symbol}`,
-        metadata: {
-          fromUsername: req.user.username,
-          toUsername: toUser.username
-        },
-        confirmedAt: new Date()
-      });
-
-      // Mettre à jour les portefeuilles
-      await fromWallet.update({
-        balance: fromWallet.balance - totalAmount,
-        totalSpent: fromWallet.totalSpent + totalAmount
-      });
-
-      await toWallet.update({
-        balance: toWallet.balance + amount,
-        totalEarned: toWallet.totalEarned + amount
-      });
+        Number(amount),
+        description || `Transfert de ${amount} ${currency.symbol}`
+      );
 
       const response = {
         success: true,
         data: {
-          transaction: transaction.toJSON(),
-          fromWallet: {
-            balance: fromWallet.balance,
-            totalSpent: fromWallet.totalSpent
-          },
-          toWallet: {
-            balance: toWallet.balance,
-            totalEarned: toWallet.totalEarned
-          },
+          transaction: result.tx.toJSON(),
           amount,
-          fee,
-          totalAmount
+          fee: result.fee,
+          netAmount: result.netAmount
         }
       };
 
@@ -449,9 +365,11 @@ class VirtualCurrencyController {
 
     } catch (error) {
       logger.error('❌ Erreur lors du transfert:', error);
-      res.status(500).json({
+      const isRiskError = transactionAuthorizationService.constructor.isRiskError(error);
+      res.status(isRiskError ? error.httpStatus : 500).json({
         success: false,
-        message: 'Erreur serveur interne'
+        message: isRiskError ? error.message : 'Erreur serveur interne',
+        code: isRiskError ? error.code : undefined
       });
     }
   }
@@ -610,6 +528,7 @@ class VirtualCurrencyController {
 
   // Acheter de la cryptomonnaie (simulation)
   static async purchaseCurrency(req, res) {
+    let dbTransaction = null;
     try {
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
@@ -634,13 +553,18 @@ class VirtualCurrencyController {
 
       // Calculer le montant de cryptomonnaie à recevoir
       const amount = amountEur / currency.currentPrice;
+      dbTransaction = await sequelize.transaction();
 
       // Récupérer le portefeuille
       let wallet = await UserWallet.findOne({
-        where: { userId, currencyId }
+        where: { userId, currencyId },
+        transaction: dbTransaction,
+        lock: dbTransaction.LOCK.UPDATE
       });
 
       if (!wallet) {
+        await dbTransaction.rollback();
+        dbTransaction = null;
         return res.status(404).json({
           success: false,
           message: 'Portefeuille non trouvé'
@@ -649,6 +573,17 @@ class VirtualCurrencyController {
 
       // Créer la transaction d'achat
       const transactionHash = crypto.randomBytes(32).toString('hex');
+      const riskAuthorization = await transactionAuthorizationService.authorize({
+        userId,
+        transactionKind: 'wallet_topup',
+        direction: 'inbound',
+        amount,
+        amountEur: Number(amountEur),
+        currencyId,
+        merchantId: 'twitninf_virtual_currency',
+        itemType: 'virtual_currency',
+        itemId: currencyId
+      });
       
       const transaction = await Transaction.create({
         transactionHash,
@@ -663,21 +598,32 @@ class VirtualCurrencyController {
         description: `Achat de ${amount.toFixed(8)} ${currency.symbol} pour ${amountEur}€`,
         metadata: {
           purchaseAmount: amountEur,
-          exchangeRate: currency.currentPrice
+          exchangeRate: currency.currentPrice,
+          ...transactionAuthorizationService.riskMetadata(riskAuthorization)
         },
         confirmedAt: new Date()
-      });
+      }, { transaction: dbTransaction });
+      await transactionAuthorizationService.consume(
+        riskAuthorization,
+        transaction.id,
+        dbTransaction
+      );
 
       // Mettre à jour le portefeuille
       await wallet.update({
         balance: wallet.balance + amount,
         totalEarned: wallet.totalEarned + amount
-      });
+      }, { transaction: dbTransaction });
 
       // Mettre à jour les statistiques de la cryptomonnaie (incrément, pas de SUM sur tous les portefeuilles)
-      await currency.increment('circulatingSupply', { by: amount });
-      await currency.reload();
-      await currency.update({ marketCap: currency.circulatingSupply * currency.currentPrice });
+      await currency.increment('circulatingSupply', { by: amount, transaction: dbTransaction });
+      await currency.reload({ transaction: dbTransaction });
+      await currency.update(
+        { marketCap: currency.circulatingSupply * currency.currentPrice },
+        { transaction: dbTransaction }
+      );
+      await dbTransaction.commit();
+      dbTransaction = null;
 
       const response = {
         success: true,
@@ -699,10 +645,15 @@ class VirtualCurrencyController {
       res.json(response);
 
     } catch (error) {
+      if (dbTransaction && !dbTransaction.finished) {
+        await dbTransaction.rollback();
+      }
       logger.error('❌ Erreur lors de l\'achat:', error);
-      res.status(500).json({
+      const isRiskError = transactionAuthorizationService.constructor.isRiskError(error);
+      res.status(isRiskError ? error.httpStatus : 500).json({
         success: false,
-        message: 'Erreur serveur interne'
+        message: isRiskError ? error.message : 'Erreur serveur interne',
+        code: isRiskError ? error.code : undefined
       });
     }
   }
