@@ -44,6 +44,33 @@ function getApiScopedPath(req) {
   return path.startsWith('/api/') ? path.slice(4) : path;
 }
 
+/**
+ * Routes qui reçoivent des fichiers, et pour lesquelles un corps volumineux
+ * est le fonctionnement normal.
+ *
+ * Le plafond générique de 5 Mo plus bas vise les corps de requête anormaux
+ * (bourrage de champs, tentative de saturation). Appliqué à un envoi de
+ * vidéo, il rejetait en 413 CHAQUE upload dépassant quelques secondes de
+ * captation — la vidéo brute arrive ici avant d'être transcodée, elle pèse
+ * par nature bien plus que 5 Mo.
+ */
+const MEDIA_UPLOAD_PATTERNS = [
+  // POST /api/tweets/video
+  /^\/tweets\/video$/,
+  // POST /api/stories
+  /^\/stories$/,
+  // POST /api/users/me/avatar — et bannière
+  /^\/users\/[^/]+\/(avatar|banner)$/,
+  // POST /api/messages/conversations/:id/messages/attachment
+  /^\/messages\/conversations\/[^/]+\/messages\/attachment$/,
+];
+
+function isMediaUploadRoute(req) {
+  if (String(req.method || 'GET').toUpperCase() !== 'POST') return false;
+  const path = getApiScopedPath(req);
+  return MEDIA_UPLOAD_PATTERNS.some((pattern) => pattern.test(path));
+}
+
 function isAppNavigationNoise(req) {
   const path = getApiScopedPath(req);
   const method = String(req.method || 'GET').toUpperCase();
@@ -471,8 +498,13 @@ const checkApiRequest = async (req, res, next) => {
   } catch { /* fail open */ }
 
   // ── 4. Large payload — vérification synchrone ────────────────────────────────
+  // Les routes d'upload ont leur propre plafond, bien plus haut : ce sont les
+  // seules où un corps de plusieurs dizaines de Mo est attendu. Leur taille
+  // reste bornée par `client_max_body_size` côté nginx et par les limites
+  // multer de chaque route — ce contrôle-ci n'est pas le dernier rempart.
   const payloadSize = parseInt(req.headers['content-length'] || '0');
-  if (payloadSize > 5_000_000) {
+  const payloadCeiling = isMediaUploadRoute(req) ? 200_000_000 : 5_000_000;
+  if (payloadSize > payloadCeiling) {
     logger.warn(`[fraud] Large payload blocked: ${payloadSize} bytes from ${ip}`);
     return res.status(413).json({
       success: false,
