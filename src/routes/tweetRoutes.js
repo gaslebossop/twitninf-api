@@ -858,6 +858,57 @@ router.get('/:id', [
       enrichedTweet.thread_ancestors = [];
     }
 
+    // Traduction du fil, jointe a la reponse.
+    //
+    // L'app la demandait dans un SECOND appel, declenche une fois le tweet
+    // affiche : la page se montait en francais puis basculait, d'ou une
+    // saccade visible sur tout compte dont la langue de lecture n'est pas la
+    // langue source. Un lecteur francophone ne voyait rien, faute de
+    // traduction a charger.
+    //
+    // On renvoie donc directement la traduction du tweet, de ses ancetres et
+    // de ses reponses dans la langue du lecteur, en une requete groupee. Le
+    // bouton de changement de langue continue de passer par
+    // /tweets/:id/translations : il sert a demander UNE AUTRE langue que
+    // celle du compte, ce que cette pre-traduction ne couvre pas.
+    // La langue de lecture n'est PAS dans le jeton (voir le payload construit
+    // par authService) : la lire ici plutot que de l'ajouter au JWT, ou elle
+    // resterait figee sur l'ancienne valeur jusqu'a la prochaine connexion.
+    const translatableIds = [enrichedTweet, ...(enrichedTweet.thread_ancestors || []), ...(enrichedTweet.replies || [])]
+      .filter((t) => t && t.translation_enabled)
+      .map((t) => String(t.id));
+
+    if (userId && translatableIds.length > 0) {
+      const reader = await User.findByPk(userId, { attributes: ['preferred_language'] });
+      const readerLanguage = String(reader?.preferred_language || '').trim().toLowerCase();
+
+      if (readerLanguage) {
+        try {
+          const translations = await tweetTranslationService.getTranslationsForLanguage(
+            translatableIds,
+            readerLanguage,
+          );
+          const attach = (t) => {
+            if (t && t.translation_enabled) {
+              // `null` explicite et non `undefined` : le client distingue
+              // « pas encore traduit » de « rien a traduire », et n'a donc
+              // aucune raison de relancer un appel pour un tweet deja traite.
+              t.translation = translations[String(t.id)] || null;
+            }
+            return t;
+          };
+          attach(enrichedTweet);
+          (enrichedTweet.thread_ancestors || []).forEach(attach);
+          (enrichedTweet.replies || []).forEach(attach);
+          enrichedTweet.translation_language = readerLanguage;
+        } catch (err) {
+          // Une traduction absente ne doit pas faire echouer l'ouverture d'un
+          // tweet : le client retombe sur son appel differe.
+          logger.warn(`Traductions non jointes au tweet ${id}: ${err.message}`);
+        }
+      }
+    }
+
     // Enregistrer la vue pour le CTR tracking (algorithme Rust).
     if (userId && !id.startsWith('ad-')) {
       ctrTracker.trackTweetView(userId, id).catch(err => {
