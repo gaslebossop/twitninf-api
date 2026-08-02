@@ -60,8 +60,24 @@ jobs:
           fi
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          # `tr -d '\r'` : un secret colle depuis Windows ou via l'interface
+          # web arrive avec des fins de ligne CRLF. OpenSSH refuse alors la
+          # cle avec « error in libcrypto », sans dire pourquoi. Le `printf`
+          # garantit par ailleurs le saut de ligne final, lui aussi exige.
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+
+          # Verification immediate : sans elle, une cle malformee ne se
+          # manifeste qu'au premier ssh, sous forme d'un « Permission denied
+          # (publickey) » qui fait chercher du cote des droits sur le serveur
+          # alors que le probleme est le format du secret.
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null 2>&1; then
+            echo "::error::VPS_SSH_KEY est illisible par OpenSSH (format invalide ou tronque)."
+            echo "Redefinis le secret en envoyant le fichier tel quel, sans copier-coller :"
+            echo "  gh secret set VPS_SSH_KEY --repo <owner>/<repo> < chemin/vers/la/cle"
+            exit 1
+          fi
+          echo "Cle privee lue par OpenSSH : format valide."
 
           # Empreinte epinglee si elle est fournie : c'est la seule facon de
           # se premunir d'un homme du milieu. A defaut, on la releve au vol
