@@ -66,7 +66,30 @@ async function resolveTier(userId) {
 
 function isStaffRole(role) {
   return ['moderateur', 'moderator', 'admin', 'superadmin', 'super_admin', 'supermoderateur']
-    .includes(role);
+    .includes(String(role || '').trim().toLowerCase());
+}
+
+/**
+ * Les rôles changent sans forcément invalider le JWT courant. Les routes de
+ * file staff utilisaient déjà `requireModeratorRole`, qui relit la base, mais
+ * les routes génériques de lecture/réponse se fiaient encore au rôle du token.
+ * Résultat : un modérateur fraîchement promu voyait la file puis prenait 403 en
+ * ouvrant ou en répondant au ticket. Toute décision staff passe désormais par
+ * cette lecture courte et autoritaire de `users.role`.
+ */
+async function resolveSupportActor(req) {
+  const dbUser = req.user?.id
+    ? await User.findByPk(req.user.id, { attributes: ['id', 'role'] })
+    : null;
+  // Ne jamais restaurer un rôle privilégié depuis un token si le compte a été
+  // supprimé ou n'est plus lisible : seule la ligne courante en base fait foi.
+  const role = dbUser?.role || 'user';
+  req.user = { ...req.user, role };
+  return {
+    id: req.user?.id,
+    role,
+    isStaff: isStaffRole(role),
+  };
 }
 
 /** Délai de réponse annoncé. Une promesse tenable, pas un argument marketing. */
@@ -211,13 +234,21 @@ router.post('/tickets', authenticateToken, async (req, res) => {
  */
 router.get('/tickets/:id', authenticateToken, async (req, res) => {
   try {
-    const ticket = await SupportTicket.findByPk(req.params.id);
+    const [actor, ticket] = await Promise.all([
+      resolveSupportActor(req),
+      SupportTicket.findByPk(req.params.id, {
+        include: [
+          { model: User, as: 'user', attributes: AUTHOR_ATTRIBUTES },
+          { model: User, as: 'assignee', attributes: ['id', 'username'] },
+        ],
+      }),
+    ]);
     if (!ticket) {
       return res.status(404).json({ success: false, message: 'Ticket introuvable.' });
     }
 
-    const staff = isStaffRole(req.user.role);
-    if (ticket.user_id !== req.user.id && !staff) {
+    const staff = actor.isStaff;
+    if (String(ticket.user_id) !== String(actor.id) && !staff) {
       return res.status(403).json({ success: false, message: 'Ce ticket n\'est pas le tien.' });
     }
 
@@ -251,6 +282,23 @@ router.get('/tickets/:id', authenticateToken, async (req, res) => {
           slaHours: slaHoursFor(ticket.priority),
           createdAt: ticket.createdAt,
           closedAt: ticket.closed_at,
+          requester: staff && ticket.user
+            ? {
+              id: ticket.user.id,
+              username: ticket.user.username,
+              fullName: ticket.user.full_name,
+              avatar: ticket.user.avatar,
+              verified: ticket.user.verified,
+            }
+            : null,
+          assignee: staff && ticket.assignee
+            ? { id: ticket.assignee.id, username: ticket.assignee.username }
+            : null,
+        },
+        actor: {
+          isStaff: staff,
+          isOwner: String(ticket.user_id) === String(actor.id),
+          role: actor.role,
         },
         messages: messages.map((m) => ({
           id: m.id,
@@ -287,13 +335,16 @@ router.post('/tickets/:id/messages', authenticateToken, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Message vide ou trop long.' });
     }
 
-    const ticket = await SupportTicket.findByPk(req.params.id);
+    const [actor, ticket] = await Promise.all([
+      resolveSupportActor(req),
+      SupportTicket.findByPk(req.params.id),
+    ]);
     if (!ticket) {
       return res.status(404).json({ success: false, message: 'Ticket introuvable.' });
     }
 
-    const staff = isStaffRole(req.user.role);
-    if (ticket.user_id !== req.user.id && !staff) {
+    const staff = actor.isStaff;
+    if (String(ticket.user_id) !== String(actor.id) && !staff) {
       return res.status(403).json({ success: false, message: 'Ce ticket n\'est pas le tien.' });
     }
     if (['resolved', 'closed'].includes(ticket.status)) {
@@ -316,13 +367,18 @@ router.post('/tickets/:id/messages', authenticateToken, async (req, res) => {
     // `is_staff` vient du rôle vérifié en base, jamais du corps de la requête :
     // sinon n'importe qui pourrait poster une fausse réponse « officielle »
     // dans son propre fil et la capturer en écran.
-    const isInternal = staff && req.body?.internal === true;
+    const isOwner = String(ticket.user_id) === String(actor.id);
+    // Un modérateur qui parle dans SON propre ticket reste un utilisateur, sauf
+    // s'il demande explicitement le mode staff. Sur le ticket d'un tiers, toute
+    // réponse d'un rôle staff est automatiquement officielle.
+    const actingAsStaff = staff && (!isOwner || req.body?.asStaff === true);
+    const isInternal = actingAsStaff && req.body?.internal === true;
 
     const message = await SupportTicketMessage.create({
       ticket_id: ticket.id,
-      author_id: req.user.id,
+      author_id: actor.id,
       body,
-      is_staff: staff,
+      is_staff: actingAsStaff,
       is_internal: isInternal,
     });
 
@@ -330,13 +386,13 @@ router.post('/tickets/:id/messages', authenticateToken, async (req, res) => {
     // utilisateur, il ne s'est rien passé.
     if (!isInternal) {
       await ticket.update({
-        status: staff ? 'answered' : 'pending',
+        status: actingAsStaff ? 'answered' : 'pending',
         last_message_at: new Date(),
-        unread_for_user: staff,
-        unread_for_staff: !staff,
+        unread_for_user: actingAsStaff,
+        unread_for_staff: !actingAsStaff,
       });
 
-      if (staff && ticket.user_id !== req.user.id) {
+      if (actingAsStaff && !isOwner) {
         // Notification uniquement vers l'utilisateur : le staff a sa file.
         await Notification.createNotification({
           recipient_id: ticket.user_id,
@@ -374,11 +430,14 @@ router.post('/tickets/:id/messages', authenticateToken, async (req, res) => {
  */
 router.post('/tickets/:id/close', authenticateToken, async (req, res) => {
   try {
-    const ticket = await SupportTicket.findByPk(req.params.id);
+    const [actor, ticket] = await Promise.all([
+      resolveSupportActor(req),
+      SupportTicket.findByPk(req.params.id),
+    ]);
     if (!ticket) {
       return res.status(404).json({ success: false, message: 'Ticket introuvable.' });
     }
-    if (ticket.user_id !== req.user.id && !isStaffRole(req.user.role)) {
+    if (String(ticket.user_id) !== String(actor.id) && !actor.isStaff) {
       return res.status(403).json({ success: false, message: 'Ce ticket n\'est pas le tien.' });
     }
     if (['resolved', 'closed'].includes(ticket.status)) {
@@ -399,13 +458,20 @@ router.post('/tickets/:id/close', authenticateToken, async (req, res) => {
  */
 router.get('/summary', authenticateToken, async (req, res) => {
   try {
-    const { tier } = await resolveTier(req.user.id);
+    const { tier, user } = await resolveTier(req.user.id);
     const isPro = tier === TIER.PRO;
+    const isStaff = isStaffRole(user?.role);
 
     const [unread, open] = await Promise.all([
-      SupportTicket.count({ where: { user_id: req.user.id, unread_for_user: true } }),
       SupportTicket.count({
-        where: { user_id: req.user.id, status: { [Op.in]: OPEN_STATUSES } },
+        where: isStaff
+          ? { unread_for_staff: true, status: { [Op.in]: OPEN_STATUSES } }
+          : { user_id: req.user.id, unread_for_user: true },
+      }),
+      SupportTicket.count({
+        where: isStaff
+          ? { status: { [Op.in]: OPEN_STATUSES } }
+          : { user_id: req.user.id, status: { [Op.in]: OPEN_STATUSES } },
       }),
     ]);
 
@@ -418,6 +484,8 @@ router.get('/summary', authenticateToken, async (req, res) => {
         slaHours: slaHoursFor(isPro ? 'high' : 'normal'),
         maxOpenTickets: isPro ? MAX_OPEN_TICKETS_PRO : MAX_OPEN_TICKETS_STANDARD,
         isPro,
+        isStaff,
+        staffRole: isStaff ? user.role : null,
       },
     });
   } catch (error) {
