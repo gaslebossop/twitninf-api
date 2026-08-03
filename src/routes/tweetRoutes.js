@@ -1065,11 +1065,14 @@ router.get('/:id/similar', [
       return tweetData;
     }));
 
+    const similarPage = enrichedTweets.slice(0, 3);
+    if (!(await paidContentService.maskTweetsOrFail(similarPage, userId, res))) return;
+
     res.json({
       success: true,
       message: `3 tweets similaires récupérés via ${sourceUsed}`,
       source: sourceUsed,
-      data: enrichedTweets.slice(0, 3)
+      data: similarPage
     });
 
   } catch (error) {
@@ -2738,6 +2741,15 @@ router.get('/:id/retweets', [
           views: parentTweet.view_count || 0
         }
       };
+
+      // Le parent part dans le même masquage que les réponses : sans lui, il
+      // suffisait d'ouvrir le fil de discussion d'un tweet payant pour en lire
+      // le texte complet, sans jamais passer par le fil ni par sa page.
+      if (!(await paidContentService.maskTweetsOrFail(
+        [parentTweetInfo, ...enrichedReplies],
+        userId,
+        res,
+      ))) return;
 
       res.json({
         success: true,

@@ -14,6 +14,7 @@ const { authenticateToken, denySuspended } = require('../middleware/authMiddlewa
 const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
 const BanService = require('../services/banService');
 const profileViewService = require('../services/profileViewService');
+const paidContentService = require('../services/paidContentService');
 const {
   TARGET_LANGUAGES,
   SOURCE_LANGUAGE,
@@ -865,6 +866,10 @@ router.get('/:id/tweets', [
 
       tweets = await hydrateTweetStats(rawTweets, currentUserId);
     }
+
+    // Contenus payants : le profil est l'endroit le plus évident où aller
+    // chercher un tweet vendu. Même masquage que le fil, même dernière étape.
+    if (!(await paidContentService.maskTweetsOrFail(tweets, currentUserId, res))) return;
 
     res.json({
       success: true,

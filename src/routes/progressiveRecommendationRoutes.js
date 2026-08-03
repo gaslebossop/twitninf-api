@@ -16,6 +16,7 @@ const logger = require('../utils/logger');
 const { Tweet, User, UserFollow } = require('../models');
 const { Op } = require('sequelize');
 const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
+const paidContentService = require('../services/paidContentService');
 
 // Services
 let ProgressiveRecommendationEngine;
@@ -101,6 +102,10 @@ router.get('/', authenticateToken, async (req, res) => {
       userId,
       { User, UserFollow, Op },
     );
+
+    // Contenus payants : le moteur classe par viralité, il ignore les verrous
+    // comme il ignore la confidentialité. Même endroit, même raison.
+    if (!(await paidContentService.maskTweetsOrFail(recommendations, userId, res))) return;
 
     res.json({
       success: true,
@@ -232,6 +237,8 @@ router.get('/viral-tweets', authenticateToken, async (req, res) => {
     logger.info(`🔥 Récupération des tweets viraux (limite: ${limit})`);
 
     const viralTweets = await viralityTracker.getViralTweets(parseInt(limit));
+
+    if (!(await paidContentService.maskTweetsOrFail(viralTweets, req.user.id, res))) return;
 
     res.json({
       success: true,

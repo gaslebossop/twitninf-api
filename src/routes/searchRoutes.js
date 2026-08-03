@@ -8,6 +8,7 @@ const { Op } = require('sequelize');
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
 const { streamSearchSummary } = require('../services/searchSummaryService');
+const paidContentService = require('../services/paidContentService');
 
 router.post('/ai-summary/stream', async (req, res) => {
   const { q, type = 'all', users = [], tweets = [], hashtags = [] } = req.body || {};
@@ -232,6 +233,12 @@ router.get('/', [
 
         return enrichedTweet;
       }));
+
+      // Contenus payants : la recherche renvoie du texte de tweet comme le
+      // fil. Sans masquage ici, il suffisait de chercher un mot du contenu
+      // vendu pour le lire dans les résultats. `req.user` est facultatif sur
+      // cette route publique : sans lecteur connu, rien n'est accessible.
+      if (!(await paidContentService.maskTweetsOrFail(enrichedTweets, req.user?.id, res))) return;
 
       results.tweets = enrichedTweets;
     }
@@ -507,6 +514,8 @@ router.get('/tweets', [
     // Compter le total
     const totalCount = await Tweet.count({ where: whereClause });
 
+    if (!(await paidContentService.maskTweetsOrFail(enrichedTweets, req.user?.id, res))) return;
+
     res.json({
       success: true,
       message: 'Recherche de tweets effectuée avec succès',
@@ -633,6 +642,8 @@ router.get('/tweets/authenticated', [
 
     // Compter le total
     const totalCount = await Tweet.count({ where: whereClause });
+
+    if (!(await paidContentService.maskTweetsOrFail(enrichedTweets, req.user.id, res))) return;
 
     res.json({
       success: true,

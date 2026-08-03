@@ -393,6 +393,46 @@ async function accessMapFor({ viewerId, contentType, contentIds }) {
 }
 
 /**
+ * Aplatit une liste de fil en objets tweet réellement masquables.
+ *
+ * Les routes ne servent pas toutes la même forme, et un contenu vendu peut se
+ * trouver à n'importe laquelle de ces places :
+ *
+ * - le tweet nu (fil classique) ;
+ * - le tweet enveloppé par un moteur de reco (`{ tweet, score }`) ou par une
+ *   ligne de liaison (`{ tweet }` d'un retweet, d'un like) ;
+ * - le tweet d'ORIGINE d'un retweet (`originalTweet`) — sans lui, il suffisait
+ *   de retweeter un contenu payant pour le publier gratuitement ;
+ * - le tweet PARENT d'une réponse (`parentTweet`), affiché comme contexte.
+ *
+ * Chaque nœud n'est retenu qu'une fois (identité d'objet) : deux tweets qui
+ * partagent le même original ne le masquent pas deux fois.
+ */
+function collectTweetNodes(items) {
+  const nodes = [];
+  const seen = new Set();
+
+  const walk = (node, depth) => {
+    if (!node || typeof node !== 'object' || depth > 3) return;
+
+    // Enveloppes : on descend AVANT le test d'`id`, une enveloppe n'en a pas.
+    walk(node.tweet, depth + 1);
+
+    if (!node.id || node.is_ad || seen.has(node)) return;
+    seen.add(node);
+    nodes.push(node);
+
+    walk(node.originalTweet, depth + 1);
+    walk(node.original_tweet, depth + 1);
+    walk(node.parentTweet, depth + 1);
+    walk(node.parent_tweet, depth + 1);
+  };
+
+  for (const item of items) walk(item, 0);
+  return nodes;
+}
+
+/**
  * Masque le contenu verrouillé d'une liste de tweets déjà sérialisés.
  *
  * Travaille sur les objets rendus par les routes (et non sur les instances
@@ -403,15 +443,17 @@ async function accessMapFor({ viewerId, contentType, contentIds }) {
 async function maskTweets(tweets, viewerId) {
   if (!Array.isArray(tweets) || !tweets.length) return tweets;
 
-  const realTweets = tweets.filter((tw) => tw && !tw.is_ad && tw.id);
+  const nodes = collectTweetNodes(tweets);
+  if (!nodes.length) return tweets;
+
   const map = await accessMapFor({
     viewerId,
     contentType: 'tweet',
-    contentIds: realTweets.map((tw) => tw.id),
+    contentIds: nodes.map((tw) => tw.id),
   });
   if (!map.size) return tweets;
 
-  for (const tweet of realTweets) {
+  for (const tweet of nodes) {
     const entry = map.get(String(tweet.id));
     if (!entry) continue;
 
@@ -425,11 +467,36 @@ async function maskTweets(tweets, viewerId) {
     tweet.content = buildPreview(lock, tweet.content);
     tweet.is_locked = true;
     tweet.media = [];
-    tweet.media_urls = JSON.stringify([]);
+    // `media_urls` circule tantôt en tableau (SQL brut des moteurs de reco),
+    // tantôt en chaîne JSON (sérialisations plus anciennes). On rend le vide
+    // dans la forme reçue : changer le type ici casserait l'affichage du
+    // client au lieu de simplement lui retirer les images.
+    tweet.media_urls = Array.isArray(tweet.media_urls) ? [] : JSON.stringify([]);
     if (tweet.translated_content) tweet.translated_content = null;
   }
 
   return tweets;
+}
+
+/**
+ * Masque une liste, ou coupe la réponse.
+ *
+ * Toutes les routes de fil partagent la même règle : si le masquage échoue, on
+ * ne sert pas la liste. Une page en erreur se rattrape d'un rafraîchissement ;
+ * un contenu vendu distribué gratuitement, non.
+ *
+ * Renvoie `false` quand la réponse d'erreur a déjà été envoyée — l'appelant
+ * n'a plus qu'à `return`.
+ */
+async function maskTweetsOrFail(tweets, viewerId, res) {
+  try {
+    await maskTweets(tweets, viewerId);
+    return true;
+  } catch (e) {
+    logger.error('Masquage des contenus payants en échec:', e);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+    return false;
+  }
 }
 
 /** Même masquage pour un tweet seul (route de détail). */
@@ -518,6 +585,7 @@ module.exports = {
   refundPurchase,
   accessMapFor,
   maskTweets,
+  maskTweetsOrFail,
   maskTweet,
   hasAccess,
   creatorDashboard,

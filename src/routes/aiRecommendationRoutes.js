@@ -20,6 +20,7 @@ const logger = require('../utils/logger');
 const { getAIBridge } = require('../services/aiRecommendationBridge');
 const { getVectorStore } = require('../services/vectorStoreService');
 const { engagementTargetId } = require('../utils/engagementTarget');
+const paidContentService = require('../services/paidContentService');
 
 // ═══════════════════════════════════════════════════════════════════
 // GET /api/ai-recommendations/
@@ -126,6 +127,10 @@ router.get('/', authMiddleware.authenticateToken, async (req, res) => {
                 }
             }
 
+            // Contenus payants : le pipeline IA classe des vecteurs, pas des
+            // droits d'accès. Masquage juste avant l'envoi, comme partout.
+            if (!(await paidContentService.maskTweetsOrFail(enrichedRecommendations, userId, res))) return;
+
             res.json({
                 success: true,
                 data: {
@@ -175,11 +180,36 @@ router.get('/similar/:tweetId', authMiddleware.authenticateToken, async (req, re
         const result = await bridge.findSimilarTweets(String(tweetId), parseInt(topK));
 
         if (result.status === 'ok') {
+            // L'index FAISS renvoie le texte des tweets sous sa propre forme
+            // (`{ tweet_id, text }`), sans rien savoir des verrous : un contenu
+            // vendu y serait lisible en clair. On applique donc la même règle
+            // d'accès, sur les champs de cette forme-là.
+            const similar = Array.isArray(result.data?.similar_tweets)
+                ? result.data.similar_tweets
+                : (Array.isArray(result.data?.results) ? result.data.results : []);
+
+            try {
+                const accessMap = await paidContentService.accessMapFor({
+                    viewerId: req.user.id,
+                    contentType: 'tweet',
+                    contentIds: similar.map(item => item.tweet_id || item.id),
+                });
+                for (const item of similar) {
+                    const entry = accessMap.get(String(item.tweet_id || item.id));
+                    if (!entry || entry.hasAccess) continue;
+                    item.text = entry.lock.preview_text || '';
+                    item.is_locked = true;
+                }
+            } catch (maskError) {
+                logger.error(`❌ [AI Reco] Masquage des contenus payants en échec: ${maskError.message}`);
+                return res.status(500).json({ success: false, error: 'Erreur interne du serveur' });
+            }
+
             res.json({
                 success: true,
                 data: {
                     source_tweet: tweetId,
-                    similar_tweets: result.data?.results || result.data || [],
+                    similar_tweets: similar,
                     algorithm: 'FAISS_InnerProduct',
                     timestamp: new Date().toISOString(),
                 },

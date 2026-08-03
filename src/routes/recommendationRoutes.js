@@ -7,6 +7,7 @@ const { Tweet, User, UserFollow, TweetLike, TweetRetweet } = require('../models'
 const { Op, fn, col, literal } = require('sequelize');
 const { ultraSafeClean } = require('../utils/circularRefCleaner');
 const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
+const paidContentService = require('../services/paidContentService');
 const { targetingService } = require('../../../targeting');
 
 // ═══════════════════════════════════════════════════════════════════
@@ -528,6 +529,8 @@ router.get('/', authMiddleware.authenticateToken, async (req, res) => {
 
     const { tweets, poolSize } = await getSimilarityRecommendations(userId, parsedLimit, parsedOffset, '/api/recommendations');
 
+    if (!(await paidContentService.maskTweetsOrFail(tweets, userId, res))) return;
+
     return res.json({
       success: true,
       data: formatResponse(tweets, parsedLimit, parsedOffset, 'similarity_v2_base', poolSize),
@@ -536,6 +539,9 @@ router.get('/', authMiddleware.authenticateToken, async (req, res) => {
     logger.error('❌ Erreur Route Recommandations:', error);
     try {
       const fallbackTweets = await getFallbackTweets(req.user.id, 20);
+      // Le fil de secours n'est pas un fil au rabais : il porte les mêmes
+      // tweets, donc les mêmes verrous.
+      if (!(await paidContentService.maskTweetsOrFail(fallbackTweets, req.user.id, res))) return;
       return res.json({ success: true, data: formatResponse(fallbackTweets, 20, 0, 'emergency_fallback', fallbackTweets.length) });
     } catch (e2) {
       return res.status(500).json({ success: false, error: 'Erreur serveur', details: error.message });
@@ -560,6 +566,8 @@ router.get('/following', authMiddleware.authenticateToken, async (req, res) => {
       { onlyFollowing: true }
     );
 
+    if (!(await paidContentService.maskTweetsOrFail(tweets, userId, res))) return;
+
     return res.json({
       success: true,
       data: formatResponse(tweets, parsedLimit, parsedOffset, 'similarity_v2_following', poolSize),
@@ -582,6 +590,8 @@ router.get('/algorithm/:algorithm', authMiddleware.authenticateToken, async (req
 
     const { tweets, poolSize } = await getSimilarityRecommendations(userId, parsedLimit, parsedOffset, `/api/recommendations/algorithm/${algorithm}`);
 
+    if (!(await paidContentService.maskTweetsOrFail(tweets, userId, res))) return;
+
     return res.json({
       success: true,
       data: formatResponse(tweets, parsedLimit, parsedOffset, 'similarity_v2_' + algorithm, poolSize),
@@ -602,6 +612,8 @@ router.get('/smart', authMiddleware.authenticateToken, async (req, res) => {
     const parsedOffset = parseInt(offset) || 0;
 
     const { tweets, poolSize } = await getSimilarityRecommendations(userId, parsedLimit, parsedOffset, '/api/recommendations/smart');
+
+    if (!(await paidContentService.maskTweetsOrFail(tweets, userId, res))) return;
 
     const formattedData = formatResponse(tweets, parsedLimit, parsedOffset, 'similarity_v2_discovery', poolSize);
     formattedData.context = 'smart_discovery';

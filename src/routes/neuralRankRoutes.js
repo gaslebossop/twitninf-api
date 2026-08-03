@@ -13,6 +13,7 @@ const router = express.Router();
 const { authenticateToken } = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
 const rustClient = require('../services/rustRecommenderClient');
+const paidContentService = require('../services/paidContentService');
 const { sequelize } = require('../database');
 const { QueryTypes } = require('sequelize');
 const redis = require('redis');
@@ -358,6 +359,11 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
     // Hydrater les IDs en tweets complets
     const tweets = await fetchTweetsByIds(result.tweetIds, userId, result.experiments);
 
+    // Contenus payants : ce fil est construit à partir d'IDs classés par le
+    // service Rust, qui ne sait rien des verrous. Le masquage se fait donc ici,
+    // juste avant l'envoi, comme sur toutes les autres listes.
+    if (!(await paidContentService.maskTweetsOrFail(tweets, userId, res))) return;
+
     return res.json({
       success: true,
       engine: 'rust-neural-rank',
@@ -407,6 +413,11 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
           && (!isRetweet || (original && original?.parent_tweet_id == null))
           && renderable;
       });
+
+      // Le repli sert le même contenu par un autre chemin : il doit passer par
+      // le même masquage, sinon une simple panne du service Rust rouvrirait
+      // gratuitement tout le contenu vendu.
+      if (!(await paidContentService.maskTweetsOrFail(recommendations, userId, res))) return;
 
       return res.json({
         success: true,
