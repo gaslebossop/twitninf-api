@@ -515,8 +515,11 @@ router.get('/admin/queue', authenticateToken, requireModeratorRole, async (req, 
       ],
       order: [
         // `high` avant `normal` : c'est exactement l'avantage vendu.
-        [sequelize.literal("CASE WHEN priority = 'high' THEN 0 ELSE 1 END"), 'ASC'],
-        [sequelize.literal('COALESCE(last_message_at, created_at)'), 'ASC'],
+        // Les colonnes doivent être qualifiées : les jointures `user` et
+        // `assignee` ont elles aussi un `created_at`, que PostgreSQL juge sinon
+        // ambigu et refuse avec une erreur 500.
+        [sequelize.literal("CASE WHEN \"SupportTicket\".\"priority\" = 'high' THEN 0 ELSE 1 END"), 'ASC'],
+        [sequelize.literal('COALESCE("SupportTicket"."last_message_at", "SupportTicket"."created_at")'), 'ASC'],
       ],
       limit: Math.min(parseInt(limit, 10) || 50, 200),
     });
