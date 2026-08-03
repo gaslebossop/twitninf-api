@@ -109,6 +109,10 @@ class Notification extends Model {
               tweet_id: record.tweet_id || null,
               sender_id: record.sender_id || null,
               entity_type: record.content?.entity_type || null,
+              // Sous-type des notifications `system` (idée du radar, réponse du
+              // support…). Sans lui, le client ne peut pas router un push : le
+              // type `system` seul ne dit pas où aller.
+              kind: record.metadata?.kind || null,
               story_id: record.content?.story_id || null,
               conversation_id: record.content?.conversation_id || null,
               message_id: record.content?.message_id || null,

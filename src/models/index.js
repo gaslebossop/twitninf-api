@@ -40,6 +40,8 @@ const ConversationParticipant = require('./ConversationParticipant');
 const Message = require('./Message');
 const MessageReaction = require('./MessageReaction');
 const UnbanTicketModule = require('./UnbanTicket');
+const SupportTicketModule = require('./SupportTicket');
+const SupportTicketMessageModule = require('./SupportTicketMessage');
 const PolicierCongoContract = require('./PolicierCongoContract');
 const MiningRound = require('./MiningRound');
 const CasinoBet = require('./CasinoBet');
@@ -112,6 +114,8 @@ StoryHighlight.initStoryHighlightModel(sequelize);
 StoryHighlightItem.initStoryHighlightItemModel(sequelize);
 TweetTranslation.initTweetTranslationModel(sequelize);
 const UnbanTicketModel = UnbanTicketModule(sequelize);
+const SupportTicketModel = SupportTicketModule(sequelize);
+const SupportTicketMessageModel = SupportTicketMessageModule(sequelize);
 
 // Définir les associations entre les modèles
 
@@ -469,6 +473,39 @@ UnbanTicketModel.belongsTo(User, {
 UnbanTicketModel.belongsTo(User, {
   foreignKey: 'processed_by',
   as: 'processor'
+});
+
+// Associations pour le support (accès direct au support — palier Pro)
+User.hasMany(SupportTicketModel, {
+  foreignKey: 'user_id',
+  as: 'supportTickets',
+  onDelete: 'CASCADE'
+});
+
+SupportTicketModel.belongsTo(User, {
+  foreignKey: 'user_id',
+  as: 'user'
+});
+
+SupportTicketModel.belongsTo(User, {
+  foreignKey: 'assigned_to',
+  as: 'assignee'
+});
+
+SupportTicketModel.hasMany(SupportTicketMessageModel, {
+  foreignKey: 'ticket_id',
+  as: 'messages',
+  onDelete: 'CASCADE'
+});
+
+SupportTicketMessageModel.belongsTo(SupportTicketModel, {
+  foreignKey: 'ticket_id',
+  as: 'ticket'
+});
+
+SupportTicketMessageModel.belongsTo(User, {
+  foreignKey: 'author_id',
+  as: 'author'
 });
 
 // Associations pour les publicités
@@ -1511,6 +1548,8 @@ module.exports = {
   StoryHighlightItem,
   TweetTranslation,
   UnbanTicket: UnbanTicketModel,
+  SupportTicket: SupportTicketModel,
+  SupportTicketMessage: SupportTicketMessageModel,
   PolicierCongoContract: PolicierCongoContractModel,
   MiningRound: MiningRoundModel,
   CasinoBet: CasinoBetModel,

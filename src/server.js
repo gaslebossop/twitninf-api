@@ -84,6 +84,8 @@ const userSimilarityRoutes = require('./routes/userSimilarityRoutes');
 const neuralRankRoutes = require('./routes/neuralRankRoutes');
 const walletRoutes = require('./routes/walletRoutes');
 const premiumRoutes = require('./routes/premiumRoutes');
+const creatorIntelligenceRoutes = require('./routes/creatorIntelligenceRoutes');
+const supportRoutes = require('./routes/supportRoutes');
 
 // 🎯 Import du module de ciblage étendu (chemin absolu pour compatibilité VPS apibeta vs api)
 let _targetingModule = null;
@@ -361,6 +363,12 @@ app.use('/api/premium', premiumRoutes);
 app.use('/api/track', trackingRoutes);
 
 app.use('/api/user-stats', userStatsRoutes);
+
+// Analytics prédictifs, co-pilote IA, radar de tendances — palier Pro
+app.use('/api/creator-intelligence', creatorIntelligenceRoutes);
+
+// Support par ticket (traitement prioritaire pour le palier Pro)
+app.use('/api/support', supportRoutes);
 
 app.use('/api/verification', verificationRoutes);
 
@@ -1195,6 +1203,10 @@ async function startServer() {
       semanticSimilarityService.initialize().catch(err => {
         logger.error('❌ Erreur initialisation index sémantique:', err.message);
       });
+
+      // 📡 Radar de tendances (avantage Pro) — départ différé, il partage le
+      // modèle d'embeddings avec l'index sémantique ci-dessus.
+      require('./services/trendRadarService').startScheduler();
     } catch (err) {
       logger.error('❌ Erreur initialisation recommandations:', err.message);
     }
