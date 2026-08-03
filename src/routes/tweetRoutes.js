@@ -16,6 +16,7 @@ const { engagementTargetId, resolveEngagementTarget } = require('../utils/engage
 const { assertTweetLength } = require('../utils/tweetLimits');
 const tweetTranslationService = require('../services/tweetTranslationService');
 const paidContentService = require('../services/paidContentService');
+const { requireContentAccess, assertAccessible } = require('../middleware/paidContentAccess');
 const tweetEditService = require('../services/tweetEditService');
 const TweetRecommendationService = require('../services/tweetRecommendationService');
 const RealtimeQueueService = require('../services/realtimeQueueService');
@@ -1099,7 +1100,11 @@ router.post('/', [
   body('is_private').optional().isBoolean().withMessage('Le statut privé doit être un booléen'),
   body('is_sensitive').optional().isBoolean().withMessage('Le statut sensible doit être un booléen'),
   body('translation_enabled').optional().isBoolean().withMessage('L\'option de traduction doit être un booléen'),
-  handleValidationErrors
+  handleValidationErrors,
+  // Répondre à un contenu payant non acheté : la réponse s'afficherait sous
+  // un texte que son auteur n'a jamais lu, et le fil de discussion d'un tweet
+  // vendu deviendrait le seul endroit où en parler sans l'avoir payé.
+  requireContentAccess({ param: null, bodyField: 'parent_tweet_id' }),
 ], async (req, res) => {
   try {
     // Vérification manuelle du système de ban
@@ -1975,7 +1980,10 @@ router.post('/:id/like', [
   authenticateToken,
   checkUserBanStrict, // Vérifier que l'utilisateur n'est pas banni
   param('id').isUUID().withMessage('ID de tweet invalide'),
-  handleValidationErrors
+  handleValidationErrors,
+  // Aimer un texte qu'on n'a pas pu lire n'a pas de sens, et le compteur
+  // servirait de preuve sociale à un contenu que personne n'a acheté.
+  requireContentAccess(),
 ], async (req, res) => {
   try {
     const userId = req.user.id;
@@ -2106,7 +2114,10 @@ router.post('/:id/retweet', [
       }
       return true;
     }),
-  handleValidationErrors
+  handleValidationErrors,
+  // Un retweet REPUBLIE le contenu à un autre public. Sans ce contrôle, un
+  // seul acheteur suffisait à le diffuser gratuitement à tous ses abonnés.
+  requireContentAccess(),
 ], async (req, res) => {
   try {
     const { comment } = req.body;
@@ -2409,10 +2420,25 @@ router.post('/translations/batch', [
 ], async (req, res) => {
   try {
     const language = String(req.body.language || '').trim().toLowerCase();
-    const translations = await tweetTranslationService.getTranslationsForLanguage(
-      req.body.tweet_ids,
-      language,
-    );
+
+    // Contenus payants : cette route rend du texte de tweet, en lot. Les
+    // verrouillés non achetés sont retirés de la demande — sinon le fil
+    // récupérait par la bande la traduction de ce qu'il n'a pas le droit
+    // d'afficher.
+    const requestedIds = req.body.tweet_ids.filter(Boolean).map(String);
+    const lockMap = await paidContentService.accessMapFor({
+      viewerId: req.user.id,
+      contentType: 'tweet',
+      contentIds: requestedIds,
+    });
+    const readableIds = requestedIds.filter((id) => {
+      const entry = lockMap.get(String(id));
+      return !entry || entry.hasAccess;
+    });
+
+    const translations = readableIds.length
+      ? await tweetTranslationService.getTranslationsForLanguage(readableIds, language)
+      : [];
 
     res.json({
       success: true,
@@ -2438,7 +2464,11 @@ router.post('/translations/batch', [
  */
 router.get('/:id/translations', [
   param('id').isUUID().withMessage('ID de tweet invalide'),
-  handleValidationErrors
+  handleValidationErrors,
+  // Cette route est publique et rend le TEXTE du tweet, traduit. Sur un
+  // contenu payant, c'était la marchandise servie en clair à qui savait
+  // l'adresse — sans même être connecté.
+  requireContentAccess(),
 ], async (req, res) => {
   try {
     // `targetTweet` et pas `tweet` : sur un retweet pur, c'est l'original qui
@@ -3026,7 +3056,8 @@ router.post('/:id/bookmark', [
   authenticateToken,
   checkUserBanStrict,
   param('id').isUUID().withMessage('ID de tweet invalide'),
-  handleValidationErrors
+  handleValidationErrors,
+  requireContentAccess(),
 ], async (req, res) => {
   try {
     const userId = req.user.id;
@@ -3078,7 +3109,8 @@ router.post('/:id/share', [
   authenticateToken,
   checkUserBanReadOnly,
   param('id').isUUID().withMessage('ID de tweet invalide'),
-  handleValidationErrors
+  handleValidationErrors,
+  requireContentAccess(),
 ], async (req, res) => {
   try {
     const userId = req.user.id;

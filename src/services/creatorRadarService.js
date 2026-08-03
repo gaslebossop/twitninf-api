@@ -60,13 +60,14 @@ async function risingAccounts(userId, { days = 7, limit = 20 } = {}) {
     ),
     affinity AS (
       -- Abonnements en commun : combien de comptes que JE suis suivent aussi
-      -- ce compte. Deux jointures sur user_follows, jamais un COUNT(*) sur
-      -- une jointure large — ça gonflerait le score des gros comptes.
-      SELECT f2.following_id, COUNT(DISTINCT f1.following_id)::int AS common
+      -- ce compte. Une seule jointure suffit — la version précédente en
+      -- rajoutait une troisième sur la même clé, qui ne changeait pas le
+      -- résultat (le COUNT DISTINCT la rattrapait) mais multipliait les
+      -- lignes intermédiaires par le nombre d'abonnés de chaque compte.
+      SELECT f3.following_id, COUNT(DISTINCT f1.following_id)::int AS common
       FROM mine f1
       JOIN user_follows f3 ON f3.follower_id = f1.following_id AND f3.status = 'active'
-      JOIN user_follows f2 ON f2.following_id = f3.following_id AND f2.status = 'active'
-      GROUP BY f2.following_id
+      GROUP BY f3.following_id
     )
     SELECT
       u.id, u.username, u.full_name, u.avatar, u.verified, u.verification_style,
@@ -113,20 +114,55 @@ async function risingAccounts(userId, { days = 7, limit = 20 } = {}) {
   }));
 }
 
+/** Médiane d'une liste de nombres. Exportée pour être testable seule. */
+function median(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** Tweets de référence : au moins autant, sinon la médiane ne veut rien dire. */
+const BASELINE_MIN_TWEETS = 5;
+
 /**
- * Rythme habituel d'un auteur : engagements médians par heure d'âge, mesurés
- * sur ses 30 derniers tweets originaux.
+ * Rythme habituel d'un auteur AU MÊME ÂGE que le tweet observé.
+ *
+ * La première version divisait les engagements de chaque tweet passé par son
+ * âge TOTAL : un tweet d'un mois donnait « 0,02 interaction/heure ». Or
+ * l'engagement est massivement concentré dans les premières heures. On
+ * comparait donc la pointe d'un tweet de deux heures à la moyenne étalée d'un
+ * tweet de trente jours — le rapport partait à 40× pour une publication
+ * parfaitement ordinaire, et l'alerte annonçait un décollage à tout le monde.
+ *
+ * On mesure maintenant, pour chacun des 30 derniers tweets originaux, les
+ * engagements reçus pendant SES `ageHours` premières heures. Le rapport
+ * compare enfin deux choses de même nature, et le multiplicateur annoncé à
+ * l'auteur veut dire quelque chose.
  *
  * Médiane et non moyenne : un seul tweet viral dans l'historique tirerait la
  * moyenne assez haut pour que plus rien ne déclenche jamais — exactement
  * l'auteur pour qui l'alerte compte le plus.
  */
-async function baselineFor(userId) {
+async function baselineFor(userId, ageHours = 24) {
+  // Fenêtre bornée : sous 15 minutes le bruit domine, au-delà de 48 heures on
+  // sort de la fenêtre d'alerte de toute façon.
+  const window = Math.min(Math.max(Number(ageHours) || 1, 0.25), 48);
+
   const rows = await sequelize.query(`
     SELECT
       t.id,
-      EXTRACT(EPOCH FROM (NOW() - t.created_at)) / 3600 AS age_hours,
-      (COUNT(DISTINCT l.id) + COUNT(DISTINCT rt.id) + COUNT(DISTINCT rp.id))::int AS engagements
+      (
+        COUNT(DISTINCT l.id) FILTER (
+          WHERE l.created_at <= t.created_at + (:window || ' hours')::interval
+        )
+        + COUNT(DISTINCT rt.id) FILTER (
+          WHERE rt.created_at <= t.created_at + (:window || ' hours')::interval
+        )
+        + COUNT(DISTINCT rp.id) FILTER (
+          WHERE rp.created_at <= t.created_at + (:window || ' hours')::interval
+        )
+      )::int AS engagements
     FROM tweets t
     LEFT JOIN tweet_likes l ON l.tweet_id = t.id
     LEFT JOIN tweet_retweets rt ON rt.tweet_id = t.id
@@ -134,29 +170,23 @@ async function baselineFor(userId) {
     WHERE t.user_id = :userId
       AND t.deleted_at IS NULL
       AND t.parent_tweet_id IS NULL
-      AND t.created_at < NOW() - INTERVAL '48 hours'
+      -- Le tweet de référence doit avoir EU le temps de vivre la fenêtre
+      -- entière, sinon on comparerait à un historique tronqué.
+      AND t.created_at < NOW() - (:window || ' hours')::interval
     GROUP BY t.id, t.created_at
     ORDER BY t.created_at DESC
     LIMIT 30
   `, {
-    replacements: { userId: String(userId) },
+    replacements: { userId: String(userId), window: String(window) },
     type: sequelize.QueryTypes.SELECT,
   });
 
   // Moins de cinq tweets de référence : pas de base fiable, donc pas
   // d'alerte. Prévenir un compte neuf que « son tweet décolle » à trois likes
   // décrédibiliserait la fonctionnalité en une notification.
-  if (rows.length < 5) return null;
+  if (rows.length < BASELINE_MIN_TWEETS) return null;
 
-  const perHour = rows
-    .map((r) => Number(r.engagements) / Math.max(Number(r.age_hours), 1))
-    .sort((a, b) => a - b);
-  const mid = Math.floor(perHour.length / 2);
-  const median = perHour.length % 2
-    ? perHour[mid]
-    : (perHour[mid - 1] + perHour[mid]) / 2;
-
-  return median;
+  return median(rows.map((r) => Number(r.engagements)));
 }
 
 /**
@@ -197,20 +227,25 @@ async function scanVelocity({ limit = 300 } = {}) {
     type: sequelize.QueryTypes.SELECT,
   });
 
-  // Une seule base par auteur, même s'il a plusieurs tweets en lice.
+  // Une base par auteur ET par tranche d'âge : deux tweets du même auteur
+  // publiés à des heures différentes ne se comparent pas au même historique.
   const baselines = new Map();
   let alerted = 0;
 
   for (const row of candidates) {
     try {
-      const key = String(row.user_id);
-      if (!baselines.has(key)) baselines.set(key, await baselineFor(row.user_id));
+      const ageHours = Math.max(Number(row.age_hours), 0.25);
+      // Tranches d'une demi-heure : assez fin pour rester juste, assez large
+      // pour ne pas relancer la requête à chaque tweet d'un même auteur.
+      const bucket = Math.max(0.5, Math.round(ageHours * 2) / 2);
+      const key = `${row.user_id}:${bucket}`;
+      if (!baselines.has(key)) baselines.set(key, await baselineFor(row.user_id, bucket));
       const baseline = baselines.get(key);
       if (baseline === null || baseline <= 0) continue;
 
-      const ageHours = Math.max(Number(row.age_hours), 0.25);
-      const rate = Number(row.engagements) / ageHours;
-      const ratio = rate / baseline;
+      // Les deux termes sont des engagements sur une même durée de vie :
+      // le rapport est enfin homogène.
+      const ratio = Number(row.engagements) / baseline;
       if (ratio < VELOCITY_ALERT_MULTIPLIER) continue;
 
       await TweetVelocityAlert.create({
@@ -272,9 +307,16 @@ async function velocityHistory(userId, { limit = 30 } = {}) {
 
 function startVelocityWorker() {
   if (velocityTimer) return;
-  velocityTimer = setInterval(() => {
+  const pass = () => {
     scanVelocity().catch((e) => logger.error('[radar] Passage de vitesse en échec:', e));
-  }, VELOCITY_INTERVAL_MS);
+  };
+  // Un premier passage peu après le démarrage : sinon un redémarrage toutes
+  // les quelques minutes (déploiement, `pm2 restart`) repousse indéfiniment
+  // la détection, et un tweet qui décolle est justement ce qu'on ne peut pas
+  // signaler en retard.
+  const kickoff = setTimeout(pass, 60 * 1000);
+  if (typeof kickoff.unref === 'function') kickoff.unref();
+  velocityTimer = setInterval(pass, VELOCITY_INTERVAL_MS);
   if (typeof velocityTimer.unref === 'function') velocityTimer.unref();
   logger.info('[radar] Détection de décollage démarrée');
 }
@@ -287,8 +329,10 @@ function stopVelocityWorker() {
 module.exports = {
   risingAccounts,
   baselineFor,
+  median,
   scanVelocity,
   velocityHistory,
   startVelocityWorker,
   stopVelocityWorker,
+  BASELINE_MIN_TWEETS,
 };

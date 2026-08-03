@@ -10,7 +10,7 @@ const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
+const { authenticateToken, optionalAuthenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
 const BanService = require('../services/banService');
 const profileViewService = require('../services/profileViewService');
@@ -611,12 +611,18 @@ router.delete('/followers/:followerId', [
  * Obtenir le profil public d'un utilisateur par son ID
  */
 router.get('/:id', [
+  // Authentification FACULTATIVE : la route reste publique, mais quand un
+  // jeton accompagne la requête on sait qui regarde — et c'est par ici que
+  // l'app arrive quand on touche un avatar dans le fil (elle n'a alors qu'un
+  // id, pas un nom). Sans ça, « qui a consulté ton profil » ne comptait que
+  // les visites faites par le chemin nominatif : la table est restée vide.
+  optionalAuthenticateToken,
   param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
   handleValidationErrors
 ], async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     const user = await User.findOne({
       where: { 
         id: id,
@@ -631,6 +637,13 @@ router.get('/:id', [
         success: false,
         message: 'Profil introuvable'
       });
+    }
+
+    // Visite enregistrée sans être attendue, comme sur la route nominative.
+    // `record` ignore de lui-même le visiteur anonyme et l'auto-visite.
+    if (req.user?.id) {
+      profileViewService.record({ profileId: user.id, viewerId: req.user.id })
+        .catch((e) => logger.warn(`Visite de profil non enregistrée: ${e.message}`));
     }
 
     res.json({

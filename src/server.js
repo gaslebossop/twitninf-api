@@ -1063,22 +1063,47 @@ async function startServer() {
       scheduledTweetService.startWorker();
       creatorRadarService.startVelocityWorker();
 
-      const impersonationTimer = setInterval(() => {
-        impersonationWatchService.scanAllSubscribers()
-          .catch((e) => logger.warn('[impersonation] Passage en échec:', e.message));
-      }, 60 * 60 * 1000);
-      if (typeof impersonationTimer.unref === 'function') impersonationTimer.unref();
+      /**
+       * Premier passage peu après le démarrage, puis à l'intervalle.
+       *
+       * `setInterval` seul ne déclenche RIEN avant la fin d'une période
+       * entière. Sur un process redémarré souvent (déploiements, `pm2
+       * restart`), une tâche horaire ne tourne qu'une fois sur deux et une
+       * tâche quotidienne ne tourne jamais : chaque redémarrage remet le
+       * compteur à zéro. Les alertes d'usurpation et le ménage de rétention
+       * étaient dans ce cas.
+       *
+       * Le délai de départ laisse la base et les modèles s'initialiser sans
+       * concurrencer les premières requêtes.
+       */
+      const runNowThenEvery = (label, intervalMs, task, startupDelayMs = 45 * 1000) => {
+        const runSafely = () => {
+          Promise.resolve()
+            .then(task)
+            .catch((e) => logger.warn(`[${label}] Passage en échec:`, e.message));
+        };
+        const kickoff = setTimeout(runSafely, startupDelayMs);
+        if (typeof kickoff.unref === 'function') kickoff.unref();
+        const timer = setInterval(runSafely, intervalMs);
+        if (typeof timer.unref === 'function') timer.unref();
+        return timer;
+      };
+
+      runNowThenEvery(
+        'impersonation',
+        60 * 60 * 1000,
+        () => impersonationWatchService.scanAllSubscribers(),
+      );
 
       // Ménage quotidien : rétention des visites de profil, réservations de
       // pseudo expirées. Sans lui, `profile_views` grossit indéfiniment pour
       // afficher sept jours, et un pseudo réservé le reste pour toujours.
-      const housekeepingTimer = setInterval(() => {
-        profileViewService.purgeOld()
+      runNowThenEvery('housekeeping', 24 * 60 * 60 * 1000, async () => {
+        await profileViewService.purgeOld()
           .catch((e) => logger.warn('[profileViews] Purge en échec:', e.message));
-        usernameMarketService.releaseExpired()
+        await usernameMarketService.releaseExpired()
           .catch((e) => logger.warn('[usernameMarket] Libération en échec:', e.message));
-      }, 24 * 60 * 60 * 1000);
-      if (typeof housekeepingTimer.unref === 'function') housekeepingTimer.unref();
+      }, 90 * 1000);
 
       logger.info('✅ Tâches de fond de l\'offre créateur démarrées');
     } catch (error) {

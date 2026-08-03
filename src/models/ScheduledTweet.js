@@ -58,6 +58,20 @@ const ScheduledTweet = (sequelize) => sequelize.define('ScheduledTweet', {
     type: DataTypes.DATE,
     allowNull: true,
   },
+  /**
+   * Fuseau de l'auteur au moment où il a programmé, en nom IANA.
+   *
+   * `scheduled_for` est un instant, il n'a pas besoin de fuseau. Le mode
+   * « meilleur moment », si : il choisit une HEURE DE LA JOURNÉE à
+   * l'échéance, hors de toute requête HTTP. Sans cette colonne, le worker
+   * posait l'heure dans le fuseau du VPS (UTC) et publiait deux heures trop
+   * tôt pour un auteur français.
+   */
+  time_zone: {
+    type: DataTypes.STRING(64),
+    allowNull: false,
+    defaultValue: 'UTC',
+  },
   status: {
     type: DataTypes.ENUM('pending', 'publishing', 'published', 'failed', 'canceled'),
     defaultValue: 'pending',

@@ -8,6 +8,12 @@ const {
   SCHEDULE_MAX_PENDING,
   SCHEDULE_MIN_LEAD_MS,
 } = require('../constants/premiumMarket');
+const {
+  DEFAULT_TIME_ZONE,
+  hourInZoneSql,
+  instantForZonedHour,
+  isValidTimeZone,
+} = require('../utils/timezone');
 const logger = require('../utils/logger');
 
 /**
@@ -47,10 +53,11 @@ class ScheduleError extends Error {
  * recommanderait l'heure à laquelle l'auteur publie le plus, ce qu'il sait
  * déjà.
  */
-async function bestHoursFor(userId) {
+async function bestHoursFor(userId, timeZone = DEFAULT_TIME_ZONE) {
+  const zone = isValidTimeZone(timeZone) ? timeZone : DEFAULT_TIME_ZONE;
   const rows = await sequelize.query(`
     SELECT
-      EXTRACT(HOUR FROM t.created_at)::int AS hour,
+      ${hourInZoneSql('t.created_at')} AS hour,
       COUNT(DISTINCT t.id) AS tweets,
       COUNT(DISTINCT l.id) AS likes,
       COUNT(DISTINCT rt.id) AS retweets,
@@ -65,7 +72,7 @@ async function bestHoursFor(userId) {
       AND t.parent_tweet_id IS NULL
     GROUP BY 1
   `, {
-    replacements: { userId: String(userId) },
+    replacements: { userId: String(userId), timeZone: zone },
     type: sequelize.QueryTypes.SELECT,
   });
 
@@ -94,16 +101,18 @@ async function bestHoursFor(userId) {
  * Sans historique exploitable, on publie à l'heure demandée : une
  * recommandation tirée de deux tweets serait pire que pas de recommandation.
  */
-async function resolveBestTime(userId, from) {
-  const hours = await bestHoursFor(userId);
+async function resolveBestTime(userId, from, timeZone = DEFAULT_TIME_ZONE) {
+  const zone = isValidTimeZone(timeZone) ? timeZone : DEFAULT_TIME_ZONE;
+  const hours = await bestHoursFor(userId, zone);
   if (!hours.length) return from;
 
   const start = new Date(from);
   for (let dayOffset = 0; dayOffset <= 1; dayOffset += 1) {
     for (const hour of [...hours].sort((a, b) => a - b)) {
-      const candidate = new Date(start);
-      candidate.setDate(candidate.getDate() + dayOffset);
-      candidate.setHours(hour, 0, 0, 0);
+      // `setHours` posait l'heure dans le fuseau du PROCESSUS — UTC sur le
+      // VPS. Un créneau annoncé « 19 h » à un créateur français partait donc
+      // à 21 h chez lui. L'heure se pose maintenant dans SON fuseau.
+      const candidate = instantForZonedHour(start, hour, zone, dayOffset);
       if (candidate > start) return candidate;
     }
   }
@@ -111,7 +120,15 @@ async function resolveBestTime(userId, from) {
 }
 
 /** Programme une publication. Le palier est vérifié par la route. */
-async function schedule({ userId, content, media = [], replyToId = null, mode = 'exact', scheduledFor }) {
+async function schedule({
+  userId,
+  content,
+  media = [],
+  replyToId = null,
+  mode = 'exact',
+  scheduledFor,
+  timeZone = DEFAULT_TIME_ZONE,
+}) {
   const text = String(content || '').trim();
   if (!text) throw new ScheduleError('Le contenu ne peut pas être vide', 'empty');
 
@@ -150,6 +167,10 @@ async function schedule({ userId, content, media = [], replyToId = null, mode = 
     reply_to_id: replyToId || null,
     mode: mode === 'best_time' ? 'best_time' : 'exact',
     scheduled_for: when,
+    // Le fuseau est retenu à la programmation : le worker publie sans requête
+    // HTTP, il n'a aucun autre moyen de savoir quelle heure « 8 h du matin »
+    // désigne pour cet auteur.
+    time_zone: isValidTimeZone(timeZone) ? timeZone : DEFAULT_TIME_ZONE,
   });
 }
 
@@ -324,7 +345,11 @@ async function runOnce() {
 
     try {
       if (row.mode === 'best_time') {
-        const target = await resolveBestTime(row.user_id, new Date(row.scheduled_for));
+        const target = await resolveBestTime(
+          row.user_id,
+          new Date(row.scheduled_for),
+          row.time_zone || DEFAULT_TIME_ZONE,
+        );
         // Le meilleur créneau tombe plus tard : on repose la ligne au lieu de
         // publier maintenant. C'est tout l'objet du mode.
         if (target.getTime() > Date.now() + SCHEDULE_MIN_LEAD_MS) {

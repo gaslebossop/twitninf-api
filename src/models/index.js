@@ -1000,6 +1000,36 @@ async function ensureUsersSubscriptionColumns() {
 }
 
 /** Bannière profil : le modèle expose `banner` mais sync({ alter: false }) ne crée pas la colonne. */
+/**
+ * Fuseau de l'auteur sur une publication programmée.
+ *
+ * Le mode « meilleur moment » choisit une HEURE DE LA JOURNÉE à l'échéance,
+ * dans un worker sans requête HTTP : sans cette colonne il prenait le fuseau
+ * du VPS (UTC) et publiait deux heures trop tôt pour un auteur français.
+ * `sync({ alter: false })` n'ajoute pas de colonne à une table existante.
+ */
+async function ensureScheduledTweetsTimeZoneColumn() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'scheduled_tweets'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TABLE scheduled_tweets
+        ADD COLUMN IF NOT EXISTS time_zone VARCHAR(64) NOT NULL DEFAULT 'UTC';
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureScheduledTweetsTimeZoneColumn:', e.message);
+    throw e;
+  }
+}
+
 async function ensureUsersBannerColumn() {
   try {
     const [tables] = await sequelize.query(
@@ -1361,6 +1391,7 @@ async function syncDatabase() {
     await ensureReportsV2Columns();
     await ensureTweetsTranslationColumn();
     await ensureUsersPreferredLanguageColumn();
+    await ensureScheduledTweetsTimeZoneColumn();
 
     // ÉTAPE 2: Synchroniser les modèles (créer/modifier les tables)
     logger.info('Synchronisation des modèles...');

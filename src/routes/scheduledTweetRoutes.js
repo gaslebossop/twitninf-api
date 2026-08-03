@@ -7,6 +7,7 @@ const {
   denySuspended,
 } = require('../middleware/authMiddleware');
 const scheduler = require('../services/scheduledTweetService');
+const { resolveTimeZone } = require('../utils/timezone');
 const {
   SCHEDULE_MAX_HORIZON_DAYS,
   SCHEDULE_MAX_PENDING,
@@ -61,7 +62,9 @@ router.get('/config', authenticateToken, (req, res) => {
  */
 router.get('/best-hours', authenticateToken, requirePremium, async (req, res) => {
   try {
-    const hours = await scheduler.bestHoursFor(req.user.id);
+    // Les créneaux sont des heures de la journée : ils n'ont de sens que dans
+    // le fuseau de celui qui les lit, pas dans celui du serveur.
+    const hours = await scheduler.bestHoursFor(req.user.id, resolveTimeZone(req));
     res.json({
       success: true,
       data: {
@@ -113,6 +116,7 @@ router.post('/', [
       replyToId: req.body.reply_to_id,
       mode: req.body.mode,
       scheduledFor: req.body.scheduled_for,
+      timeZone: resolveTimeZone(req),
     });
     res.status(201).json({
       success: true,

@@ -7,6 +7,7 @@ const {
   denySuspended,
 } = require('../middleware/authMiddleware');
 const market = require('../services/usernameMarketService');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 const {
   USERNAME_MIN_PRICE_TWC,
   USERNAME_MAX_PRICE_TWC,
@@ -40,6 +41,17 @@ function handleValidationErrors(req, res, next) {
 }
 
 function fail(res, error, fallback) {
+  // Un achat passe par le grand livre, donc par la protection anti-fraude.
+  // Ses refus portent leur propre message et leur propre code : les écraser
+  // d'un « Achat impossible » laisse l'acheteur sans rien à faire, et la
+  // vraie raison ne part que dans les logs.
+  if (transactionAuthorizationService.constructor.isRiskError(error)) {
+    return res.status(error.httpStatus || 400).json({
+      success: false,
+      message: error.message,
+      code: error.code,
+    });
+  }
   if (error instanceof market.UsernameMarketError) {
     const status = error.code === 'not_found' ? 404 : error.code === 'forbidden' ? 403 : 400;
     return res.status(status).json({ success: false, message: error.message, code: error.code });

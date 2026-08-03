@@ -3,6 +3,7 @@ const router = express.Router();
 const { authenticateToken } = require('../middleware/authMiddleware');
 const { Tweet, User, TweetLike, TweetRetweet, UserBehaviorData, sequelize } = require('../models');
 const { Op } = require('sequelize');
+const { resolveTimeZone, hourInZoneSql } = require('../utils/timezone');
 
 const formatDateKey = (input) => {
   if (!input) return '';
@@ -555,32 +556,36 @@ router.get('/:userId/activity', authenticateToken, async (req, res) => {
     // Créer un tableau des heures 0-23
     const hours = Array.from({ length: 24 }, (_, i) => i);
     
+    // Heures de l'horloge du lecteur : la base est en UTC, une courbe
+    // d'activité décalée de deux heures désigne les mauvais moments.
+    const timeZone = resolveTimeZone(req);
+
     // Requête pour obtenir l'activité par heure (sans generate_series)
     const tweetActivity = await sequelize.query(`
-      SELECT 
-        EXTRACT(HOUR FROM created_at) as hour,
+      SELECT
+        ${hourInZoneSql('created_at')} as hour,
         COUNT(*) as tweet_count
-      FROM tweets 
+      FROM tweets
       WHERE user_id::text = :userId
-        AND created_at >= :startDate 
+        AND created_at >= :startDate
         AND deleted_at IS NULL
-      GROUP BY EXTRACT(HOUR FROM created_at)
+      GROUP BY 1
     `, {
-      replacements: { userId, startDate },
+      replacements: { userId, startDate, timeZone },
       type: sequelize.QueryTypes.SELECT
     });
 
     const engagementActivity = await sequelize.query(`
-      SELECT 
-        EXTRACT(HOUR FROM ubd.created_at) as hour,
+      SELECT
+        ${hourInZoneSql('ubd.created_at')} as hour,
         COUNT(*) as engagement_count
       FROM user_behavior_data ubd
       WHERE ubd.user_id::text = :userId
         AND ubd.created_at >= :startDate
         AND ubd.action_type IN ('tweet_like', 'tweet_retweet', 'tweet_reply')
-      GROUP BY EXTRACT(HOUR FROM ubd.created_at)
+      GROUP BY 1
     `, {
-      replacements: { userId, startDate },
+      replacements: { userId, startDate, timeZone },
       type: sequelize.QueryTypes.SELECT
     });
 
@@ -663,9 +668,13 @@ router.get('/:userId/best-time', authenticateToken, async (req, res) => {
      * Seuls les tweets ORIGINAUX comptent — recommander une heure sur la base
      * de réponses noierait le signal.
      */
+    // L'heure est celle de l'HORLOGE DU CRÉATEUR : la base est en UTC, et
+    // « publie à 19 h » n'a aucun sens si ce 19 h n'est pas le sien.
+    const timeZone = resolveTimeZone(req);
+
     const rows = await sequelize.query(`
       SELECT
-        EXTRACT(HOUR FROM t.created_at)::int AS hour,
+        ${hourInZoneSql('t.created_at')} AS hour,
         COUNT(DISTINCT t.id) AS tweets,
         COUNT(DISTINCT l.id) AS likes,
         COUNT(DISTINCT rt.id) AS retweets,
@@ -681,7 +690,7 @@ router.get('/:userId/best-time', authenticateToken, async (req, res) => {
       GROUP BY 1
       ORDER BY 1
     `, {
-      replacements: { userId, startDate },
+      replacements: { userId, startDate, timeZone },
       type: sequelize.QueryTypes.SELECT
     });
 
