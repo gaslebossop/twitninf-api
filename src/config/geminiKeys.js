@@ -10,31 +10,26 @@
  * un 429 « quota exceeded » derrière chacun. Le contenu n'avait rien de
  * problématique, il était juste arrivé au mauvais moment.
  *
- * Les clés sont en clair dans le dépôt — c'était déjà le cas dans les deux
- * services qui les utilisaient, et les rassembler ici ne l'aggrave pas ; ça
- * évite en revanche qu'une clé révoquée soit corrigée à un endroit sur deux.
- * `GEMINI_API_KEYS` (liste séparée par des virgules) prend le dessus quand elle
- * est définie, ce qui permet de sortir les clés du dépôt sans toucher au code.
+ * Les clés viennent EXCLUSIVEMENT de `GEMINI_API_KEYS` (liste séparée par des
+ * virgules). Une liste de repli en clair vivait ici : le dépôt part en public,
+ * et l'historique git garde de toute façon la trace de ce qui y a figuré — ces
+ * clés-là sont donc à révoquer côté Google, pas seulement à déplacer.
+ *
+ * Pool vide = aucune requête tentée. Les appelants ont tous un chemin
+ * « Gemini non configuré » ; échouer là, visiblement, vaut mieux que de
+ * repartir en douce sur une clé codée en dur que personne ne pense à changer.
  */
 
-const FALLBACK_KEYS = [
-  'AIzaSyD--8mAE-Wwr6em-iJNZFpfaR8JX-p3CO0',
-  'AIzaSyAWqaeqcKXy5eGv5XwAcSmpfEnUlUXV7AM',
-  'AIzaSyAym2vUwH85VbgX2MzQJ3rULYfsCcY_XIE',
-  'AIzaSyBEat6WA9Kx0-PAsY3vNdwSqEOPMVF9GSc',
-  'AIzaSyBvBnqQvezndbMdisr8j1GAwF183xEIwvs',
-  'AIzaSyAetk-R-AllglFwWclFsrVLm7Q1AQFdKlE',
-  'AIzaSyDf0cgSNzBCgJLzOtb05wPsk7fMO5UtMUo',
-  'AIzaSyCYOfKUVUkToCeHTvRuyfatgrTUipq0YDk',
-  'AIzaSyAmlveZzsCWMXuAycMwGMiXcjl_YDkxLDc',
-];
-
-const GEMINI_KEYS = (process.env.GEMINI_API_KEYS || '')
+const KEYS = (process.env.GEMINI_API_KEYS || '')
   .split(',')
   .map((k) => k.trim())
   .filter(Boolean);
 
-const KEYS = GEMINI_KEYS.length > 0 ? GEMINI_KEYS : FALLBACK_KEYS;
+if (KEYS.length === 0) {
+  // Pas `throw` : la modération et les résumés savent se passer de Gemini, et
+  // faire planter l'API entière au démarrage pour ça serait disproportionné.
+  console.warn('[geminiKeys] GEMINI_API_KEYS absente ou vide — les appels Gemini seront ignorés.');
+}
 
 /**
  * Clés écartées pour la durée du process : celles qui ont répondu autre chose
@@ -54,12 +49,15 @@ let cursor = 0;
  * plafond avant de découvrir la suivante — le pool ne servirait que de secours
  * au lieu de répartir la charge.
  *
- * @returns {string[]} au moins une clé, même si toutes ont été écartées : mieux
- *   vaut une tentative vouée à échouer bruyamment qu'un silence sans requête.
+ * @returns {string[]} au moins une clé tant que le pool n'est pas vide, même si
+ *   toutes ont été écartées : mieux vaut une tentative vouée à échouer
+ *   bruyamment qu'un silence sans requête. Tableau vide si rien n'est
+ *   configuré du tout.
  */
 function keysInRotationOrder() {
   const live = KEYS.filter((k) => !disabled.has(k));
   const pool = live.length > 0 ? live : KEYS;
+  if (pool.length === 0) return [];
   const start = cursor % pool.length;
   cursor = (cursor + 1) % pool.length;
   return [...pool.slice(start), ...pool.slice(0, start)];

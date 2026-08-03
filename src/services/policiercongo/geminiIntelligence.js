@@ -11,19 +11,14 @@ const path = require('path');
 const fs = require('fs');
 const fsp = require('fs').promises;
 const { LLM_CONFIG } = require('./config');
+const { KEYS: GEMINI_KEYS } = require('../../config/geminiKeys');
 
 class GeminiIntelligence {
   constructor() {
-    this.apiKeys = [
-      'AIzaSyD--8mAE-Wwr6em-iJNZFpfaR8JX-p3CO0',
-      'AIzaSyAWqaeqcKXy5eGv5XwAcSmpfEnUlUXV7AM',
-      'AIzaSyAym2vUwH85VbgX2MzQJ3rULYfsCcY_XIE',
-      'AIzaSyBEat6WA9Kx0-PAsY3vNdwSqEOPMVF9GSc',
-      'AIzaSyBvBnqQvezndbMdisr8j1GAwF183xEIwvs',
-      'AIzaSyAetk-R-AllglFwWclFsrVLm7Q1AQFdKlE',
-      'AIzaSyDf0cgSNzBCgJLzOtb05wPsk7fMO5UtMUo',
-      'AIzaSyCYOfKUVUkToCeHTvRuyfatgrTUipq0YDk'
-    ];
+    // Troisième copie de la même liste de clés, en clair. Elle vient
+    // désormais du pool partagé (`GEMINI_API_KEYS`) : une clé révoquée se
+    // corrigeait sinon à un endroit sur trois.
+    this.apiKeys = GEMINI_KEYS;
     this.currentKeyIndex = 0;
     this.apiKey = this.apiKeys[this.currentKeyIndex];
     this.ai = null;
@@ -193,6 +188,12 @@ Ton = scroll paresseux + reaction spontanee. Si t'as rien a dire, tu dis rien.`;
    * Bascule sur la prochaine clé API disponible
    */
   switchApiKey() {
+    // Pool vide (GEMINI_API_KEYS absente) : le modulo donnerait NaN et
+    // `this.apiKey` deviendrait undefined sans que rien ne le signale.
+    if (this.apiKeys.length === 0) {
+      logger.error('❌ Aucune clé Gemini configurée — rotation impossible');
+      return;
+    }
     this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
     this.apiKey = this.apiKeys[this.currentKeyIndex];
     this.ai = new GoogleGenAI({ apiKey: this.apiKey });

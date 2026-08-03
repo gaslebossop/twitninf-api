@@ -17,7 +17,10 @@ const config = {
 
   // Configuration PostgreSQL optimisée
   database: {
-    host: process.env.DB_HOST || '51.255.48.125',
+    // Repli sur la boucle locale, pas sur l'IP d'un serveur : celle d'un ancien
+    // hôte traînait ici, ce qui la publie et fait surtout pointer une install
+    // mal configurée vers une base qui n'est pas la sienne.
+    host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT, 10) || 5432,
     database: process.env.DB_NAME || 'twitninf',
     username: process.env.DB_USER || 'admin',

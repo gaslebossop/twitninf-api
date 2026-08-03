@@ -1,5 +1,9 @@
 const logger = require('../utils/logger');
 const { GoogleGenAI } = require('@google/genai');
+// Les clés vivaient en dur ici, une par fonction. Elles viennent maintenant du
+// pool partagé, alimenté par `GEMINI_API_KEYS` : une seule liste à tenir à
+// jour, et rien de secret dans le dépôt.
+const { keysInRotationOrder } = require('../config/geminiKeys');
 
 /**
  * Appelle Gemini 2.0 Flash pour évaluer l'éligibilité d'un tweet aux recommandations
@@ -11,7 +15,7 @@ async function evaluateTweetForRecommendations({ content, authorUsername, isRepl
       if (isReply) {
         return { decision: 'eligible', eligible: true, reason: 'skip_reply', score: 0.7 };
       }
-      const apiKey = 'AIzaSyAmlveZzsCWMXuAycMwGMiXcjl_YDkxLDc';
+      const [apiKey] = keysInRotationOrder();
       if (!apiKey) {
         return { decision: 'eligible', eligible: true, reason: 'gemini_not_configured', score: 0.7 };
       }
@@ -254,7 +258,7 @@ async function evaluateTweetForRecommendations({ content, authorUsername, isRepl
  */
 async function generatePoliceResponse(tweetContent, authorUsername) {
   try {
-    const apiKey = 'AIzaSyBEat6WA9Kx0-PAsY3vNdwSqEOPMVF9GSc';
+    const [apiKey] = keysInRotationOrder();
     if (!apiKey) {
       return { success: false, error: 'Clé API Gemini non configurée' };
     }

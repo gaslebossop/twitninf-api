@@ -25,9 +25,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 let _redisClient;
 async function getRedisClient() {
   if (_redisClient && _redisClient.isReady) return _redisClient;
+  // Le mot de passe Redis était écrit en dur en repli. Il ne vient plus que de
+  // l'environnement — comme partout ailleurs (`config/config.js`,
+  // `fraudDetectionService`), qui n'ont jamais eu de repli.
   _redisClient = redis.createClient({
-    socket: { host: '127.0.0.1', port: 6379 },
-    password: process.env.REDIS_PASSWORD || 'linecraft_redis_2024',
+    socket: {
+      host: process.env.REDIS_HOST || '127.0.0.1',
+      port: parseInt(process.env.REDIS_PORT, 10) || 6379,
+    },
+    password: process.env.REDIS_PASSWORD || undefined,
   });
   _redisClient.on('error', (e) => logger.warn('[NeuralRank Redis]', e.message));
   await _redisClient.connect();

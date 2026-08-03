@@ -1,0 +1,17 @@
+{
+  "_comment": "Modele de megallm-session.json, qui n'est PAS versionne : il contient un cookie de session megallm.io, c'est-a-dire une authentification complete. Copier ce fichier en megallm-session.json a cote, et remplir depuis les en-tetes d'une requete reelle du navigateur.",
+  "updatedAt": "1970-01-01T00:00:00.000Z",
+  "cookieHeader": "__Host-next-auth.csrf-token=...; __Secure-next-auth.session-token=...",
+  "extraHeaders": {
+    "x-fingerprint": "",
+    "x-nonce": "",
+    "x-pow-challenge": "",
+    "x-pow-solution": "",
+    "x-signature": "",
+    "x-timestamp": "",
+    "user-agent": "",
+    "sec-ch-ua": "",
+    "sec-ch-ua-mobile": "",
+    "sec-ch-ua-platform": ""
+  }
+}
