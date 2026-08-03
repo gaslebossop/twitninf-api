@@ -7,6 +7,7 @@ const {
   denySuspended,
 } = require('../middleware/authMiddleware');
 const paidContent = require('../services/paidContentService');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 const { PaidContent, ContentPurchase } = require('../models');
 const {
   PAID_CONTENT_MIN_PRICE_TWC,
@@ -46,9 +47,26 @@ const EXPECTED = [
   'Prix minimum', 'Prix maximum', 'Contenu introuvable', 'ne t\'appartient pas',
   'Solde insuffisant', 'possèdes déjà', 'auteur de ce contenu', 'plus payant',
   'Verrou introuvable', 'Achat introuvable', 'déjà remboursé', 'Monnaie indisponible',
+  // Refus venus du grand livre : ils disent précisément ce qui bloque, et
+  // l'acheteur ne peut rien y faire s'il ne les lit pas.
+  'Dépense minimale', 'Fonds plateforme insuffisants', 'Portefeuille verrouillé',
 ];
 
 function fail(res, error, fallback) {
+  // Tout achat passe par la protection anti-fraude (`EconomyLedger` →
+  // `transactionAuthorizationService`). Ses refus et ses indisponibilités
+  // portent leur propre message et leur propre code HTTP ; les écraser d'un
+  // « Achat impossible pour le moment » laissait l'acheteur sans la moindre
+  // idée de ce qu'il devait faire — et personne pour lire la vraie raison, qui
+  // ne partait que dans les logs.
+  if (transactionAuthorizationService.constructor.isRiskError(error)) {
+    return res.status(error.httpStatus || 400).json({
+      success: false,
+      message: error.message,
+      code: error.code,
+    });
+  }
+
   const message = error?.message || '';
   if (EXPECTED.some((needle) => message.includes(needle))) {
     return res.status(400).json({ success: false, message });
