@@ -6,17 +6,12 @@ const policiercongoAutomatisation = require('../services/policiercongoAutomatisa
 const { memoryManager } = require('../services/policiercongo');
 const { getPgPool } = require('../services/policiercongo/policiercongoV2Bridge');
 const schedulerManager = require('../services/policiercongo/schedulerManager');
-const { authenticateToken } = require('../middleware/authMiddleware');
+const { authenticateToken, requireAdminRole } = require('../middleware/authMiddleware');
 
 /**
  * 🛡️ Middleware de protection Admin/SuperAdmin
  */
-const adminOnly = (req, res, next) => {
-  if (req.user && (req.user.role === 'admin' || req.user.role === 'superadmin')) {
-    return next();
-  }
-  return res.status(403).json({ success: false, message: 'Accès réservé aux administrateurs' });
-};
+const adminOnly = requireAdminRole;
 
 /**
  * 📋 Récupère toutes les instructions actuelles
