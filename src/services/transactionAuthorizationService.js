@@ -819,9 +819,22 @@ class TransactionAuthorizationService {
       const code = decision.decision === 'REVIEW'
         ? 'TRANSACTION_REQUIRES_REVIEW'
         : 'TRANSACTION_DECLINED';
+
+      // Un portefeuille en revue manuelle refuse TOUT, indéfiniment, jusqu'à
+      // ce qu'un Gardien le libère. Le message générique laissait croire à un
+      // refus ponctuel : on réessaie, chaque tentative compte comme un refus
+      // de plus, et le score empire. C'est le seul état qu'on nomme — les
+      // autres refus restent muets, pour ne pas expliquer à un fraudeur quelle
+      // règle il vient de déclencher.
+      const walletHeld = Array.isArray(decision.reasons)
+        && decision.reasons.some((reason) => reason === 'wallet_pending_manual_review'
+          || reason === 'wallet_already_frozen');
+
       throw new TransactionRiskError(
-        'Transaction refusée par la protection anti-fraude. Aucun débit n’a été effectué.',
-        code,
+        walletHeld
+          ? 'Ton portefeuille est en revue manuelle : les paiements sont suspendus le temps de la vérification. Aucun débit n’a été effectué.'
+          : 'Transaction refusée par la protection anti-fraude. Aucun débit n’a été effectué.',
+        walletHeld ? 'WALLET_UNDER_REVIEW' : code,
         403,
         {
           authorizationId: decision.authorization_id,
