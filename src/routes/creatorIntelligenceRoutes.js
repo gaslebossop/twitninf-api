@@ -64,17 +64,22 @@ router.post('/predict', authenticateToken, requirePro, async (req, res) => {
       ? rawPublishAt
       : new Date();
 
-    const [prediction, comparables] = await Promise.all([
-      predictive.predictTweetPerformance({
-        userId: req.user.id,
-        content,
-        mediaCount,
-        publishAt,
-      }),
-      predictive.findComparableTweets(req.user.id, content),
-    ]);
+    const prediction = await predictive.predictTweetPerformance({
+      userId: req.user.id,
+      content,
+      mediaCount,
+      publishAt,
+    });
 
-    res.json({ success: true, data: { ...prediction, comparables } });
+    // Le modèle calcule déjà ses voisins pour l'ensemble k-NN. Les réutiliser
+    // évite une seconde lecture complète de l'historique à chaque analyse.
+    res.json({
+      success: true,
+      data: {
+        ...prediction,
+        comparables: prediction.comparableTweets || [],
+      },
+    });
   } catch (error) {
     logger.error('[CreatorIntel] Prédiction en échec:', error);
     res.status(500).json({ success: false, message: 'Impossible d\'analyser ce brouillon.' });

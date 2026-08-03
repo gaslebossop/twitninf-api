@@ -29,6 +29,7 @@
 
 const { sequelize } = require('../models');
 const logger = require('../utils/logger');
+const predictiveEngine = require('./predictiveModelEngine');
 
 /** En dessous, la distribution de l'auteur n'a aucun sens statistique. */
 const MIN_TWEETS_FOR_PREDICTION = 5;
@@ -60,26 +61,7 @@ const URL_RE = /https?:\/\/\S+/i;
  * comparable et n'a rien à faire dans la prédiction.
  */
 function extractFeatures(content, { mediaCount = 0, publishAt = new Date() } = {}) {
-  const text = String(content || '');
-  const hashtags = text.match(/#[\p{L}\p{N}_]+/gu) || [];
-  const mentions = text.match(/@[\p{L}\p{N}_]+/gu) || [];
-  const when = publishAt instanceof Date ? publishAt : new Date(publishAt);
-
-  return {
-    length: text.length,
-    words: text.trim() ? text.trim().split(/\s+/).length : 0,
-    hashtagCount: hashtags.length,
-    mentionCount: mentions.length,
-    mediaCount,
-    hasMedia: mediaCount > 0,
-    hasQuestion: text.includes('?'),
-    hasEmoji: EMOJI_RE.test(text),
-    hasLink: URL_RE.test(text),
-    hasLineBreaks: text.includes('\n'),
-    isUppercaseHeavy: text.length > 20 && (text.replace(/[^A-ZÀ-Þ]/g, '').length / text.length) > 0.3,
-    hour: when.getHours(),
-    dayOfWeek: when.getDay(),
-  };
+  return predictiveEngine.extractFeatures(content, { mediaCount, publishAt });
 }
 
 // ── Statistiques de base ───────────────────────────────────────────────────
@@ -163,6 +145,11 @@ async function fetchAuthorHistory(userId, days = DEFAULT_HISTORY_DAYS) {
       t.content,
       t.created_at,
       COALESCE(t.view_count, 0)::int AS views,
+      COALESCE(t.click_count, 0)::int AS clicks,
+      t.tweet_type,
+      t.language,
+      COALESCE(t.is_sensitive, false) AS is_sensitive,
+      t.recommendation_group,
       EXTRACT(HOUR FROM t.created_at)::int AS hour,
       EXTRACT(DOW FROM t.created_at)::int AS day_of_week,
       CHAR_LENGTH(COALESCE(t.content, ''))::int AS length,
@@ -189,18 +176,20 @@ async function fetchAuthorHistory(userId, days = DEFAULT_HISTORY_DAYS) {
       AND COALESCE(t.is_retweet, false) = false
       AND t.created_at >= :startDate
     ORDER BY t.created_at DESC
+    LIMIT 600
   `, {
     replacements: { userId, startDate },
     type: sequelize.QueryTypes.SELECT,
   });
 
-  return rows.map((r) => {
+  const history = rows.map((r) => {
     const content = r.content || '';
     return {
       id: r.id,
       content,
       createdAt: r.created_at,
       views: r.views,
+      clicks: r.clicks,
       likes: r.likes,
       retweets: r.retweets,
       replies: r.replies,
@@ -216,8 +205,152 @@ async function fetchAuthorHistory(userId, days = DEFAULT_HISTORY_DAYS) {
       hasEmoji: EMOJI_RE.test(content),
       hasLink: URL_RE.test(content),
       hasLineBreaks: content.includes('\n'),
+      tweetType: r.tweet_type,
+      language: r.language,
+      isSensitive: Boolean(r.is_sensitive),
+      recommendationGroup: r.recommendation_group,
+      trackedViews: 0,
+      uniqueViewers: 0,
+      averageDwellMs: null,
+      bookmarks: 0,
+      shares: 0,
+      mediaViews: 0,
+      interactionQuality: null,
     };
   });
+
+  if (history.length === 0) return history;
+
+  // Les signaux comportementaux sont plus riches que les compteurs du tweet,
+  // mais cette table a été ajoutée après les premiers comptes. Une panne ou une
+  // installation ancienne ne doit donc jamais rendre l'analytics inutilisable :
+  // on retombe sur les compteurs de base en cas d'indisponibilité.
+  try {
+    const behaviorRows = await sequelize.query(`
+      SELECT
+        target_id AS tweet_id,
+        COUNT(*) FILTER (WHERE action_type = 'tweet_view')::int AS tracked_views,
+        COUNT(DISTINCT user_id) FILTER (WHERE action_type = 'tweet_view')::int AS unique_viewers,
+        AVG(duration_ms) FILTER (
+          WHERE action_type IN ('tweet_view', 'media_view', 'time_spent')
+            AND duration_ms > 0
+        )::float AS average_dwell_ms,
+        COUNT(*) FILTER (WHERE action_type = 'tweet_bookmark')::int AS bookmarks,
+        COUNT(*) FILTER (WHERE action_type = 'tweet_share')::int AS shares,
+        COUNT(*) FILTER (WHERE action_type = 'media_view')::int AS media_views,
+        AVG(interaction_quality) FILTER (WHERE interaction_quality IS NOT NULL)::float
+          AS interaction_quality
+      FROM user_behavior_data
+      WHERE target_type = 'tweet'
+        AND target_id IN (:tweetIds)
+        AND COALESCE(is_data_test, false) = false
+      GROUP BY target_id
+    `, {
+      replacements: { tweetIds: history.map((tweet) => String(tweet.id)) },
+      type: sequelize.QueryTypes.SELECT,
+    });
+    const byTweet = new Map(behaviorRows.map((row) => [String(row.tweet_id), row]));
+    history.forEach((tweet) => {
+      const behavior = byTweet.get(String(tweet.id));
+      if (!behavior) return;
+      tweet.trackedViews = Number(behavior.tracked_views) || 0;
+      tweet.uniqueViewers = Number(behavior.unique_viewers) || 0;
+      tweet.averageDwellMs = behavior.average_dwell_ms == null
+        ? null
+        : Number(behavior.average_dwell_ms);
+      tweet.bookmarks = Number(behavior.bookmarks) || 0;
+      tweet.shares = Number(behavior.shares) || 0;
+      tweet.mediaViews = Number(behavior.media_views) || 0;
+      tweet.interactionQuality = behavior.interaction_quality == null
+        ? null
+        : Number(behavior.interaction_quality);
+    });
+  } catch (error) {
+    logger.warn(`[CreatorIntel] Signaux comportementaux ignorés: ${error.message}`);
+  }
+
+  return history;
+}
+
+async function fetchAuthorContext(userId) {
+  try {
+    const [row] = await sequelize.query(`
+      SELECT
+        u.verified,
+        u.created_at,
+        COALESCE(u.algorithmic_visibility_multiplier, 1)::float
+          AS algorithmic_visibility_multiplier,
+        (SELECT COUNT(*) FROM user_follows f
+          WHERE f.following_id = u.id AND f.status = 'active')::int AS followers,
+        (SELECT COUNT(*) FROM user_follows f
+          WHERE f.follower_id = u.id AND f.status = 'active')::int AS following
+      FROM users u
+      WHERE u.id::text = :userId
+      LIMIT 1
+    `, {
+      replacements: { userId },
+      type: sequelize.QueryTypes.SELECT,
+    });
+    if (!row) return {};
+    return {
+      followers: Number(row.followers) || 0,
+      following: Number(row.following) || 0,
+      verified: Boolean(row.verified),
+      accountAgeDays: row.created_at
+        ? Math.max(0, (Date.now() - new Date(row.created_at).getTime()) / 86400000)
+        : 0,
+      algorithmicVisibilityMultiplier: Number(row.algorithmic_visibility_multiplier) || 1,
+    };
+  } catch (error) {
+    logger.warn(`[CreatorIntel] Contexte auteur incomplet: ${error.message}`);
+    return {};
+  }
+}
+
+async function fetchAudienceActivity(tweetIds, days = DEFAULT_HISTORY_DAYS, authorId = null) {
+  if (!tweetIds.length) return [];
+  const startDate = new Date(Date.now() - days * 86400000);
+  try {
+    return await sequelize.query(`
+      SELECT
+        EXTRACT(DOW FROM timestamp)::int AS day_of_week,
+        EXTRACT(HOUR FROM timestamp)::int AS hour,
+        COUNT(*)::int AS interactions,
+        SUM(EXP(
+          -LN(2) * EXTRACT(EPOCH FROM (NOW() - timestamp)) / (30 * 86400.0)
+        ))::float AS weighted_interactions,
+        COUNT(DISTINCT user_id)::int AS unique_users,
+        AVG(interaction_quality) FILTER (WHERE interaction_quality IS NOT NULL)::float
+          AS average_quality,
+        AVG(duration_ms) FILTER (WHERE duration_ms > 0)::float AS average_duration_ms
+      FROM user_behavior_data
+      WHERE target_type = 'tweet'
+        AND target_id IN (:tweetIds)
+        AND timestamp >= :startDate
+        AND timestamp <= NOW() + INTERVAL '5 minutes'
+        AND COALESCE(is_data_test, false) = false
+        AND (:authorId IS NULL OR user_id::text <> :authorId)
+        AND action_type IN (
+          'tweet_view', 'tweet_like', 'tweet_retweet', 'tweet_reply',
+          'tweet_share', 'tweet_bookmark', 'media_view', 'link_click'
+        )
+      GROUP BY EXTRACT(DOW FROM timestamp), EXTRACT(HOUR FROM timestamp)
+    `, {
+      replacements: { tweetIds: tweetIds.map(String), startDate, authorId: authorId ? String(authorId) : null },
+      type: sequelize.QueryTypes.SELECT,
+    }).then((rows) => rows.map((row) => ({
+      dayOfWeek: Number(row.day_of_week),
+      hour: Number(row.hour),
+      interactions: Number(row.interactions) || 0,
+      weightedInteractions: Number(row.weighted_interactions) || 0,
+      uniqueUsers: Number(row.unique_users) || 0,
+      averageQuality: row.average_quality == null ? null : Number(row.average_quality),
+      averageDurationMs: row.average_duration_ms == null ? null : Number(row.average_duration_ms),
+    })));
+  } catch (error) {
+    logger.warn(`[CreatorIntel] Horaires d'audience indisponibles: ${error.message}`);
+    return [];
+  }
 }
 
 // ── Facteurs ───────────────────────────────────────────────────────────────
@@ -498,95 +631,70 @@ async function predictTweetPerformance({
   historyDays = DEFAULT_HISTORY_DAYS,
 }) {
   const when = publishAt ? new Date(publishAt) : new Date();
-  const features = extractFeatures(content, { mediaCount, publishAt: when });
-  const history = await fetchAuthorHistory(userId, historyDays);
+  const [history, authorContext] = await Promise.all([
+    fetchAuthorHistory(userId, historyDays),
+    fetchAuthorContext(userId),
+  ]);
+  const audienceActivity = await fetchAudienceActivity(
+    history.map((tweet) => tweet.id),
+    historyDays,
+    userId,
+  );
 
-  const engagementStats = describe(history.map((t) => t.engagement));
-  const viewStats = describe(history.map((t) => t.views));
+  const modelResult = predictiveEngine.buildPrediction({
+    history,
+    content,
+    mediaCount,
+    publishAt: when,
+    audienceActivity,
+    authorContext,
+  });
 
-  // Sans base, on se tait. Les caractéristiques du texte sont quand même
-  // renvoyées : l'app affiche l'analyse de forme, sans les chiffres.
-  if (history.length < MIN_TWEETS_FOR_PREDICTION) {
+  if (!modelResult.hasEnoughData) {
     return {
-      hasEnoughData: false,
-      sampleSize: history.length,
-      minimumRequired: MIN_TWEETS_FOR_PREDICTION,
-      features,
-      message: `Publie encore ${MIN_TWEETS_FOR_PREDICTION - history.length} tweet(s) pour que la prédiction devienne fiable.`,
+      ...modelResult,
+      historyDays,
+      message: `Publie encore ${modelResult.minimumRequired - modelResult.sampleSize} tweet(s) pour que la prédiction devienne fiable.`,
       generatedAt: new Date().toISOString(),
     };
   }
 
+  // Les facteurs binaires restent dans la réponse pour expliquer simplement
+  // l'historique à l'utilisateur. Ils ne sont plus multipliés entre eux : la
+  // prédiction numérique vient désormais de l'ensemble calibré ci-dessus.
+  const features = extractFeatures(content, { mediaCount, publishAt: when });
   const factors = buildFactors(history, features);
   const timeFactor = buildTimeFactor(history, features);
   const allFactors = timeFactor ? [...factors, timeFactor] : factors;
-  const appliedFactors = allFactors.filter((f) => f.applies);
-
-  const combined = appliedFactors.reduce((acc, f) => acc * f.multiplier, 1);
-  /**
-   * Le produit de sept facteurs part vite en vrille (0.8^7 ≈ 0.2). On le
-   * tempère : ces facteurs ne sont pas indépendants, les empiler tels quels
-   * revient à compter plusieurs fois le même effet sous-jacent.
-   */
-  const dampened = 1 + (combined - 1) * 0.7;
-  const multiplier = Math.max(0.4, Math.min(2.5, dampened));
-
-  const expectedEngagement = engagementStats.median * multiplier;
-  const lowEngagement = engagementStats.p25 * multiplier;
-  const highEngagement = engagementStats.p75 * multiplier;
-  const expectedViews = viewStats.median * multiplier;
-
-  /**
-   * Score sur 100 : position du résultat attendu dans la distribution de
-   * l'auteur. 50 = un tweet parfaitement moyen POUR LUI. Comparer à la
-   * plateforme n'aurait aucun sens — un compte à 30 abonnés serait toujours
-   * à 2/100 et le score ne dirait plus rien d'actionnable.
-   */
-  const better = history.filter((t) => t.engagement < expectedEngagement).length;
-  const score = Math.round((better / history.length) * 100);
-
-  const confidence = history.length >= RELIABLE_SAMPLE
-    ? 'high'
-    : history.length >= MIN_TWEETS_FOR_PREDICTION * 2
-      ? 'medium'
-      : 'low';
-
   const bestHours = bestHoursFrom(history);
+  const engagementStats = describe(history.map((tweet) => tweet.engagement));
   const advice = buildAdvice(factors, timeFactor, features, bestHours, engagementStats);
 
+  // Les drivers du modèle couvrent aussi les variables continues (lisibilité,
+  // densité de ponctuation, accroche, espacement, sentiment…). On les traduit
+  // en conseils quand leur impact négatif est assez net.
+  modelResult.drivers
+    .filter((driver) => driver.impactPercent <= -8)
+    .slice(0, Math.max(0, 5 - advice.length))
+    .forEach((driver) => advice.push({
+      icon: 'analytics-outline',
+      text: `${driver.label} pèse environ ${driver.impactPercent} % dans le modèle pour ce brouillon.`,
+      gain: driver.impactPercent,
+    }));
+
   return {
-    hasEnoughData: true,
-    sampleSize: history.length,
+    ...modelResult,
     historyDays,
-    confidence,
-    score,
-    features,
-    prediction: {
-      engagement: {
-        low: Math.max(0, Math.round(lowEngagement)),
-        expected: Math.max(0, Math.round(expectedEngagement)),
-        high: Math.max(0, Math.round(highEngagement)),
-      },
-      views: {
-        expected: Math.max(0, Math.round(expectedViews)),
-        low: Math.max(0, Math.round(viewStats.p25 * multiplier)),
-        high: Math.max(0, Math.round(viewStats.p75 * multiplier)),
-      },
-      multiplier: Math.round(multiplier * 100) / 100,
-    },
-    baseline: {
-      medianEngagement: Math.round(engagementStats.median * 10) / 10,
-      medianViews: Math.round(viewStats.median),
-      bestEverEngagement: engagementStats.max,
-      averageEngagement: Math.round(engagementStats.mean * 10) / 10,
-    },
     factors: allFactors.sort((a, b) => Math.abs(b.impactPercent) - Math.abs(a.impactPercent)),
-    bestHours: bestHours.map((h) => ({
-      hour: h.hour,
-      avgEngagement: Math.round(h.avgEngagement * 10) / 10,
-      tweets: h.tweets,
+    bestHours: bestHours.map((hour) => ({
+      hour: hour.hour,
+      avgEngagement: Math.round(hour.avgEngagement * 10) / 10,
+      tweets: hour.tweets,
     })),
-    advice,
+    advice: advice.slice(0, 7),
+    audienceActivity: audienceActivity
+      .sort((a, b) => b.interactions - a.interactions)
+      .slice(0, 12),
     generatedAt: new Date().toISOString(),
   };
 }
@@ -688,35 +796,7 @@ async function getCreatorProfile(userId, { historyDays = DEFAULT_HISTORY_DAYS } 
  */
 async function findComparableTweets(userId, content, { limit = 3, historyDays = DEFAULT_HISTORY_DAYS } = {}) {
   const history = await fetchAuthorHistory(userId, historyDays);
-  const normalize = (s) => new Set(
-    String(s || '')
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length > 3),
-  );
-
-  const target = normalize(content);
-  if (target.size === 0) return [];
-
-  return history
-    .map((t) => {
-      const words = normalize(t.content);
-      const intersection = [...target].filter((w) => words.has(w)).length;
-      const union = new Set([...target, ...words]).size;
-      return { tweet: t, similarity: union > 0 ? intersection / union : 0 };
-    })
-    .filter((r) => r.similarity > 0.12)
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, limit)
-    .map((r) => ({
-      id: r.tweet.id,
-      content: r.tweet.content.slice(0, 140),
-      similarity: Math.round(r.similarity * 100),
-      engagement: r.tweet.engagement,
-      views: r.tweet.views,
-      createdAt: r.tweet.createdAt,
-    }));
+  return predictiveEngine.findComparableTweets(history, content, { limit });
 }
 
 module.exports = {
@@ -729,4 +809,6 @@ module.exports = {
   describe,
   shrunkMultiplier,
   MIN_TWEETS_FOR_PREDICTION,
+  fetchAuthorContext,
+  fetchAudienceActivity,
 };
