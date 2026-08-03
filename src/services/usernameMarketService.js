@@ -202,7 +202,7 @@ async function claim({ userId, username }) {
   const lower = normalize(raw);
 
   return sequelize.transaction(async (t) => {
-    const user = await User.findByPk(userId, { transaction: t, lock: t.LOCK.UPDATE });
+    const user = await User.findByPk(userId, { transaction: t, lock: t.LOCK.NO_KEY_UPDATE });
     if (!user) throw new UsernameMarketError('Utilisateur introuvable', 'not_found');
     if (normalize(user.username) === lower) {
       throw new UsernameMarketError('C\'est déjà ton pseudo.', 'already_yours');
@@ -252,7 +252,7 @@ async function createListing({ sellerId, priceTwc, replacementUsername }) {
   const replacement = assertValidUsername(replacementUsername);
 
   return sequelize.transaction(async (t) => {
-    const seller = await User.findByPk(sellerId, { transaction: t, lock: t.LOCK.UPDATE });
+    const seller = await User.findByPk(sellerId, { transaction: t, lock: t.LOCK.NO_KEY_UPDATE });
     if (!seller) throw new UsernameMarketError('Utilisateur introuvable', 'not_found');
 
     if (normalize(replacement) === normalize(seller.username)) {
@@ -357,12 +357,25 @@ async function buyListing({ buyerId, listingId }) {
 
     // Les deux comptes sont verrouillés dans un ordre déterministe (par id) :
     // deux achats croisés simultanés se bloqueraient sinon mutuellement.
+    //
+    // `NO KEY UPDATE` et pas `UPDATE`, sinon l'achat se bloquait LUI-MÊME :
+    // plus bas, le grand livre demande une autorisation anti-fraude qui
+    // insère une ligne référençant ces mêmes comptes — sur une AUTRE
+    // connexion, hors de cette transaction. Cette insertion prend un verrou
+    // `FOR KEY SHARE` sur `users`, incompatible avec `FOR UPDATE` : elle
+    // attendait la fin d'une transaction qui, elle, attendait l'insertion.
+    // La requête mourait sur le délai de 3 s de Sequelize, et l'app voyait
+    // « Achat impossible ».
+    //
+    // `NO KEY UPDATE` empêche toujours deux achats simultanés de se marcher
+    // dessus ; il n'entre en conflit qu'avec les verrous de clé, et on ne
+    // touche ici qu'à `username`, qu'aucune clé étrangère ne référence.
     const ids = [String(listing.seller_id), String(buyerId)].sort();
     const locked = await User.findAll({
       where: { id: { [Op.in]: ids } },
       order: [['id', 'ASC']],
       transaction: t,
-      lock: t.LOCK.UPDATE,
+      lock: t.LOCK.NO_KEY_UPDATE,
     });
     const seller = locked.find((u) => String(u.id) === String(listing.seller_id));
     const buyer = locked.find((u) => String(u.id) === String(buyerId));
