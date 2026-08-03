@@ -54,12 +54,20 @@ function resolveFont() {
  */
 const FILTERS = {
   none: null,
-  warm: 'colortemperature=temperature=8500:mix=0.85',
-  cool: 'colortemperature=temperature=4200:mix=0.85',
+  // Les clés correspondent une à une aux CIFilter qu'`react-native-video`
+  // applique en aperçu sur iOS (voir `videoFilters.ts` côté app). C'est ce qui
+  // permet à l'utilisateur de voir avant de publier ce qu'il obtiendra :
+  // choisir dans une liste et recevoir autre chose serait pire que de ne pas
+  // proposer de filtre du tout.
+  chrome: 'eq=saturation=1.45:contrast=1.12',
+  fade: 'eq=saturation=0.72:contrast=0.9:brightness=0.06',
+  instant: 'colorbalance=rs=.12:gs=.03:bs=-.08,eq=contrast=1.05:saturation=0.9',
   mono: 'hue=s=0',
+  noir: 'hue=s=0,eq=contrast=1.35:brightness=-0.03',
+  process: 'colortemperature=temperature=4200:mix=0.85',
   sepia: 'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
-  vivid: 'eq=saturation=1.45:contrast=1.12',
-  faded: 'eq=saturation=0.75:contrast=0.9:brightness=0.06',
+  tonal: 'hue=s=0,eq=contrast=0.92',
+  transfer: 'colortemperature=temperature=8500:mix=0.85',
 };
 
 /**
