@@ -81,7 +81,16 @@ function evaluate(target, suspect) {
   let score = 0;
 
   const nameScore = similarity(target.username, suspect.username);
-  const lookalike = normalizeLookalike(target.username) === normalizeLookalike(suspect.username);
+  const targetNormalized = normalizeLookalike(target.username);
+  const suspectNormalized = normalizeLookalike(suspect.username);
+  const lookalike = targetNormalized === suspectNormalized;
+  // Les suffixes comme "officiel", "support", "fan" ou "levrai" sont une
+  // forme d'usurpation classique. La distance globale les pénalisait à tort
+  // quand le pseudo copié était court, alors que son identifiant complet est
+  // bien présent dans celui du suspect.
+  const containsIdentity = targetNormalized.length >= 5
+    && suspectNormalized.length !== targetNormalized.length
+    && suspectNormalized.includes(targetNormalized);
 
   if (lookalike) {
     reasons.push('username_lookalike');
@@ -89,6 +98,9 @@ function evaluate(target, suspect) {
   } else if (nameScore >= IMPERSONATION_SIMILARITY_THRESHOLD) {
     reasons.push('username_similar');
     score = Math.max(score, nameScore);
+  } else if (containsIdentity) {
+    reasons.push('username_similar');
+    score = Math.max(score, 0.82);
   }
 
   // L'avatar ne compte que s'il est réellement renseigné des deux côtés :
@@ -124,38 +136,71 @@ async function findSuspects(target) {
   // usurpation garde toujours une partie du nom d'origine, sinon elle ne
   // trompe personne.
   const fragment = normalized.slice(0, Math.max(3, Math.floor(normalized.length * 0.6)));
+  const where = {
+    id: { [Op.ne]: target.id },
+    is_active: true,
+    is_suspended: false,
+    is_data_test: false,
+    // Pertinence dans le TEMPS, appliquée à TOUS les signaux.
+    [Op.or]: [
+      { created_at: { [Op.gte]: since } },
+      { updated_at: { [Op.gte]: since } },
+    ],
+  };
+  const attributes = ['id', 'username', 'full_name', 'avatar', 'bio', 'created_at', 'verified'];
 
-  return User.findAll({
-    where: {
-      id: { [Op.ne]: target.id },
-      is_active: true,
-      // Pertinence dans le TEMPS, appliquée à TOUS les signaux — elle ne
-      // portait que sur le nom affiché, et laissait donc remonter
-      // indéfiniment les vieux homonymes de pseudo.
-      //
-      // Un compte ouvert il y a trois ans avec un nom proche du vôtre ne
-      // vous usurpe pas : il était là avant. Un vieux compte qui vient de
-      // changer de photo et de nom pour les vôtres, si — et celui-là
-      // passait entre les mailles. D'où les deux dates.
-      [Op.or]: [
-        { created_at: { [Op.gte]: since } },
-        { updated_at: { [Op.gte]: since } },
-      ],
-      // Le nom affiché ne se compare que s'il existe : le repli précédent
-      // était un caractère NUL, que PostgreSQL refuse dans une valeur texte
-      // — la recherche de suspects PARTAIT EN ERREUR pour tout compte sans
-      // nom affiché, et ces comptes-là n'étaient jamais surveillés.
-      [Op.and]: [{
-        [Op.or]: [
-          { username: { [Op.iLike]: `%${fragment}%` } },
-          ...(target.avatar ? [{ avatar: target.avatar }] : []),
-          ...(target.full_name ? [{ full_name: target.full_name }] : []),
-        ],
-      }],
-    },
-    attributes: ['id', 'username', 'full_name', 'avatar', 'bio', 'created_at', 'verified'],
-    limit: 60,
-  });
+  // Un avatar de défaut peut être partagé par des milliers de comptes. La
+  // requête unique avec OR et LIMIT 60 était alors entièrement consommée
+  // par ces comptes avant d'atteindre le vrai pseudo ressemblant.
+  let avatarIsDistinctive = false;
+  if (target.avatar) {
+    const uses = await User.count({
+      where: { avatar: target.avatar, is_active: true, is_data_test: false },
+    });
+    avatarIsDistinctive = uses <= 12;
+  }
+
+  const searches = [
+    // Signal prioritaire : le pseudo, avec une enveloppe bien plus large que
+    // l'ancien lot mélangé aux avatars.
+    User.findAll({
+      where: { ...where, username: { [Op.iLike]: `%${fragment}%` } },
+      attributes,
+      order: [['updated_at', 'DESC']],
+      limit: 120,
+    }),
+    // Repli borné : capte les séparateurs et substitutions (1/l, 0/o) qui
+    // cassent une recherche de fragment SQL, puis `evaluate` garde son seuil
+    // strict. Les comptes de test étant exclus, ce lot reste utile.
+    User.findAll({
+      where,
+      attributes,
+      order: [['updated_at', 'DESC']],
+      limit: 200,
+    }),
+  ];
+
+  if (target.full_name) {
+    searches.push(User.findAll({
+      where: { ...where, full_name: { [Op.iLike]: String(target.full_name) } },
+      attributes,
+      order: [['updated_at', 'DESC']],
+      limit: 40,
+    }));
+  }
+  if (avatarIsDistinctive) {
+    searches.push(User.findAll({
+      where: { ...where, avatar: target.avatar },
+      attributes,
+      order: [['updated_at', 'DESC']],
+      limit: 40,
+    }));
+  }
+
+  const groups = await Promise.all(searches);
+  const unique = new Map();
+  groups.flat().forEach((candidate) => unique.set(String(candidate.id), candidate));
+  return [...unique.values()];
 }
 
 /**
@@ -164,9 +209,9 @@ async function findSuspects(target) {
  */
 async function scanUser(userId) {
   const target = await User.findByPk(userId, {
-    attributes: ['id', 'username', 'full_name', 'avatar', 'bio', 'verified'],
+    attributes: ['id', 'username', 'full_name', 'avatar', 'bio', 'verified', 'is_data_test'],
   });
-  if (!target) return 0;
+  if (!target || target.is_data_test) return 0;
 
   const suspects = await findSuspects(target);
   let created = 0;
@@ -236,6 +281,8 @@ async function scanAllSubscribers({ limit = 200 } = {}) {
       AND premium = true
       AND (subscription_expires_at IS NULL OR subscription_expires_at > NOW())
       AND is_active = true
+      AND is_suspended = false
+      AND COALESCE(is_data_test, false) = false
     ORDER BY last_activity DESC NULLS LAST
     LIMIT :limit
   `, {
@@ -316,6 +363,7 @@ module.exports = {
   dismiss,
   markReported,
   evaluate,
+  findSuspects,
   similarity,
   normalizeLookalike,
 };

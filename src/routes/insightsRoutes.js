@@ -288,6 +288,26 @@ router.get('/rising', [
   }
 });
 
+/** GET /api/insights/niche-trending — tweets qui accélèrent dans ton univers. */
+router.get('/niche-trending', [
+  authenticateToken,
+  requirePremium,
+  query('days').optional().isInt({ min: 1, max: 30 }),
+  query('limit').optional().isInt({ min: 1, max: 50 }),
+  handleValidationErrors,
+], async (req, res) => {
+  try {
+    const data = await radar.nicheTrendingTweets(req.user.id, {
+      days: req.query.days,
+      limit: req.query.limit,
+    });
+    res.json({ success: true, data });
+  } catch (error) {
+    logger.error('[insights] Tweets de niche:', error);
+    res.status(500).json({ success: false, message: 'Tweets de ta niche indisponibles.' });
+  }
+});
+
 /** GET /api/insights/velocity — historique de tes tweets qui ont décollé. */
 router.get('/velocity', [
   authenticateToken,

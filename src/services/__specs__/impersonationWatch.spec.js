@@ -10,7 +10,10 @@
  */
 
 jest.mock('../../models', () => ({
-  User: {},
+  User: {
+    count: jest.fn(),
+    findAll: jest.fn(),
+  },
   ImpersonationAlert: {},
   Notification: {},
 }));
@@ -18,9 +21,11 @@ jest.mock('../../database/index', () => ({ sequelize: { query: jest.fn() } }));
 
 const {
   evaluate,
+  findSuspects,
   similarity,
   normalizeLookalike,
 } = require('../impersonationWatchService');
+const { User } = require('../../models');
 const {
   IMPERSONATION_SIMILARITY_THRESHOLD,
 } = require('../../constants/premiumMarket');
@@ -74,6 +79,15 @@ describe('evaluate', () => {
     });
     expect(reasons).toHaveLength(0);
     expect(score).toBe(0);
+  });
+
+  test('un pseudo qui reprend toute l\'identité avec un suffixe est détecté', () => {
+    const { score, reasons } = evaluate(
+      { ...target, username: 'policiercongo' },
+      { username: 'policiercongolevrai', full_name: null, avatar: null, bio: null },
+    );
+    expect(reasons).toContain('username_similar');
+    expect(score).toBeGreaterThanOrEqual(IMPERSONATION_SIMILARITY_THRESHOLD);
   });
 
   test('deux comptes sans photo ne se ressemblent pas — ils sont vides', () => {
@@ -131,5 +145,37 @@ describe('evaluate', () => {
       'username_lookalike', 'same_avatar', 'same_bio', 'same_display_name',
     ]));
     expect(score).toBe(1);
+  });
+});
+
+describe('findSuspects', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('un avatar de masse ne remplit plus le lot avant les pseudos proches', async () => {
+    User.count.mockResolvedValue(3300);
+    User.findAll
+      .mockResolvedValueOnce([{ id: 'copy', username: 'gasleboss0p' }])
+      .mockResolvedValueOnce([{ id: 'recent', username: 'autrecompte' }])
+      .mockResolvedValueOnce([{ id: 'copy', username: 'gasleboss0p' }]);
+
+    const rows = await findSuspects({ id: 'target', ...target });
+
+    expect(rows.map((row) => row.id)).toEqual(['copy', 'recent']);
+    expect(User.findAll).toHaveBeenCalledTimes(3);
+    expect(User.findAll.mock.calls.some(([options]) => options.where.avatar === target.avatar)).toBe(false);
+    User.findAll.mock.calls.forEach(([options]) => {
+      expect(options.where.is_data_test).toBe(false);
+    });
+  });
+
+  test('un avatar rare garde sa recherche dédiée', async () => {
+    User.count.mockResolvedValue(2);
+    User.findAll.mockResolvedValue([]);
+
+    await findSuspects({ id: 'target', ...target });
+
+    expect(User.findAll.mock.calls.some(([options]) => options.where.avatar === target.avatar)).toBe(true);
   });
 });
