@@ -5,6 +5,8 @@ const { authenticateToken, requirePremium } = require('../middleware/authMiddlew
 const profileViews = require('../services/profileViewService');
 const impersonation = require('../services/impersonationWatchService');
 const radar = require('../services/creatorRadarService');
+const earnings = require('../services/creatorEarningsService');
+const { resolveTimeZone } = require('../utils/timezone');
 const logger = require('../utils/logger');
 
 /**
@@ -31,6 +33,35 @@ function handleValidationErrors(req, res, next) {
   }
   next();
 }
+
+// ── Revenus ────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/insights/earnings — ce que le compte a encaissé, jour par jour.
+ *
+ * Le studio n'avait qu'un total. Sans courbe ni comparaison, impossible de
+ * dire si ça monte — c'est pourtant la seule question que se pose un créateur
+ * en ouvrant l'écran.
+ */
+router.get('/earnings', [
+  authenticateToken,
+  requirePremium,
+  query('days').optional().isInt({ min: 7, max: 90 }),
+  handleValidationErrors,
+], async (req, res) => {
+  try {
+    const data = await earnings.earningsFor(req.user.id, {
+      days: req.query.days,
+      // Les jours sont ceux du créateur : une vente de 1 h du matin ne doit
+      // pas tomber la veille.
+      timeZone: resolveTimeZone(req),
+    });
+    res.json({ success: true, data });
+  } catch (error) {
+    logger.error('[insights] Revenus:', error);
+    res.status(500).json({ success: false, message: 'Revenus indisponibles.' });
+  }
+});
 
 // ── Visiteurs de profil ────────────────────────────────────────────────────
 

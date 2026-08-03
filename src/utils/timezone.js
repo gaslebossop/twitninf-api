@@ -108,6 +108,20 @@ function instantForZonedHour(from, hour, timeZone, dayOffset = 0) {
   return settled;
 }
 
+/**
+ * Jour LOCAL d'un instant, au format `AAAA-MM-JJ`.
+ *
+ * `toISOString().slice(0, 10)` donne le jour UTC : à 1 h du matin à Paris, il
+ * répond encore la veille. Une courbe de revenus quotidienne construite comme
+ * ça décale une vente sur deux.
+ */
+function zonedDayKey(instant, timeZone = DEFAULT_TIME_ZONE) {
+  const zone = isValidTimeZone(timeZone) ? timeZone : DEFAULT_TIME_ZONE;
+  const p = zonedParts(instant instanceof Date ? instant : new Date(instant), zone);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
+}
+
 module.exports = {
   DEFAULT_TIME_ZONE,
   isValidTimeZone,
@@ -115,4 +129,5 @@ module.exports = {
   hourInZoneSql,
   zoneOffsetMs,
   instantForZonedHour,
+  zonedDayKey,
 };
