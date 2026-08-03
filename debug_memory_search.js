@@ -6,10 +6,10 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 // Configuration manuelle pour le debug (plus simple que de tout importer)
 const DB_CONFIG = {
-  host: "51.255.48.125",
-  port: 5432,
-  database: "twitninf",
-  user: "admin",
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT, 10) || 5432,
+  database: process.env.DB_NAME || 'twitninf',
+  user: process.env.DB_USER || 'admin',
   password: process.env.DB_PASSWORD,
   ssl: false
 };

@@ -1,12 +1,15 @@
+import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 
 # Paramètres de connexion
-DB_HOST = "51.255.48.125"
-DB_PORT = 5432
-DB_NAME = "twitninf"
-DB_USER = "admin"
-DB_PASSWORD = "myytree88"
+# Connexion lue dans l'environnement : le mot de passe etait ecrit en clair
+# ici, dans un depot destine a passer en public.
+DB_HOST = os.environ.get("DB_HOST", "localhost")
+DB_PORT = int(os.environ.get("DB_PORT", "5432"))
+DB_NAME = os.environ.get("DB_NAME", "twitninf")
+DB_USER = os.environ.get("DB_USER", "admin")
+DB_PASSWORD = os.environ["DB_PASSWORD"]
 DB_SSL = False  # Non utilisé ici car SSL est désactivé
 DB_POOL_MAX = 20
 DB_POOL_MIN = 5

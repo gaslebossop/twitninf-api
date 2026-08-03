@@ -7,8 +7,17 @@
 const axios = require('axios');
 
 // CONFIGURATION
-const TARGET_USERNAME = 'essayedemeban';
-const TARGET_PASSWORD = 'myytre88';
+//
+// Identifiants lus dans l'environnement. Ils étaient écrits en clair ici : le
+// compte visé est un VRAI compte de la production, et le script se connecte à
+// l'API publique. Publier le dépôt revenait à publier ce couple.
+const TARGET_USERNAME = process.env.CLICK_FARM_USERNAME;
+const TARGET_PASSWORD = process.env.CLICK_FARM_PASSWORD;
+
+if (!TARGET_USERNAME || !TARGET_PASSWORD) {
+  console.error('CLICK_FARM_USERNAME et CLICK_FARM_PASSWORD sont obligatoires.');
+  process.exit(1);
+}
 
 // Helpers
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

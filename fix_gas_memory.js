@@ -1,10 +1,10 @@
 const { Client } = require('pg');
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 
-const DB_HOST = "51.255.48.125";
-const DB_PORT = 5432;
-const DB_NAME = "twitninf";
-const DB_USER = "admin";
+const DB_HOST = process.env.DB_HOST || 'localhost';
+const DB_PORT = parseInt(process.env.DB_PORT, 10) || 5432;
+const DB_NAME = process.env.DB_NAME || 'twitninf';
+const DB_USER = process.env.DB_USER || 'admin';
 const DB_PASSWORD = process.env.DB_PASSWORD;
 
 const GAS_UUID = "d76b9a1c-9c59-4936-8251-fc02592503d4";

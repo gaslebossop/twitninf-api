@@ -7,7 +7,9 @@
  *   DRY_RUN=1 node src/scripts/migrateMediaUrlsIpToDomain.js
  *
  * Variables d’environnement:
- *   MIGRATE_FROM_IP   IP à remplacer (défaut: 51.255.48.125)
+ *   MIGRATE_FROM_IP   IP à remplacer — OBLIGATOIRE (plus de valeur par défaut :
+ *                     l'IP de l'ancien serveur était écrite ici, dans un dépôt
+ *                     destiné à passer en public)
  *   MIGRATE_TO_ORIGIN ou PUBLIC_BASE_URL — origine sans slash final (défaut: https://twitninf.duckdns.org)
  */
 
@@ -15,7 +17,11 @@ const { Op } = require('sequelize');
 const { User, Tweet, Conversation, sequelize, closeConnection } = require('../models');
 const logger = require('../utils/logger');
 
-const FROM_IP = (process.env.MIGRATE_FROM_IP || '51.255.48.125').trim();
+const FROM_IP = (process.env.MIGRATE_FROM_IP || '').trim();
+if (!FROM_IP) {
+  console.error('MIGRATE_FROM_IP est obligatoire : préciser l\'IP à remplacer.');
+  process.exit(1);
+}
 const TO_ORIGIN = (
   process.env.MIGRATE_TO_ORIGIN ||
   process.env.PUBLIC_BASE_URL ||
