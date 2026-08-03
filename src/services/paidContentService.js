@@ -15,6 +15,7 @@ const {
   PAID_CONTENT_MIN_PRICE_TWC,
   PAID_CONTENT_MAX_PRICE_TWC,
   PAID_CONTENT_PREVIEW_CHARS,
+  PAID_CONTENT_PRICE_EDIT_WINDOW_MS,
 } = require('../constants/premiumMarket');
 const logger = require('../utils/logger');
 
@@ -31,6 +32,18 @@ const logger = require('../utils/logger');
  *    en vente, jamais à l'achat, et la commission n'est jamais lue depuis la
  *    requête.
  */
+
+/**
+ * Millisecondes restantes pour ajuster le prix ; 0 quand la fenêtre est
+ * fermée. Le compte part de la MISE EN VENTE, pas de la publication du
+ * contenu : un tweet ancien qu'on décide de vendre aujourd'hui doit lui aussi
+ * avoir ses trente minutes de réglage.
+ */
+function priceEditRemainingMs(lock) {
+  const since = new Date(lock.created_at || lock.createdAt).getTime();
+  if (!Number.isFinite(since)) return 0;
+  return Math.max(0, since + PAID_CONTENT_PRICE_EDIT_WINDOW_MS - Date.now());
+}
 
 /** Un contenu verrouillé se résume à ça pour l'app tant qu'il n'est pas acheté. */
 function publicLockPayload(lock, { hasAccess, isCreator }) {
@@ -49,6 +62,9 @@ function publicLockPayload(lock, { hasAccess, isCreator }) {
     // commerciale, pas un élément d'affichage public.
     purchases_count: isCreator ? lock.purchases_count : undefined,
     net_twc: isCreator ? toAmount(lock.net_twc) : undefined,
+    // Compte à rebours du réglage de prix — pour que l'app affiche le temps
+    // restant plutôt qu'un champ qui se fera refuser à l'envoi.
+    price_editable_for_ms: isCreator ? priceEditRemainingMs(lock) : undefined,
   };
 }
 
@@ -117,8 +133,22 @@ async function lockContent({ creatorId, contentType, contentId, priceTwc, previe
     if (String(existing.creator_id) !== String(creatorId)) {
       throw new Error('Ce contenu ne t\'appartient pas');
     }
-    // Le prix peut changer pour les PROCHAINS acheteurs uniquement : les
-    // achats déjà encaissés portent leur propre montant.
+
+    // Le prix n'est ajustable que dans les 30 minutes suivant la mise en
+    // vente. Au-delà, des gens ont vu le contenu à un prix donné : le
+    // modifier revient à déplacer l'étiquette sur un article déjà examiné, et
+    // ceux qui ont payé plein tarif la veille n'auraient aucun recours.
+    //
+    // Le retrait du verrou, lui, reste possible à tout moment (`unlockContent`) :
+    // il ne lèse personne.
+    if (priceEditRemainingMs(existing) <= 0 && price !== toAmount(existing.price_twc)) {
+      throw new Error(
+        'Le prix n\'est plus modifiable (30 minutes après la mise en vente). Tu peux encore rendre ce contenu gratuit.',
+      );
+    }
+
+    // Le nouveau prix ne vaut que pour les PROCHAINS acheteurs : les achats
+    // déjà encaissés portent leur propre montant.
     await existing.update({
       price_twc: price,
       preview_text: previewText || existing.preview_text,
@@ -481,5 +511,6 @@ module.exports = {
   creatorDashboard,
   purchaseHistory,
   publicLockPayload,
+  priceEditRemainingMs,
   PLATFORM_CONTENT_FEE_RATE,
 };

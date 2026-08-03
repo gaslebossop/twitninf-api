@@ -48,6 +48,22 @@ const USERNAME_RESERVATION_DAYS = 30;
 const USERNAME_RESERVATION_MAX_PER_USER = 5;
 
 /**
+ * Délai pendant lequel le prix d'un contenu reste modifiable, à partir de sa
+ * mise en vente.
+ *
+ * Même durée que la fenêtre d'édition d'un tweet, et pour la même raison :
+ * passé ce délai, des gens ont vu le contenu à un prix. Le changer ensuite,
+ * c'est déplacer l'étiquette sur un article que les clients ont déjà examiné
+ * — et si le prix baisse, ceux qui ont payé plein tarif la veille n'ont aucun
+ * recours.
+ *
+ * Ce qui reste possible à tout moment : RETIRER le verrou (rendre gratuit).
+ * Ça ne lèse personne — les acheteurs gardent leur accès, et les autres y
+ * gagnent.
+ */
+const PAID_CONTENT_PRICE_EDIT_WINDOW_MS = 30 * 60 * 1000;
+
+/**
  * Aperçu laissé visible au-dessus du verrou.
  *
  * Un contenu payant dont on ne voit rien ne se vend pas, et un contenu dont
@@ -109,6 +125,7 @@ module.exports = {
   PAID_CONTENT_MIN_PRICE_TWC,
   PAID_CONTENT_MAX_PRICE_TWC,
   PAID_CONTENT_PREVIEW_CHARS,
+  PAID_CONTENT_PRICE_EDIT_WINDOW_MS,
   USERNAME_MIN_PRICE_TWC,
   USERNAME_MAX_PRICE_TWC,
   USERNAME_RESERVATION_PRICE_TWC,

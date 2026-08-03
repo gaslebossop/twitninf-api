@@ -12,6 +12,7 @@ const {
   PAID_CONTENT_MIN_PRICE_TWC,
   PAID_CONTENT_MAX_PRICE_TWC,
   PLATFORM_CONTENT_FEE_RATE,
+  PAID_CONTENT_PRICE_EDIT_WINDOW_MS,
 } = require('../constants/premiumMarket');
 const logger = require('../utils/logger');
 
@@ -65,6 +66,8 @@ router.get('/config', authenticateToken, (req, res) => {
       max_price_twc: PAID_CONTENT_MAX_PRICE_TWC,
       platform_fee_rate: PLATFORM_CONTENT_FEE_RATE,
       creator_share_rate: 1 - PLATFORM_CONTENT_FEE_RATE,
+      // Délai pendant lequel le prix reste ajustable après la mise en vente.
+      price_edit_window_ms: PAID_CONTENT_PRICE_EDIT_WINDOW_MS,
     },
   });
 });
