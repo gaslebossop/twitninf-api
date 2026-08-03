@@ -110,6 +110,12 @@ function normalizeColor(value, fallback) {
  * hauteur de police. Mesurée grossièrement — il ne s'agit pas de composer au
  * pixel près, seulement d'empêcher un texte de sortir du cadre.
  */
+/**
+ * Alignement des lignes ENTRE ELLES — pas la position du bloc, qui reste
+ * donnée par `x`. Les valeurs sont celles attendues par `text_align`.
+ */
+const ALIGN_MAP = { left: 'L', center: 'C', right: 'R' };
+
 const GLYPH_WIDTH_RATIO = 0.58;
 
 /** Marge latérale conservée de chaque côté, en fraction de la largeur. */
@@ -199,6 +205,7 @@ function sanitizeOverlays(raw) {
         size: clamp(item?.size, 0.02, 0.2, 0.055),
         color: normalizeColor(item?.color, '0xFFFFFF'),
         background: item?.background ? normalizeColor(item.background, '0x000000') : null,
+        align: ALIGN_MAP[item?.align] ? item.align : 'center',
       };
     })
     .filter(Boolean);
@@ -246,7 +253,7 @@ function buildVideoFilters(edit = {}, workDir = null, videoId = 'x') {
       // Lignes centrées les unes sous les autres, comme sur TikTok — le défaut
       // de drawtext les aligne à gauche, ce qui fait « sous-titre » et non
       // « habillage ».
-      'text_align=C',
+      `text_align=${ALIGN_MAP[overlay.align] || 'C'}`,
       `line_spacing=${Math.round(fontSize * 0.18)}`,
       // `(w-text_w)*x` centre le texte sur le point choisi au lieu de
       // l'ancrer par son coin : un texte long déborderait sinon à droite.
