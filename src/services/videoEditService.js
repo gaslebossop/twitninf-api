@@ -30,8 +30,14 @@ const FONT_CANDIDATES = [
   // MÊME famille (@expo-google-fonts/montserrat), donc l'aperçu du téléphone
   // et le rendu du serveur dessinent les mêmes lettres. DejaVu, elle, est
   // large et neutre : le rendu ne ressemblait à rien de connu.
-  '/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf',
+  //
+  // Bold AVANT ExtraBold : l'app n'embarque que le poids 700 (voir
+  // `displayNameFonts.geometric`), et React Native ne synthétise pas les
+  // graisses d'une police custom. Rendre en ExtraBold élargissait les mots
+  // d'environ 3 % par rapport à l'aperçu — assez pour qu'une ligne juste à
+  // l'écran passe à deux dans la vidéo.
   '/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf',
+  '/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf',
   '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
   '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
 ];
@@ -99,10 +105,25 @@ function overlayTextPath(workDir, videoId, index) {
  * Accepte aussi la forme déjà normalisée : `parseEdit` assainit à l'entrée et
  * `buildVideoFilters` réassainit par sécurité. Sans ce cas, la seconde passe
  * ne reconnaissait plus `0xFFCC00` et repeignait tous les textes en blanc.
+ *
+ * L'alpha est admis dans les deux écritures — `#RRGGBBAA` côté app, `@0.53`
+ * côté ffmpeg. L'app envoie son pavé translucide en `#00000088` : sans ce
+ * cas, la chaîne était REJETÉE et retombait sur le noir opaque du repli, donc
+ * un pavé plein là où l'aperçu en montrait un translucide.
  */
 function normalizeColor(value, fallback) {
-  const match = /^(?:#|0x)?([0-9a-f]{6})$/i.exec(String(value || ''));
-  return match ? `0x${match[1].toUpperCase()}` : fallback;
+  const raw = String(value || '').trim();
+
+  const already = /^0x([0-9a-f]{6})(?:@(0(?:\.\d+)?|1(?:\.0+)?))?$/i.exec(raw);
+  if (already) {
+    return already[2] ? `0x${already[1].toUpperCase()}@${already[2]}` : `0x${already[1].toUpperCase()}`;
+  }
+
+  const hex = /^#?([0-9a-f]{6})([0-9a-f]{2})?$/i.exec(raw);
+  if (!hex) return fallback;
+  const rgb = `0x${hex[1].toUpperCase()}`;
+  if (!hex[2]) return rgb;
+  return `${rgb}@${(parseInt(hex[2], 16) / 255).toFixed(2)}`;
 }
 
 /**
@@ -120,6 +141,12 @@ const GLYPH_WIDTH_RATIO = 0.58;
 
 /** Marge latérale conservée de chaque côté, en fraction de la largeur. */
 const SIDE_MARGIN = 0.06;
+
+/**
+ * Marge du pavé de fond autour du texte, en fraction de la taille de police.
+ * Doit rester égale à `BOX_PADDING_RATIO` côté app (`videoFilters.ts`).
+ */
+const BOX_PADDING_RATIO = 0.22;
 
 /**
  * Taille de police demandée, en pixels du cadre de sortie.
@@ -262,25 +289,39 @@ function buildVideoFilters(edit = {}, workDir = null, videoId = 'x') {
     ];
 
     /**
-     * Lisibilité : ombre portée, et un contour volontairement FIN.
+     * Lisibilité : soit un pavé de fond, soit un relief — jamais les deux.
      *
-     * Un contour épais (7 % de la taille) avait été essayé : les traits des
-     * lettres voisines se rejoignaient et le mot devenait une masse, tandis
-     * que le trait du premier caractère se faisait rogner à plat — drawtext
-     * dessine le contour à l'intérieur de la boîte de texte, sans marge. Le
-     * `j` de « jaune » paraissait coupé.
+     * Le pavé (`box=1`) avait été abandonné pour une raison esthétique : ses
+     * angles sont droits alors que ceux de TikTok sont arrondis, et drawtext
+     * ne sait pas arrondir. Sauf que l'éditeur du téléphone, lui, propose le
+     * pavé et va jusqu'à repeindre le texte en NOIR quand on choisit le pavé
+     * blanc. Sans pavé au rendu, ce texte noir se retrouvait posé à nu sur une
+     * vidéo souvent sombre : illisible. Un aperçu qui ment sur la couleur
+     * finale est un défaut bien plus grave qu'un angle droit — le pavé revient
+     * donc, et c'est l'app qui adoucit à peine ses angles pour coller.
      *
-     * Le pavé plein (`box=1`) est abandonné : ses angles sont droits, alors
-     * que celui de TikTok est arrondi, et drawtext ne sait pas arrondir.
-     * Mieux vaut pas de pavé qu'un pavé qui trahit l'imitation.
+     * Sans pavé : ombre portée et contour volontairement FIN. Un contour épais
+     * (7 % de la taille) avait été essayé : les traits des lettres voisines se
+     * rejoignaient et le mot devenait une masse, tandis que le trait du
+     * premier caractère se faisait rogner à plat — drawtext dessine le contour
+     * à l'intérieur de la boîte de texte, sans marge. Le `j` de « jaune »
+     * paraissait coupé.
      */
-    options.push(
-      `borderw=${Math.max(1, Math.round(fontSize * 0.025))}`,
-      'bordercolor=0x000000@0.35',
-      'shadowcolor=0x000000@0.5',
-      `shadowx=${Math.max(1, Math.round(fontSize * 0.035))}`,
-      `shadowy=${Math.max(2, Math.round(fontSize * 0.045))}`,
-    );
+    if (overlay.background) {
+      options.push(
+        'box=1',
+        `boxcolor=${overlay.background}`,
+        `boxborderw=${Math.max(2, Math.round(fontSize * BOX_PADDING_RATIO))}`,
+      );
+    } else {
+      options.push(
+        `borderw=${Math.max(1, Math.round(fontSize * 0.025))}`,
+        'bordercolor=0x000000@0.35',
+        'shadowcolor=0x000000@0.5',
+        `shadowx=${Math.max(1, Math.round(fontSize * 0.035))}`,
+        `shadowy=${Math.max(2, Math.round(fontSize * 0.045))}`,
+      );
+    }
 
     filters.push(`drawtext=${options.join(':')}`);
   });
@@ -321,6 +362,7 @@ module.exports = {
   wrapText,
   GLYPH_WIDTH_RATIO,
   SIDE_MARGIN,
+  BOX_PADDING_RATIO,
   isMuted,
   parseEdit,
   sanitizeOverlays,
