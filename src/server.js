@@ -86,6 +86,15 @@ const walletRoutes = require('./routes/walletRoutes');
 const premiumRoutes = require('./routes/premiumRoutes');
 const creatorIntelligenceRoutes = require('./routes/creatorIntelligenceRoutes');
 const supportRoutes = require('./routes/supportRoutes');
+const paidContentRoutes = require('./routes/paidContentRoutes');
+const scheduledTweetRoutes = require('./routes/scheduledTweetRoutes');
+const insightsRoutes = require('./routes/insightsRoutes');
+const usernameMarketRoutes = require('./routes/usernameMarketRoutes');
+const scheduledTweetService = require('./services/scheduledTweetService');
+const creatorRadarService = require('./services/creatorRadarService');
+const impersonationWatchService = require('./services/impersonationWatchService');
+const profileViewService = require('./services/profileViewService');
+const usernameMarketService = require('./services/usernameMarketService');
 
 // 🎯 Import du module de ciblage étendu (chemin absolu pour compatibilité VPS apibeta vs api)
 let _targetingModule = null;
@@ -369,6 +378,13 @@ app.use('/api/creator-intelligence', creatorIntelligenceRoutes);
 
 // Support par ticket (traitement prioritaire pour le palier Pro)
 app.use('/api/support', supportRoutes);
+
+// Offre créateur : contenu à l'unité, file de publication, renseignements
+// (visiteurs, usurpation, radar, décollage) et marché des pseudos.
+app.use('/api/paid-content', paidContentRoutes);
+app.use('/api/scheduled-tweets', scheduledTweetRoutes);
+app.use('/api/insights', insightsRoutes);
+app.use('/api/username-market', usernameMarketRoutes);
 
 app.use('/api/verification', verificationRoutes);
 
@@ -1031,6 +1047,42 @@ async function startServer() {
     } catch (error) {
       logger.error('❌ Erreur initialisation cryptomonnaie:', error);
       // Ne pas arrêter le serveur, la cryptomonnaie n'est pas critique
+    }
+
+    // ⏱ Tâches de fond de l'offre créateur.
+    //
+    // Trois rythmes différents, et c'est voulu : une publication programmée se
+    // vérifie souvent (30 s), un décollage de tweet toutes les 5 minutes, une
+    // veille usurpation une fois par heure — elle balaie tous les abonnés et
+    // ne détecterait rien de plus en tournant vingt fois plus.
+    //
+    // Aucune n'est critique : un échec est journalisé, jamais fatal. Un
+    // serveur qui refuse de démarrer parce qu'un scan de ressemblance a
+    // échoué serait une très mauvaise affaire.
+    try {
+      scheduledTweetService.startWorker();
+      creatorRadarService.startVelocityWorker();
+
+      const impersonationTimer = setInterval(() => {
+        impersonationWatchService.scanAllSubscribers()
+          .catch((e) => logger.warn('[impersonation] Passage en échec:', e.message));
+      }, 60 * 60 * 1000);
+      if (typeof impersonationTimer.unref === 'function') impersonationTimer.unref();
+
+      // Ménage quotidien : rétention des visites de profil, réservations de
+      // pseudo expirées. Sans lui, `profile_views` grossit indéfiniment pour
+      // afficher sept jours, et un pseudo réservé le reste pour toujours.
+      const housekeepingTimer = setInterval(() => {
+        profileViewService.purgeOld()
+          .catch((e) => logger.warn('[profileViews] Purge en échec:', e.message));
+        usernameMarketService.releaseExpired()
+          .catch((e) => logger.warn('[usernameMarket] Libération en échec:', e.message));
+      }, 24 * 60 * 60 * 1000);
+      if (typeof housekeepingTimer.unref === 'function') housekeepingTimer.unref();
+
+      logger.info('✅ Tâches de fond de l\'offre créateur démarrées');
+    } catch (error) {
+      logger.error('❌ Erreur démarrage des tâches de fond créateur:', error);
     }
 
     // 🎯 Initialiser le module de ciblage étendu

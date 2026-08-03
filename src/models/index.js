@@ -50,6 +50,18 @@ const StoryView = require('./StoryView');
 const StoryHighlight = require('./StoryHighlight');
 const StoryHighlightItem = require('./StoryHighlightItem');
 const TweetTranslation = require('./TweetTranslation');
+// Offre créateur : contenu payant, marché des pseudos, programmation, édition,
+// visites de profil, veille usurpation et alertes de décollage.
+const PaidContentModule = require('./PaidContent');
+const ContentPurchaseModule = require('./ContentPurchase');
+const ScheduledTweetModule = require('./ScheduledTweet');
+const TweetEditModule = require('./TweetEdit');
+const ProfileViewModule = require('./ProfileView');
+const ImpersonationAlertModule = require('./ImpersonationAlert');
+const TweetVelocityAlertModule = require('./TweetVelocityAlert');
+const UsernameListingModule = require('./UsernameListing');
+const UsernameSaleModule = require('./UsernameSale');
+const UsernameReservationModule = require('./UsernameReservation');
 
 // Créer l'instance Sequelize
 const sequelize = new Sequelize(config.database);
@@ -116,6 +128,16 @@ TweetTranslation.initTweetTranslationModel(sequelize);
 const UnbanTicketModel = UnbanTicketModule(sequelize);
 const SupportTicketModel = SupportTicketModule(sequelize);
 const SupportTicketMessageModel = SupportTicketMessageModule(sequelize);
+const PaidContentModel = PaidContentModule(sequelize);
+const ContentPurchaseModel = ContentPurchaseModule(sequelize);
+const ScheduledTweetModel = ScheduledTweetModule(sequelize);
+const TweetEditModel = TweetEditModule(sequelize);
+const ProfileViewModel = ProfileViewModule(sequelize);
+const ImpersonationAlertModel = ImpersonationAlertModule(sequelize);
+const TweetVelocityAlertModel = TweetVelocityAlertModule(sequelize);
+const UsernameListingModel = UsernameListingModule(sequelize);
+const UsernameSaleModel = UsernameSaleModule(sequelize);
+const UsernameReservationModel = UsernameReservationModule(sequelize);
 
 // Définir les associations entre les modèles
 
@@ -507,6 +529,51 @@ SupportTicketMessageModel.belongsTo(User, {
   foreignKey: 'author_id',
   as: 'author'
 });
+
+// ── Offre créateur ────────────────────────────────────────────────────────
+// Le verrou payant ne pointe pas vers `tweets` : la cible est polymorphe
+// (tweet, story, replay) et une clé étrangère ne sait pas viser trois tables.
+// L'existence et la propriété du contenu sont vérifiées par le service.
+PaidContentModel.belongsTo(User, { foreignKey: 'creator_id', as: 'creator' });
+PaidContentModel.hasMany(ContentPurchaseModel, {
+  foreignKey: 'paid_content_id',
+  as: 'purchases',
+});
+ContentPurchaseModel.belongsTo(PaidContentModel, {
+  foreignKey: 'paid_content_id',
+  as: 'paidContent',
+});
+ContentPurchaseModel.belongsTo(User, { foreignKey: 'buyer_id', as: 'buyer' });
+ContentPurchaseModel.belongsTo(User, { foreignKey: 'creator_id', as: 'creator' });
+
+ScheduledTweetModel.belongsTo(User, { foreignKey: 'user_id', as: 'author' });
+ScheduledTweetModel.belongsTo(Tweet, {
+  foreignKey: 'published_tweet_id',
+  as: 'publishedTweet',
+});
+
+TweetEditModel.belongsTo(Tweet, { foreignKey: 'tweet_id', as: 'tweet' });
+TweetEditModel.belongsTo(User, { foreignKey: 'edited_by', as: 'editor' });
+Tweet.hasMany(TweetEditModel, { foreignKey: 'tweet_id', as: 'edits' });
+
+ProfileViewModel.belongsTo(User, { foreignKey: 'profile_id', as: 'profile' });
+ProfileViewModel.belongsTo(User, { foreignKey: 'viewer_id', as: 'viewer' });
+
+ImpersonationAlertModel.belongsTo(User, { foreignKey: 'user_id', as: 'protectedUser' });
+ImpersonationAlertModel.belongsTo(User, { foreignKey: 'suspect_id', as: 'suspect' });
+
+TweetVelocityAlertModel.belongsTo(Tweet, { foreignKey: 'tweet_id', as: 'tweet' });
+TweetVelocityAlertModel.belongsTo(User, { foreignKey: 'user_id', as: 'author' });
+
+UsernameListingModel.belongsTo(User, { foreignKey: 'seller_id', as: 'seller' });
+UsernameListingModel.belongsTo(User, { foreignKey: 'buyer_id', as: 'buyer' });
+UsernameSaleModel.belongsTo(User, { foreignKey: 'seller_id', as: 'seller' });
+UsernameSaleModel.belongsTo(User, { foreignKey: 'buyer_id', as: 'buyer' });
+UsernameSaleModel.belongsTo(UsernameListingModel, {
+  foreignKey: 'listing_id',
+  as: 'listing',
+});
+UsernameReservationModel.belongsTo(User, { foreignKey: 'user_id', as: 'holder' });
 
 // Associations pour les publicités
 User.hasMany(AdCampaignModel, { 
@@ -1550,6 +1617,16 @@ module.exports = {
   UnbanTicket: UnbanTicketModel,
   SupportTicket: SupportTicketModel,
   SupportTicketMessage: SupportTicketMessageModel,
+  PaidContent: PaidContentModel,
+  ContentPurchase: ContentPurchaseModel,
+  ScheduledTweet: ScheduledTweetModel,
+  TweetEdit: TweetEditModel,
+  ProfileView: ProfileViewModel,
+  ImpersonationAlert: ImpersonationAlertModel,
+  TweetVelocityAlert: TweetVelocityAlertModel,
+  UsernameListing: UsernameListingModel,
+  UsernameSale: UsernameSaleModel,
+  UsernameReservation: UsernameReservationModel,
   PolicierCongoContract: PolicierCongoContractModel,
   MiningRound: MiningRoundModel,
   CasinoBet: CasinoBetModel,

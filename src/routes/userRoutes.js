@@ -13,6 +13,7 @@ const { v4: uuidv4 } = require('uuid');
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
 const BanService = require('../services/banService');
+const profileViewService = require('../services/profileViewService');
 const {
   TARGET_LANGUAGES,
   SOURCE_LANGUAGE,
@@ -419,6 +420,13 @@ router.get('/profile/authenticated/:username', [
       followStatus = existingFollow?.status || null;
       isFollowing = followStatus === 'active';
     }
+
+    // Visite de profil : enregistrée sans être attendue. Une visite perdue
+    // n'est rien ; une page de profil ralentie par une écriture se voit.
+    // Seule cette route (authentifiée, nominative) alimente la fonctionnalité —
+    // la route publique par id ne sait pas QUI regarde, et deviner serait faux.
+    profileViewService.record({ profileId: user.id, viewerId: currentUserId })
+      .catch((e) => logger.warn(`Visite de profil non enregistrée: ${e.message}`));
 
     res.json({
       success: true,

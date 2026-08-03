@@ -15,6 +15,8 @@ const { ultraSafeClean } = require('../utils/circularRefCleaner');
 const { engagementTargetId, resolveEngagementTarget } = require('../utils/engagementTarget');
 const { assertTweetLength } = require('../utils/tweetLimits');
 const tweetTranslationService = require('../services/tweetTranslationService');
+const paidContentService = require('../services/paidContentService');
+const tweetEditService = require('../services/tweetEditService');
 const TweetRecommendationService = require('../services/tweetRecommendationService');
 const RealtimeQueueService = require('../services/realtimeQueueService');
 const { upload, videoService } = require('../services/videoService');
@@ -238,6 +240,8 @@ router.get('/', [
               }
             }
 
+            await paidContentService.maskTweets(enrichedVideos, userId);
+
             return res.json({
               success: true,
               message: 'Vidéos recommandées via Moteur TikTok-Like JS',
@@ -395,6 +399,8 @@ router.get('/', [
             } catch (e) {
               logger.error('Erreur injection pubs dans similarities:', e);
             }
+
+            await paidContentService.maskTweets(enrichedTweets, userId);
 
             const safeData = ultraSafeClean({
               tweets: enrichedTweets,
@@ -573,6 +579,20 @@ router.get('/', [
     const totalCount = await Tweet.count({
       where: whereClause
     });
+
+    // Contenus payants : dernière étape avant l'envoi, volontairement.
+    // C'est le seul point par lequel passent TOUTES les listes, quel que soit
+    // le moteur de recommandation qui les a construites ; masquer plus haut
+    // laisserait une branche non couverte, et cette branche servirait alors
+    // gratuitement du contenu vendu.
+    try {
+      await paidContentService.maskTweets(enrichedTweets, userId);
+    } catch (e) {
+      logger.error('Masquage des contenus payants en échec:', e);
+      // On ne sert pas un fil non masqué : mieux vaut une page vide qu'un
+      // contenu payant distribué gratuitement.
+      return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+    }
 
     res.json({
       success: true,
@@ -914,6 +934,27 @@ router.get('/:id', [
       ctrTracker.trackTweetView(userId, id).catch(err => {
         logger.warn(`CTR tracking error: ${err.message}`);
       });
+    }
+
+    // Contenu payant : le tweet ouvert, ses ancêtres et ses réponses passent
+    // par le même masquage. Un fil ouvert sur une réponse afficherait sinon
+    // en clair, dans `thread_ancestors`, le tweet verrouillé qui le lance.
+    try {
+      await paidContentService.maskTweets(
+        [enrichedTweet, ...(enrichedTweet.thread_ancestors || []), ...(enrichedTweet.replies || [])],
+        userId,
+      );
+    } catch (e) {
+      logger.error('Masquage des contenus payants en échec (détail):', e);
+      return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+    }
+
+    // Historique d'édition : joint au tweet pour que la mention « modifié »
+    // s'affiche sans second appel — sans elle, l'édition serait invisible.
+    try {
+      enrichedTweet.edit_info = await tweetEditService.summaryFor(enrichedTweet.id);
+    } catch (e) {
+      logger.warn(`Historique d'édition non joint au tweet ${id}: ${e.message}`);
     }
 
     res.json({
@@ -1759,9 +1800,38 @@ router.put('/:id', [
       });
     }
 
-    // Mettre à jour le tweet
+    // Le CONTENU passe par le service d'édition : abonnement actif, fenêtre
+    // de 30 minutes, historique public. Cette route réécrivait auparavant le
+    // texte de n'importe quel tweet, à n'importe quel âge, sans laisser de
+    // trace — un tweet vieux de six mois pouvait devenir autre chose en
+    // gardant ses retweets et ses réponses.
+    //
+    // Les autres champs (médias, confidentialité, sensibilité) restent libres :
+    // ils ne changent pas ce que le tweet DIT, et les restreindre reviendrait
+    // à faire payer le fait de masquer une image mal cadrée.
+    if (typeof content === 'string' && content !== tweet.content) {
+      try {
+        await tweetEditService.applyEdit({
+          tweetId: tweet.id,
+          editorId: userId,
+          newContent: content,
+        });
+      } catch (error) {
+        if (error instanceof tweetEditService.TweetEditError) {
+          const status = error.code === 'subscription_required' ? 403
+            : error.code === 'not_found' ? 404
+              : error.code === 'forbidden' ? 403 : 400;
+          return res.status(status).json({
+            success: false,
+            message: error.message,
+            code: error.code,
+          });
+        }
+        throw error;
+      }
+    }
+
     await tweet.update({
-      content,
       media_urls,
       is_private,
       is_sensitive
@@ -1790,6 +1860,58 @@ router.put('/:id', [
       success: false,
       message: 'Erreur interne du serveur'
     });
+  }
+});
+
+/**
+ * GET /api/tweets/:id/edit-history
+ * Historique des modifications — PUBLIC, et c'est le point.
+ *
+ * Une édition consultable par tous est une correction ; une édition
+ * silencieuse est une réécriture. C'est cette route qui fait la différence
+ * entre les deux, donc elle n'est pas réservée à l'auteur.
+ */
+router.get('/:id/edit-history', [
+  authenticateToken,
+  param('id').isUUID().withMessage('ID de tweet invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const history = await tweetEditService.historyFor(req.params.id);
+    res.json({ success: true, data: { revisions: history } });
+  } catch (error) {
+    logger.error('Erreur historique d\'édition:', error);
+    res.status(500).json({ success: false, message: 'Historique indisponible' });
+  }
+});
+
+/**
+ * GET /api/tweets/:id/editability
+ * L'auteur peut-il encore modifier, et combien de temps lui reste-t-il.
+ * Sert à afficher le compte à rebours plutôt qu'un bouton qui échoue.
+ */
+router.get('/:id/editability', [
+  authenticateToken,
+  param('id').isUUID().withMessage('ID de tweet invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const tweet = await Tweet.findByPk(req.params.id, {
+      attributes: ['id', 'user_id', 'created_at']
+    });
+    if (!tweet) {
+      return res.status(404).json({ success: false, message: 'Tweet non trouvé' });
+    }
+    if (String(tweet.user_id) !== String(req.user.id)) {
+      return res.status(403).json({ success: false, message: 'Ce tweet n\'est pas le tien' });
+    }
+    const user = await User.findByPk(req.user.id, {
+      attributes: ['id', 'premium', 'subscription_tier', 'subscription_expires_at']
+    });
+    res.json({ success: true, data: await tweetEditService.editabilityFor(tweet, user) });
+  } catch (error) {
+    logger.error('Erreur état d\'édition:', error);
+    res.status(500).json({ success: false, message: 'État d\'édition indisponible' });
   }
 });
 
