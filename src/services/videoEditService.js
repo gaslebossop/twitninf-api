@@ -246,15 +246,26 @@ function buildVideoFilters(edit = {}, workDir = null, videoId = 'x') {
       `y=(h-text_h)*${overlay.y.toFixed(4)}`,
     ];
 
-    if (overlay.background) {
-      // Style « fond » : pavé plein derrière le texte.
-      options.push('box=1', `boxcolor=${overlay.background}@0.6`, `boxborderw=${Math.round(fontSize * 0.35)}`);
-    } else {
-      // Style par défaut de TikTok : pas de pavé, mais un contour net qui
-      // détache le texte de n'importe quelle scène. Une simple ombre portée
-      // ne suffit pas sur un fond clair et chargé.
-      options.push(`borderw=${Math.max(2, Math.round(fontSize * 0.07))}`, 'bordercolor=0x000000@0.45');
-    }
+    /**
+     * Lisibilité : ombre portée, et un contour volontairement FIN.
+     *
+     * Un contour épais (7 % de la taille) avait été essayé : les traits des
+     * lettres voisines se rejoignaient et le mot devenait une masse, tandis
+     * que le trait du premier caractère se faisait rogner à plat — drawtext
+     * dessine le contour à l'intérieur de la boîte de texte, sans marge. Le
+     * `j` de « jaune » paraissait coupé.
+     *
+     * Le pavé plein (`box=1`) est abandonné : ses angles sont droits, alors
+     * que celui de TikTok est arrondi, et drawtext ne sait pas arrondir.
+     * Mieux vaut pas de pavé qu'un pavé qui trahit l'imitation.
+     */
+    options.push(
+      `borderw=${Math.max(1, Math.round(fontSize * 0.025))}`,
+      'bordercolor=0x000000@0.35',
+      'shadowcolor=0x000000@0.5',
+      `shadowx=${Math.max(1, Math.round(fontSize * 0.035))}`,
+      `shadowy=${Math.max(2, Math.round(fontSize * 0.045))}`,
+    );
 
     filters.push(`drawtext=${options.join(':')}`);
   });
