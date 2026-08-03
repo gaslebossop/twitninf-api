@@ -11,6 +11,15 @@ const AUTHORIZED_DECISIONS = new Set(['APPROVE', 'MONITOR']);
 const BLOCKED_DECISIONS = new Set(['REVIEW', 'DECLINE']);
 const VALID_DECISIONS = new Set([...AUTHORIZED_DECISIONS, ...BLOCKED_DECISIONS]);
 const VALID_ACTIONS = new Set(['NONE', 'MONITOR', 'RESTRICT', 'FREEZE']);
+const NON_OVERRIDABLE_MANUAL_REVIEW_REASONS = new Set([
+  'missing_authorization_identity',
+  'invalid_transaction_facts',
+  'wallet_already_frozen',
+  'account_suspended',
+  'idempotency_replay_history',
+  'coordinated_payment_fraud',
+  'coordinated_laundering_ring',
+]);
 const AUTO_IDEMPOTENCY_BUCKET_MS = 5000;
 
 class TransactionRiskError extends Error {
@@ -58,11 +67,12 @@ function boundedString(value, max = 160) {
 
 function requestContextMiddleware(req, _res, next) {
   const suppliedKey = boundedString(req.get('Idempotency-Key') || req.get('X-Idempotency-Key'), 200);
+  // Un User-Agent identifie une version d'application, pas un appareil :
+  // l'utiliser ici reliait artificiellement tous les clients Expo entre eux.
   const deviceSource = req.get('X-Device-Id')
     || req.get('X-Device-Token')
     || req.body?.deviceToken
     || req.body?.device_id
-    || req.get('User-Agent')
     || '';
   const paymentSource = req.body?.paymentToken
     || req.body?.cardToken
@@ -114,9 +124,14 @@ class TransactionAuthorizationService {
         review_required BOOLEAN NOT NULL DEFAULT FALSE,
         restricted_at TIMESTAMPTZ NULL,
         frozen_at TIMESTAMPTZ NULL,
+        manual_trust_until TIMESTAMPTZ NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         CHECK (risk_state IN ('CLEAR', 'MONITOR', 'RESTRICTED', 'FROZEN'))
       );
+    `);
+    await sequelize.query(`
+      ALTER TABLE wallet_risk_profiles
+      ADD COLUMN IF NOT EXISTS manual_trust_until TIMESTAMPTZ NULL;
     `);
     await sequelize.query(`
       CREATE TABLE IF NOT EXISTS transaction_risk_authorizations (
@@ -421,7 +436,12 @@ class TransactionAuthorizationService {
         LIMIT 1
       `, { type: QueryTypes.SELECT, replacements: common }) : Promise.resolve([]),
       sequelize.query(`
-        WITH completed AS (
+        WITH manual_clear AS (
+          SELECT MAX(created_at) AS cleared_at
+          FROM transaction_risk_events
+          WHERE user_id = :userId AND event_type = 'MANUAL_CLEAR'
+        ),
+        completed AS (
           SELECT
             amount_eur::float8 AS eur,
             created_at
@@ -464,6 +484,13 @@ class TransactionAuthorizationService {
             ) AS failed_24h
           FROM transaction_risk_authorizations
           WHERE user_id = :userId AND id <> :authorizationId
+            -- Une validation manuelle ouvre une nouvelle fenêtre de risque :
+            -- les refus déjà examinés restent audités, mais ne rebloquent pas
+            -- immédiatement le paiement suivant.
+            AND created_at > COALESCE(
+              (SELECT cleared_at FROM manual_clear),
+              '-infinity'::timestamptz
+            )
         )
         SELECT
           COUNT(c.created_at)::bigint AS completed_count,
@@ -519,23 +546,32 @@ class TransactionAuthorizationService {
           ) END::bigint AS payment_account_count_30d
       `, { type: QueryTypes.SELECT, replacements: common }),
       sequelize.query(`
+        WITH manual_clear AS (
+          SELECT MAX(created_at) AS cleared_at
+          FROM transaction_risk_events
+          WHERE user_id = :userId AND event_type = 'MANUAL_CLEAR'
+        )
         SELECT
           COALESCE(risk_state, 'CLEAR') AS state,
           COALESCE(rolling_score, 0)::float8 AS rolling_score,
+          COALESCE(manual_trust_until > NOW(), FALSE) AS manual_trust_active,
           (
             SELECT COUNT(*) FROM transaction_risk_authorizations
             WHERE user_id = :userId AND id <> :authorizationId
               AND created_at >= NOW() - INTERVAL '24 hours'
+              AND created_at > COALESCE(manual_clear.cleared_at, '-infinity'::timestamptz)
           )::bigint AS authorizations_24h,
           (
             SELECT COUNT(*) FROM transaction_risk_authorizations
             WHERE user_id = :userId AND id <> :authorizationId
               AND status = 'DECLINED' AND created_at >= NOW() - INTERVAL '24 hours'
+              AND created_at > COALESCE(manual_clear.cleared_at, '-infinity'::timestamptz)
           )::bigint AS declines_24h,
           (
             SELECT COUNT(*) FROM transaction_risk_authorizations
             WHERE user_id = :userId AND id <> :authorizationId
               AND status = 'REVIEW' AND created_at >= NOW() - INTERVAL '7 days'
+              AND created_at > COALESCE(manual_clear.cleared_at, '-infinity'::timestamptz)
           )::bigint AS reviews_7d,
           (
             SELECT COUNT(*) FROM transaction_risk_events
@@ -544,6 +580,7 @@ class TransactionAuthorizationService {
               AND created_at >= NOW() - INTERVAL '30 days'
           )::bigint AS replay_mismatches_30d
         FROM wallet_risk_profiles
+        CROSS JOIN manual_clear
         WHERE user_id = :userId
       `, { type: QueryTypes.SELECT, replacements: common }),
       operation.counterpartyUserId ? sequelize.query(`
@@ -683,6 +720,7 @@ class TransactionAuthorizationService {
       prior_risk: {
         state: boundedString(priorRisk.state || 'CLEAR', 20),
         rolling_score: finiteNumber(priorRisk.rolling_score),
+        manual_trust_active: Boolean(priorRisk.manual_trust_active),
         authorizations_24h: finiteNumber(priorRisk.authorizations_24h),
         declines_24h: finiteNumber(priorRisk.declines_24h),
         reviews_7d: finiteNumber(priorRisk.reviews_7d),
@@ -812,6 +850,7 @@ class TransactionAuthorizationService {
       }
 
       decision = this._validateRustDecision(rustDecision, claim.row.id, requestHash);
+      decision = this._applyManualTrustOverride(decision, features.prior_risk);
       await this._persistDecision(operation.userId, decision);
     }
 
@@ -856,6 +895,44 @@ class TransactionAuthorizationService {
       reasons: decision.reasons || [],
       expiresAt: new Date(Date.now() + finiteNumber(decision.valid_for_seconds, 90) * 1000),
       exempt: false,
+    };
+  }
+
+  _applyManualTrustOverride(decision, priorRisk) {
+    if (!priorRisk?.manual_trust_active) return decision;
+
+    const reasons = Array.isArray(decision.reasons) ? decision.reasons : [];
+    if (reasons.some((reason) => NON_OVERRIDABLE_MANUAL_REVIEW_REASONS.has(reason))) {
+      return decision;
+    }
+
+    if (decision.decision === 'APPROVE' && finiteNumber(decision.risk_score) === 0) {
+      return decision;
+    }
+
+    logger.info(
+      `[transaction-risk] Manual trust override applied to ${decision.authorization_id}`
+    );
+    return {
+      ...decision,
+      decision: 'APPROVE',
+      risk_score: 0,
+      confidence: 1,
+      wallet_action: 'NONE',
+      valid_for_seconds: 90,
+      reasons: ['manual_review_approved'],
+      signals: [
+        {
+          code: 'manual_review_approved',
+          family: 'manual_review',
+          probability: 0,
+          reliability: 1,
+          impact: 0,
+          detail: 'Fenêtre de confiance ouverte après validation manuelle',
+        },
+        ...(Array.isArray(decision.signals) ? decision.signals : []),
+      ].slice(0, 80),
+      engine_version: boundedString(`${decision.engine_version}+manual-trust`, 80),
     };
   }
 
@@ -1120,12 +1197,13 @@ class TransactionAuthorizationService {
       await sequelize.query(`
         INSERT INTO wallet_risk_profiles (
           user_id, risk_state, rolling_score, last_decision, last_reasons,
-          review_required, restricted_at, frozen_at, updated_at
+          review_required, restricted_at, frozen_at, manual_trust_until, updated_at
         ) VALUES (
           :userId, :state, :score, :decision, CAST(:reasons AS jsonb),
           FALSE,
           CASE WHEN :frozen THEN NOW() ELSE NULL END,
           CASE WHEN :frozen THEN NOW() ELSE NULL END,
+          CASE WHEN :frozen THEN NULL ELSE NOW() + INTERVAL '24 hours' END,
           NOW()
         )
         ON CONFLICT (user_id) DO UPDATE SET
@@ -1133,9 +1211,12 @@ class TransactionAuthorizationService {
           rolling_score = EXCLUDED.rolling_score,
           last_decision = EXCLUDED.last_decision,
           last_reasons = EXCLUDED.last_reasons,
+          decline_count = CASE WHEN :frozen THEN wallet_risk_profiles.decline_count ELSE 0 END,
+          review_count = CASE WHEN :frozen THEN wallet_risk_profiles.review_count ELSE 0 END,
           review_required = FALSE,
           restricted_at = EXCLUDED.restricted_at,
           frozen_at = EXCLUDED.frozen_at,
+          manual_trust_until = EXCLUDED.manual_trust_until,
           updated_at = NOW()
       `, {
         replacements: {
