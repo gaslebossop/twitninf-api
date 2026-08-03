@@ -72,6 +72,8 @@
     "winston": "^3.10.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^20.5.0",
     "eslint": "^8.47.0",
     "jest": "^29.6.2",
@@ -82,5 +84,11 @@
   "engines": {
     "node": ">=16.0.0",
     "npm": ">=8.0.0"
+  },
+  "jest": {
+    "testMatch": [
+      "**/__tests__/**/*.js",
+      "**/__specs__/**/*.spec.js"
+    ]
   }
 }

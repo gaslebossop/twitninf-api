@@ -1,7 +1,7 @@
 const express = require('express');
 const { Op } = require('sequelize');
 const cors = require('cors');
-const { authenticateToken } = require('./middleware/authMiddleware');
+const { authenticateToken, requireAdminRole } = require('./middleware/authMiddleware');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const compression = require('compression');
@@ -436,7 +436,7 @@ app.use('/api/detection', detectionRoutes);
 app.use('/api/user-similarity', userSimilarityRoutes);
 
 // Endpoint pour déclencher manuellement l'analyse intelligente PolicierCongo
-app.post('/api/policiercongo/analyze', async (req, res) => {
+app.post('/api/policiercongo/analyze', authenticateToken, requireAdminRole, async (req, res) => {
   try {
     logger.info('🔍 Déclenchement manuel de l\'analyse intelligente PolicierCongo...');
     
@@ -475,8 +475,8 @@ app.get('/api/ping', (req, res) => {
   res.json({ success: true, message: 'pong', timestamp: new Date().toISOString() });
 });
 
-// Endpoint pour obtenir le statut du scheduler PolicierCongo (DEBUG SANS AUTH)
-app.get('/api/debug/policiercongo/scheduler', (req, res) => {
+// Endpoint de diagnostic du scheduler (administrateurs uniquement)
+app.get('/api/debug/policiercongo/scheduler', authenticateToken, requireAdminRole, (req, res) => {
   try {
     const schedulerManager = require('./services/policiercongo/schedulerManager');
     schedulerManager.load();
@@ -502,7 +502,7 @@ app.get('/api/debug/policiercongo/scheduler', (req, res) => {
 });
 
 // Endpoint pour obtenir le statut du scheduler PolicierCongo (Direct avec Auth)
-app.get('/api/admin/policiercongo/scheduler', authenticateToken, (req, res) => {
+app.get('/api/admin/policiercongo/scheduler', authenticateToken, requireAdminRole, (req, res) => {
   try {
     const schedulerManager = require('./services/policiercongo/schedulerManager');
     schedulerManager.load();
@@ -530,7 +530,7 @@ app.get('/api/admin/policiercongo/scheduler', authenticateToken, (req, res) => {
 });
 
 // Endpoint pour réinitialiser le scheduler (Direct avec Auth)
-app.delete('/api/admin/policiercongo/scheduler', authenticateToken, (req, res) => {
+app.delete('/api/admin/policiercongo/scheduler', authenticateToken, requireAdminRole, (req, res) => {
   try {
     const schedulerManager = require('./services/policiercongo/schedulerManager');
     schedulerManager.reset();
@@ -542,7 +542,7 @@ app.delete('/api/admin/policiercongo/scheduler', authenticateToken, (req, res) =
 });
 
 // Endpoint pour forcer une exécution immédiate (Direct avec Auth)
-app.post('/api/admin/policiercongo/scheduler/run', authenticateToken, async (req, res) => {
+app.post('/api/admin/policiercongo/scheduler/run', authenticateToken, requireAdminRole, async (req, res) => {
   try {
     const policiercongoAutomatisation = require('./services/policiercongoAutomatisation');
     // On ignore le gate du scheduler pour un run manuel
@@ -555,7 +555,7 @@ app.post('/api/admin/policiercongo/scheduler/run', authenticateToken, async (req
 });
 
 // Endpoint pour obtenir le statut de la mémoire Gemini
-app.get('/api/policiercongo/status', async (req, res) => {
+app.get('/api/policiercongo/status', authenticateToken, requireAdminRole, async (req, res) => {
   try {
     const memoryStatus = policiercongoAutomatisation.getGeminiMemoryStatus();
     
@@ -576,7 +576,7 @@ app.get('/api/policiercongo/status', async (req, res) => {
 });
 
 // Endpoint pour réinitialiser la mémoire Gemini
-app.post('/api/policiercongo/reset-memory', async (req, res) => {
+app.post('/api/policiercongo/reset-memory', authenticateToken, requireAdminRole, async (req, res) => {
   try {
     logger.info('🧠 Réinitialisation manuelle de la mémoire Gemini...');
     

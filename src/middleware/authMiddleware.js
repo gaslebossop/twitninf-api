@@ -158,11 +158,15 @@ const requirePro = async (req, res, next) => {
 // Middleware pour vérifier les permissions d'administrateur
 const requireAdmin = async (req, res, next) => {
   try {
-    // Vérifier si l'utilisateur a le rôle admin ou superadmin
-    const isAdmin = req.user.isAdmin || 
-                   req.user.role === 'admin' || 
-                   req.user.role === 'superadmin' ||
-                   req.user.role === 'super_admin';
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: 'Authentification requise' });
+    }
+
+    // A role embedded in a JWT can be stale for the whole lifetime of the
+    // token. Always read privileged roles from the database so demoting or
+    // deleting an administrator takes effect immediately.
+    const user = await User.findByPk(req.user.id, { attributes: ['id', 'role'] });
+    const isAdmin = user && ['admin', 'superadmin', 'super_admin'].includes(user.role);
     
     if (!isAdmin) {
       logger.warn(`Accès admin refusé pour user=${req.user?.id}`);
@@ -361,8 +365,10 @@ const getEffectiveModerationUser = async (req) => {
 
   return {
     ...req.user,
-    role: dbUser?.role || req.user?.role,
-    moderation_permissions: dbUser?.moderation_permissions || req.user?.moderation_permissions || {}
+    // Never fall back to privileged claims from the token. A missing or
+    // demoted account must lose access without waiting for JWT expiry.
+    role: dbUser?.role || 'user',
+    moderation_permissions: dbUser?.moderation_permissions || {}
   };
 };
 
