@@ -64,15 +64,6 @@ const USERNAME_RESERVATION_MAX_PER_USER = 5;
 const PAID_CONTENT_PRICE_EDIT_WINDOW_MS = 30 * 60 * 1000;
 
 /**
- * Aperçu laissé visible au-dessus du verrou.
- *
- * Un contenu payant dont on ne voit rien ne se vend pas, et un contenu dont
- * on voit tout non plus. 140 caractères : de quoi comprendre le sujet, pas
- * de quoi s'en passer.
- */
-const PAID_CONTENT_PREVIEW_CHARS = 140;
-
-/**
  * Fenêtre d'édition d'un tweet publié.
  *
  * 30 minutes après la publication, et pas une de plus : passé ce délai, des
@@ -124,7 +115,6 @@ module.exports = {
   PLATFORM_USERNAME_FEE_RATE,
   PAID_CONTENT_MIN_PRICE_TWC,
   PAID_CONTENT_MAX_PRICE_TWC,
-  PAID_CONTENT_PREVIEW_CHARS,
   PAID_CONTENT_PRICE_EDIT_WINDOW_MS,
   USERNAME_MIN_PRICE_TWC,
   USERNAME_MAX_PRICE_TWC,

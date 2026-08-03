@@ -14,7 +14,6 @@ const {
   PLATFORM_CONTENT_FEE_RATE,
   PAID_CONTENT_MIN_PRICE_TWC,
   PAID_CONTENT_MAX_PRICE_TWC,
-  PAID_CONTENT_PREVIEW_CHARS,
   PAID_CONTENT_PRICE_EDIT_WINDOW_MS,
 } = require('../constants/premiumMarket');
 const logger = require('../utils/logger');
@@ -68,12 +67,25 @@ function publicLockPayload(lock, { hasAccess, isCreator }) {
   };
 }
 
+const SCRAMBLE_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+/**
+ * Remplace chaque caractère non-blanc par une lettre tirée au hasard, en
+ * gardant espaces et retours à la ligne pour que le flou posé dessus imite la
+ * forme du texte réel. Le total de caractères ne bouge pas.
+ *
+ * Utilisé uniquement quand le créateur n'a pas écrit d'aperçu lui-même : un
+ * extrait du vrai texte, même tronqué, resterait le contenu vendu.
+ */
+function scrambleText(text) {
+  return text.replace(/\S/g, () => SCRAMBLE_ALPHABET[Math.floor(Math.random() * SCRAMBLE_ALPHABET.length)]);
+}
+
 function buildPreview(lock, rawContent) {
   if (lock.preview_text) return lock.preview_text;
-  const text = String(rawContent || '').trim();
-  if (!text) return null;
-  if (text.length <= PAID_CONTENT_PREVIEW_CHARS) return text;
-  return `${text.slice(0, PAID_CONTENT_PREVIEW_CHARS).trimEnd()}…`;
+  const text = String(rawContent || '');
+  if (!text.trim()) return null;
+  return scrambleText(text);
 }
 
 function normalizePrice(raw) {
