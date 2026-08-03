@@ -1,4 +1,3 @@
-const { Op } = require('sequelize');
 const { User, ImpersonationAlert, Notification } = require('../models');
 const { sequelize } = require('../database/index');
 const {
@@ -6,6 +5,69 @@ const {
   IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS,
 } = require('../constants/premiumMarket');
 const logger = require('../utils/logger');
+
+const INVISIBLE_CHARACTERS = /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/gu;
+const COMBINING_MARKS = /\p{Mark}/gu;
+const NON_TEXT_CHARACTERS = /[^\p{Letter}\p{Number}]+/gu;
+const NON_ASCII_IDENTIFIER = /[^a-z0-9]/g;
+
+/**
+ * Squelette visuel des caractères les plus souvent utilisés pour copier un
+ * identifiant latin. La liste couvre le leetspeak, les lettres grecques et
+ * cyrilliques, les petites capitales et les formes pleine largeur.
+ *
+ * Ce n'est volontairement pas une translittération linguistique : le but est
+ * de réunir ce qu'un humain CONFOND visuellement, pas ce qui se prononce de la
+ * même façon. Une translittération générale créerait beaucoup d'homonymes.
+ */
+const CONFUSABLE_CHARACTERS = Object.freeze({
+  '0': 'o', '1': 'l', '2': 'z', '3': 'e', '4': 'a', '5': 's', '6': 'g', '7': 't', '8': 'b', '9': 'g',
+  '@': 'a', '$': 's', '!': 'i', '|': 'l',
+  'ɑ': 'a', 'α': 'a', 'а': 'a', 'ӕ': 'a', 'ａ': 'a',
+  'Ƅ': 'b', 'ƅ': 'b', 'в': 'b', 'Ꮟ': 'b', 'ᗷ': 'b', 'ｂ': 'b',
+  'ϲ': 'c', 'с': 'c', 'Ϲ': 'c', 'Ⅽ': 'c', 'ｃ': 'c',
+  'ԁ': 'd', 'ⅾ': 'd', 'ｄ': 'd',
+  'е': 'e', 'ҽ': 'e', 'є': 'e', 'ε': 'e', '℮': 'e', 'ｅ': 'e',
+  'ϝ': 'f', 'ք': 'f', 'ꞙ': 'f', 'ｆ': 'f',
+  'ɡ': 'g', 'ց': 'g', 'ｇ': 'g',
+  'һ': 'h', 'հ': 'h', 'Ꮒ': 'h', 'ｈ': 'h',
+  'і': 'i', 'ι': 'i', 'ɩ': 'i', 'ⅰ': 'i', 'ｉ': 'i',
+  'ϳ': 'j', 'ј': 'j', 'ｊ': 'j',
+  'κ': 'k', 'к': 'k', 'K': 'k', 'Ꮶ': 'k', 'ｋ': 'k',
+  'ӏ': 'l', 'ⅼ': 'l', 'ǀ': 'l', 'ｌ': 'l',
+  'м': 'm', 'μ': 'm', 'ⅿ': 'm', 'ｍ': 'm',
+  'ո': 'n', 'ռ': 'n', 'п': 'n', 'ｎ': 'n',
+  'ο': 'o', 'о': 'o', 'օ': 'o', 'ഠ': 'o', '०': 'o', 'ｏ': 'o',
+  'ρ': 'p', 'р': 'p', '⍴': 'p', 'ｐ': 'p',
+  'ԛ': 'q', 'զ': 'q', 'ｑ': 'q',
+  'г': 'r', 'ɽ': 'r', 'Ꭱ': 'r', 'ｒ': 'r',
+  'ѕ': 's', 'Ꮥ': 's', 'ｓ': 's',
+  'т': 't', 'τ': 't', 'Ꭲ': 't', 'ｔ': 't',
+  'ս': 'u', 'υ': 'u', 'ｕ': 'u',
+  'ѵ': 'v', 'ⅴ': 'v', 'ｖ': 'v',
+  'ԝ': 'w', 'ѡ': 'w', 'ｗ': 'w',
+  'х': 'x', 'χ': 'x', 'ⅹ': 'x', 'ｘ': 'x',
+  'у': 'y', 'υ': 'y', 'ү': 'y', 'ｙ': 'y',
+  'ᴢ': 'z', 'ʐ': 'z', 'ｚ': 'z',
+});
+
+const SQL_CONFUSABLE_ENTRIES = Object.entries(CONFUSABLE_CHARACTERS)
+  .filter(([from, to]) => Array.from(from).length === 1 && /^[a-z]$/.test(to));
+const SQL_CONFUSABLE_FROM = SQL_CONFUSABLE_ENTRIES.map(([from]) => from).join('');
+const SQL_CONFUSABLE_TO = SQL_CONFUSABLE_ENTRIES.map(([, to]) => to).join('');
+
+const IMPERSONATION_AFFIXES = new Set([
+  'admin', 'aide', 'alt', 'authentic', 'authentique', 'backup', 'bis', 'compte',
+  'equipe', 'fan', 'fr', 'france', 'help', 'info', 'levrai', 'off', 'officiel',
+  'official', 'original', 'real', 'sav', 'secours', 'second', 'secondaire',
+  'service', 'support', 'team', 'vrai', 'verified', 'verification',
+]);
+
+const DEFAULT_AVATAR_MARKERS = [
+  'default-avatar', 'default_avatar', '/avatar/default', '/avatars/default',
+  'anonymous-user', 'blank-profile', 'no-avatar', 'placeholder-avatar',
+  'ui-avatars.com', 'gravatar.com/avatar/00000000000000000000000000000000',
+];
 
 /**
  * Veille usurpation — avantage abonné.
@@ -50,11 +112,211 @@ function levenshtein(a, b) {
 }
 
 function similarity(a, b) {
-  const x = String(a || '').toLowerCase();
-  const y = String(b || '').toLowerCase();
+  const x = foldUnicode(a);
+  const y = foldUnicode(b);
   if (!x || !y) return 0;
   const max = Math.max(x.length, y.length);
   return 1 - levenshtein(x, y) / max;
+}
+
+function foldUnicode(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(INVISIBLE_CHARACTERS, '')
+    .replace(COMBINING_MARKS, '')
+    .toLowerCase()
+    .trim();
+}
+
+function confusableSkeleton(value) {
+  const folded = foldUnicode(value);
+  let skeleton = '';
+  for (const character of folded) {
+    if (character >= 'a' && character <= 'z') skeleton += character;
+    else if (character >= '0' && character <= '9') {
+      skeleton += CONFUSABLE_CHARACTERS[character] || character;
+    } else if (CONFUSABLE_CHARACTERS[character]) {
+      skeleton += CONFUSABLE_CHARACTERS[character];
+    }
+  }
+  return skeleton.replace(NON_ASCII_IDENTIFIER, '');
+}
+
+function normalizeProfileText(value) {
+  return foldUnicode(value)
+    .split('')
+    .map((character) => CONFUSABLE_CHARACTERS[character] || character)
+    .join('')
+    .replace(NON_TEXT_CHARACTERS, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Distance Damerau-Levenshtein bornée aux transpositions adjacentes. */
+function damerauLevenshtein(a, b) {
+  const x = Array.from(String(a || ''));
+  const y = Array.from(String(b || ''));
+  if (!x.length) return y.length;
+  if (!y.length) return x.length;
+
+  const matrix = Array.from({ length: x.length + 1 }, () => new Array(y.length + 1).fill(0));
+  for (let i = 0; i <= x.length; i += 1) matrix[i][0] = i;
+  for (let j = 0; j <= y.length; j += 1) matrix[0][j] = j;
+
+  for (let i = 1; i <= x.length; i += 1) {
+    for (let j = 1; j <= y.length; j += 1) {
+      const cost = x[i - 1] === y[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost,
+      );
+      if (i > 1 && j > 1 && x[i - 1] === y[j - 2] && x[i - 2] === y[j - 1]) {
+        matrix[i][j] = Math.min(matrix[i][j], matrix[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  return matrix[x.length][y.length];
+}
+
+/** Jaro-Winkler : utile quand le début du pseudo est conservé. */
+function jaroWinkler(a, b) {
+  const x = String(a || '');
+  const y = String(b || '');
+  if (!x || !y) return 0;
+  if (x === y) return 1;
+
+  const range = Math.max(0, Math.floor(Math.max(x.length, y.length) / 2) - 1);
+  const xMatches = new Array(x.length).fill(false);
+  const yMatches = new Array(y.length).fill(false);
+  let matches = 0;
+
+  for (let i = 0; i < x.length; i += 1) {
+    const start = Math.max(0, i - range);
+    const end = Math.min(i + range + 1, y.length);
+    for (let j = start; j < end; j += 1) {
+      if (yMatches[j] || x[i] !== y[j]) continue;
+      xMatches[i] = true;
+      yMatches[j] = true;
+      matches += 1;
+      break;
+    }
+  }
+  if (!matches) return 0;
+
+  const xSequence = [];
+  const ySequence = [];
+  xMatches.forEach((matched, index) => { if (matched) xSequence.push(x[index]); });
+  yMatches.forEach((matched, index) => { if (matched) ySequence.push(y[index]); });
+  let transpositions = 0;
+  for (let i = 0; i < xSequence.length; i += 1) {
+    if (xSequence[i] !== ySequence[i]) transpositions += 1;
+  }
+
+  const jaro = (
+    matches / x.length
+    + matches / y.length
+    + (matches - transpositions / 2) / matches
+  ) / 3;
+  let prefix = 0;
+  while (prefix < 4 && prefix < x.length && prefix < y.length && x[prefix] === y[prefix]) {
+    prefix += 1;
+  }
+  return jaro + prefix * 0.1 * (1 - jaro);
+}
+
+function ngrams(value, size = 2) {
+  const text = String(value || '');
+  if (!text) return [];
+  if (text.length <= size) return [text];
+  const result = [];
+  for (let i = 0; i <= text.length - size; i += 1) result.push(text.slice(i, i + size));
+  return result;
+}
+
+function diceCoefficient(a, b) {
+  const left = ngrams(a);
+  const right = ngrams(b);
+  if (!left.length || !right.length) return 0;
+  const counts = new Map();
+  left.forEach((gram) => counts.set(gram, (counts.get(gram) || 0) + 1));
+  let overlap = 0;
+  right.forEach((gram) => {
+    const remaining = counts.get(gram) || 0;
+    if (remaining > 0) {
+      overlap += 1;
+      counts.set(gram, remaining - 1);
+    }
+  });
+  return (2 * overlap) / (left.length + right.length);
+}
+
+function tokenSet(value) {
+  return new Set(normalizeProfileText(value).split(' ').filter((token) => token.length >= 2));
+}
+
+function tokenJaccard(a, b) {
+  const left = tokenSet(a);
+  const right = tokenSet(b);
+  if (!left.size || !right.size) return 0;
+  let intersection = 0;
+  left.forEach((token) => { if (right.has(token)) intersection += 1; });
+  return intersection / (left.size + right.size - intersection);
+}
+
+function canonicalAvatar(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    if (/^https?:\/\//i.test(raw)) {
+      const parsed = new URL(raw);
+      parsed.hash = '';
+      parsed.search = '';
+      parsed.hostname = parsed.hostname.toLowerCase();
+      return parsed.toString().replace(/\/$/, '');
+    }
+  } catch {
+    // Une URL historique mal formée reste comparable sous sa forme nettoyée.
+  }
+  return raw.split(/[?#]/, 1)[0].replace(/\/+$/, '');
+}
+
+function isKnownDefaultAvatar(value) {
+  const normalized = canonicalAvatar(value).toLowerCase();
+  return DEFAULT_AVATAR_MARKERS.some((marker) => normalized.includes(marker));
+}
+
+function clamp(value, min = 0, max = 1) {
+  return Math.min(max, Math.max(min, Number(value) || 0));
+}
+
+function addReason(reasons, reason) {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+function stripKnownImpersonationAffixes(value) {
+  let core = String(value || '');
+  const removed = [];
+  const affixes = [...IMPERSONATION_AFFIXES].sort((a, b) => b.length - a.length);
+  let changed = true;
+  while (changed && core.length >= 5) {
+    changed = false;
+    for (const affix of affixes) {
+      if (core.startsWith(affix) && core.length - affix.length >= 5) {
+        core = core.slice(affix.length);
+        removed.push(affix);
+        changed = true;
+        break;
+      }
+      if (core.endsWith(affix) && core.length - affix.length >= 5) {
+        core = core.slice(0, -affix.length);
+        removed.push(affix);
+        changed = true;
+        break;
+      }
+    }
+  }
+  return { core, removed };
 }
 
 /**
@@ -64,12 +326,70 @@ function similarity(a, b) {
  * méthode la plus utilisée.
  */
 function normalizeLookalike(username) {
-  return String(username || '')
-    .toLowerCase()
-    .replace(/[1l|]/g, 'l')
-    .replace(/[0o]/g, 'o')
-    .replace(/[5s]/g, 's')
-    .replace(/[^a-z0-9]/g, '');
+  return confusableSkeleton(username);
+}
+
+function usernameAnalysis(targetUsername, suspectUsername) {
+  const target = normalizeLookalike(targetUsername);
+  const suspect = normalizeLookalike(suspectUsername);
+  if (!target || !suspect) {
+    return { score: 0, reason: null, exactSkeleton: false, distance: Infinity };
+  }
+
+  const distance = damerauLevenshtein(target, suspect);
+  const maxLength = Math.max(target.length, suspect.length);
+  const editSimilarity = 1 - distance / maxLength;
+  const jaro = jaroWinkler(target, suspect);
+  const dice = diceCoefficient(target, suspect);
+  const exactSkeleton = target === suspect;
+  const containsTarget = target.length >= 5 && suspect.includes(target) && suspect !== target;
+  const affix = containsTarget ? suspect.replace(target, '') : '';
+  const knownAffix = affix && (
+    IMPERSONATION_AFFIXES.has(affix)
+    || [...IMPERSONATION_AFFIXES].some((token) => affix === `le${token}` || affix === `mon${token}`)
+  );
+  const allowedEdits = target.length >= 11 ? 2 : 1;
+  const stripped = stripKnownImpersonationAffixes(suspect);
+  const strippedDistance = stripped.removed.length
+    ? damerauLevenshtein(target, stripped.core)
+    : Infinity;
+  const blended = editSimilarity * 0.5 + jaro * 0.3 + dice * 0.2;
+
+  let score = 0;
+  let reason = null;
+  if (exactSkeleton && foldUnicode(targetUsername) !== foldUnicode(suspectUsername)) {
+    score = 0.96;
+    reason = 'username_lookalike';
+  } else if (stripped.removed.length && strippedDistance <= allowedEdits) {
+    score = 0.9;
+    reason = 'username_similar';
+  } else if (distance <= allowedEdits && target.length >= 4) {
+    score = clamp(0.78 + (editSimilarity - 0.7) * 0.6, 0.78, 0.93);
+    reason = 'username_similar';
+  } else if (knownAffix) {
+    score = 0.87;
+    reason = 'username_similar';
+  } else if (containsTarget && target.length >= 7 && affix.length <= 4) {
+    score = 0.79;
+    reason = 'username_similar';
+  } else if (blended >= 0.82 && jaro >= 0.86 && target.length >= 5) {
+    score = clamp(0.72 + (blended - 0.82) * 0.8, 0.72, 0.86);
+    reason = 'username_similar';
+  }
+
+  return {
+    score,
+    reason,
+    exactSkeleton,
+    distance,
+    editSimilarity,
+    jaro,
+    dice,
+    containsTarget,
+    knownAffix: Boolean(knownAffix),
+    strippedAffixes: stripped.removed,
+    strippedDistance,
+  };
 }
 
 /**
@@ -78,129 +398,173 @@ function normalizeLookalike(username) {
  */
 function evaluate(target, suspect) {
   const reasons = [];
-  let score = 0;
+  const username = usernameAnalysis(target.username, suspect.username);
+  let score = username.score;
+  if (username.reason) addReason(reasons, username.reason);
 
-  const nameScore = similarity(target.username, suspect.username);
-  const targetNormalized = normalizeLookalike(target.username);
-  const suspectNormalized = normalizeLookalike(suspect.username);
-  const lookalike = targetNormalized === suspectNormalized;
-  // Les suffixes comme "officiel", "support", "fan" ou "levrai" sont une
-  // forme d'usurpation classique. La distance globale les pénalisait à tort
-  // quand le pseudo copié était court, alors que son identifiant complet est
-  // bien présent dans celui du suspect.
-  const containsIdentity = targetNormalized.length >= 5
-    && suspectNormalized.length !== targetNormalized.length
-    && suspectNormalized.includes(targetNormalized);
-
-  if (lookalike) {
-    reasons.push('username_lookalike');
-    score = Math.max(score, 0.9);
-  } else if (nameScore >= IMPERSONATION_SIMILARITY_THRESHOLD) {
-    reasons.push('username_similar');
-    score = Math.max(score, nameScore);
-  } else if (containsIdentity) {
-    reasons.push('username_similar');
-    score = Math.max(score, 0.82);
+  const targetAvatar = canonicalAvatar(target.avatar);
+  const suspectAvatar = canonicalAvatar(suspect.avatar);
+  const avatarDistinctive = suspect._sharedAvatarDistinctive !== false
+    && !isKnownDefaultAvatar(targetAvatar);
+  const sameAvatar = Boolean(
+    targetAvatar && suspectAvatar && targetAvatar === suspectAvatar && avatarDistinctive,
+  );
+  if (sameAvatar) {
+    addReason(reasons, 'same_avatar');
+    score += username.score > 0 ? 0.14 : 0.32;
   }
 
-  // L'avatar ne compte que s'il est réellement renseigné des deux côtés :
-  // deux comptes sans photo ne se ressemblent pas, ils sont juste vides.
-  if (target.avatar && suspect.avatar && target.avatar === suspect.avatar) {
-    reasons.push('same_avatar');
-    score += 0.25;
+  const targetBio = normalizeProfileText(target.bio);
+  const suspectBio = normalizeProfileText(suspect.bio);
+  const comparableBio = targetBio.length >= 20 && suspectBio.length >= 20;
+  const exactBio = comparableBio && targetBio === suspectBio;
+  const bioSimilarity = comparableBio
+    ? Math.max(tokenJaccard(targetBio, suspectBio), diceCoefficient(targetBio, suspectBio))
+    : 0;
+  const similarBio = !exactBio && comparableBio && bioSimilarity >= 0.82;
+  if (exactBio || similarBio) {
+    addReason(reasons, 'same_bio');
+    score += exactBio
+      ? (username.score > 0 ? 0.14 : 0.28)
+      : (username.score > 0 ? 0.09 : 0.17);
   }
 
-  const targetBio = String(target.bio || '').trim();
-  const suspectBio = String(suspect.bio || '').trim();
-  if (targetBio.length >= 20 && targetBio === suspectBio) {
-    reasons.push('same_bio');
-    score += 0.2;
+  const targetDisplayName = normalizeProfileText(target.full_name);
+  const suspectDisplayName = normalizeProfileText(suspect.full_name);
+  const comparableDisplayName = targetDisplayName.length >= 3 && suspectDisplayName.length >= 3;
+  const exactDisplayName = comparableDisplayName && targetDisplayName === suspectDisplayName;
+  const displaySimilarity = comparableDisplayName
+    ? Math.max(
+      jaroWinkler(targetDisplayName, suspectDisplayName),
+      diceCoefficient(targetDisplayName, suspectDisplayName),
+    )
+    : 0;
+  const similarDisplayName = !exactDisplayName && comparableDisplayName && displaySimilarity >= 0.9;
+  if ((exactDisplayName || similarDisplayName) && reasons.length > 0) {
+    addReason(reasons, 'same_display_name');
+    score += exactDisplayName ? 0.1 : 0.06;
   }
 
-  // Le nom affiché identique, seul, ne veut rien dire (les homonymes
-  // existent) : il ne fait que renforcer un signal déjà présent.
-  if (reasons.length && target.full_name && suspect.full_name
-    && String(target.full_name).toLowerCase() === String(suspect.full_name).toLowerCase()) {
-    reasons.push('same_display_name');
-    score += 0.1;
-  }
+  // Synergies de profil : une copie exacte de la photo + du nom ou de la bio
+  // doit remonter même si l'attaquant choisit un pseudo sans ressemblance.
+  if (sameAvatar && exactBio && exactDisplayName) score = Math.max(score, 0.93);
+  else if (sameAvatar && (exactBio || similarBio)) score = Math.max(score, 0.86);
+  else if (sameAvatar && exactDisplayName) score = Math.max(score, 0.79);
+  else if (exactBio && exactDisplayName) score = Math.max(score, 0.77);
 
-  return { score: Math.min(1, score), reasons };
+  return {
+    score: Math.round(clamp(score) * 1000) / 1000,
+    reasons,
+    metrics: {
+      username,
+      same_avatar: sameAvatar,
+      bio_similarity: Math.round(bioSimilarity * 1000) / 1000,
+      display_name_similarity: Math.round(displaySimilarity * 1000) / 1000,
+    },
+  };
 }
 
 /** Suspects plausibles pour un compte, sans balayer toute la table `users`. */
 async function findSuspects(target) {
   const since = new Date(Date.now() - IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS * 86400000);
   const normalized = normalizeLookalike(target.username);
-  // Un fragment du pseudo suffit à ramener les candidats crédibles : une
-  // usurpation garde toujours une partie du nom d'origine, sinon elle ne
-  // trompe personne.
-  const fragment = normalized.slice(0, Math.max(3, Math.floor(normalized.length * 0.6)));
-  const where = {
-    id: { [Op.ne]: target.id },
-    is_active: true,
-    is_suspended: false,
-    is_data_test: false,
-    // Pertinence dans le TEMPS, appliquée à TOUS les signaux.
-    [Op.or]: [
-      { created_at: { [Op.gte]: since } },
-      { updated_at: { [Op.gte]: since } },
-    ],
-  };
-  const attributes = ['id', 'username', 'full_name', 'avatar', 'bio', 'created_at', 'verified'];
+  if (!normalized) return [];
 
-  // Un avatar de défaut peut être partagé par des milliers de comptes. La
-  // requête unique avec OR et LIMIT 60 était alors entièrement consommée
-  // par ces comptes avant d'atteindre le vrai pseudo ressemblant.
+  // Un avatar de défaut peut être partagé par des milliers de comptes. Il
+  // n'entre dans la présélection que s'il est rare dans les comptes réels.
   let avatarIsDistinctive = false;
-  if (target.avatar) {
+  if (target.avatar && !isKnownDefaultAvatar(target.avatar)) {
     const uses = await User.count({
       where: { avatar: target.avatar, is_active: true, is_data_test: false },
     });
     avatarIsDistinctive = uses <= 12;
   }
 
-  const searches = [
-    // Signal prioritaire : le pseudo, avec une enveloppe bien plus large que
-    // l'ancien lot mélangé aux avatars.
-    User.findAll({
-      where: { ...where, username: { [Op.iLike]: `%${fragment}%` } },
-      attributes,
-      order: [['updated_at', 'DESC']],
-      limit: 120,
-    }),
-    // Repli borné : capte les séparateurs et substitutions (1/l, 0/o) qui
-    // cassent une recherche de fragment SQL, puis `evaluate` garde son seuil
-    // strict. Les comptes de test étant exclus, ce lot reste utile.
-    User.findAll({
-      where,
-      attributes,
-      order: [['updated_at', 'DESC']],
-      limit: 200,
-    }),
-  ];
-
-  if (target.full_name) {
-    searches.push(User.findAll({
-      where: { ...where, full_name: { [Op.iLike]: String(target.full_name) } },
-      attributes,
-      order: [['updated_at', 'DESC']],
-      limit: 40,
-    }));
+  // Trois fragments répartis dans le pseudo. En exiger deux permet une faute
+  // locale sans ouvrir un LIMIT arbitraire sur les derniers comptes créés.
+  const fragmentSize = normalized.length >= 9 ? 3 : 2;
+  const lastStart = Math.max(0, normalized.length - fragmentSize);
+  const middleStart = Math.max(0, Math.floor((normalized.length - fragmentSize) / 2));
+  const fragmentValues = [...new Set([
+    normalized.slice(0, fragmentSize),
+    normalized.slice(middleStart, middleStart + fragmentSize),
+    normalized.slice(lastStart),
+  ])];
+  while (fragmentValues.length < 3) {
+    fragmentValues.push(`__twitninf_impossible_fragment_${fragmentValues.length}__`);
   }
-  if (avatarIsDistinctive) {
-    searches.push(User.findAll({
-      where: { ...where, avatar: target.avatar },
-      attributes,
-      order: [['updated_at', 'DESC']],
-      limit: 40,
-    }));
-  }
+  const fragments = fragmentValues.map((fragment) => `%${fragment}%`);
 
-  const groups = await Promise.all(searches);
-  const unique = new Map();
-  groups.flat().forEach((candidate) => unique.set(String(candidate.id), candidate));
-  return [...unique.values()];
+  const rows = await sequelize.query(`
+    WITH recent_accounts AS (
+      SELECT
+        id, username, full_name, avatar, bio, created_at, updated_at, verified,
+        regexp_replace(
+          translate(lower(COALESCE(username, '')), :confusableFrom, :confusableTo),
+          '[^a-z0-9]', '', 'g'
+        ) AS username_skeleton
+      FROM users
+      WHERE id <> :targetId
+        AND is_active = true
+        AND is_suspended = false
+        AND COALESCE(is_data_test, false) = false
+        AND (created_at >= :since OR updated_at >= :since)
+    ),
+    plausible AS (
+      SELECT *,
+        CASE
+          WHEN username_skeleton = :targetSkeleton THEN 100
+          WHEN username_skeleton LIKE :containedSkeleton THEN 92
+          WHEN (
+            (username_skeleton LIKE :fragmentA)::int
+            + (username_skeleton LIKE :fragmentB)::int
+            + (username_skeleton LIKE :fragmentC)::int
+          ) >= 2 THEN 82
+          WHEN :avatarDistinctive = true AND avatar = :targetAvatar THEN 70
+          WHEN :targetFullName <> '' AND lower(trim(COALESCE(full_name, ''))) = :targetFullName THEN 60
+          WHEN :targetBio <> '' AND lower(trim(COALESCE(bio, ''))) = :targetBio THEN 55
+          ELSE 0
+        END AS candidate_priority
+      FROM recent_accounts
+      WHERE username_skeleton = :targetSkeleton
+        OR username_skeleton LIKE :containedSkeleton
+        OR (
+          (username_skeleton LIKE :fragmentA)::int
+          + (username_skeleton LIKE :fragmentB)::int
+          + (username_skeleton LIKE :fragmentC)::int
+        ) >= 2
+        OR (:avatarDistinctive = true AND avatar = :targetAvatar)
+        OR (:targetFullName <> '' AND lower(trim(COALESCE(full_name, ''))) = :targetFullName)
+        OR (:targetBio <> '' AND lower(trim(COALESCE(bio, ''))) = :targetBio)
+    )
+    SELECT id, username, full_name, avatar, bio, created_at, verified
+    FROM plausible
+    ORDER BY candidate_priority DESC, updated_at DESC
+    LIMIT 400
+  `, {
+    replacements: {
+      targetId: String(target.id),
+      since,
+      confusableFrom: SQL_CONFUSABLE_FROM,
+      confusableTo: SQL_CONFUSABLE_TO,
+      targetSkeleton: normalized,
+      containedSkeleton: `%${normalized}%`,
+      fragmentA: fragments[0],
+      fragmentB: fragments[1],
+      fragmentC: fragments[2],
+      avatarDistinctive: avatarIsDistinctive,
+      targetAvatar: String(target.avatar || ''),
+      targetFullName: String(target.full_name || '').trim().toLowerCase(),
+      targetBio: String(target.bio || '').trim().toLowerCase().slice(0, 1000),
+    },
+    type: sequelize.QueryTypes.SELECT,
+  });
+
+  rows.forEach((candidate) => {
+    // Information interne au score, jamais exposée par `listFor`.
+    candidate._sharedAvatarDistinctive = avatarIsDistinctive;
+  });
+  return rows;
 }
 
 /**
@@ -231,7 +595,12 @@ async function scanUser(userId) {
       // Une alerte écartée ne revient jamais, même si le scan la retrouve :
       // c'est ce qui empêche la fonctionnalité de devenir harcelante.
       if (existing.status === 'dismissed') continue;
-      if (Number(existing.score) < score) await existing.update({ score, reasons });
+      const previousReasons = new Set(existing.reasons || []);
+      const reasonsChanged = reasons.length !== previousReasons.size
+        || reasons.some((reason) => !previousReasons.has(reason));
+      if (Number(existing.score) < score || reasonsChanged) {
+        await existing.update({ score: Math.max(Number(existing.score) || 0, score), reasons });
+      }
       continue;
     }
 
@@ -366,4 +735,10 @@ module.exports = {
   findSuspects,
   similarity,
   normalizeLookalike,
+  usernameAnalysis,
+  damerauLevenshtein,
+  jaroWinkler,
+  diceCoefficient,
+  SQL_CONFUSABLE_FROM,
+  SQL_CONFUSABLE_TO,
 };

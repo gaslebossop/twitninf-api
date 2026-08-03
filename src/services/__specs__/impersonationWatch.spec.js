@@ -9,15 +9,18 @@
  * `l`, la photo recopiée).
  */
 
+const mockQuery = jest.fn();
+
 jest.mock('../../models', () => ({
   User: {
     count: jest.fn(),
-    findAll: jest.fn(),
   },
   ImpersonationAlert: {},
   Notification: {},
 }));
-jest.mock('../../database/index', () => ({ sequelize: { query: jest.fn() } }));
+jest.mock('../../database/index', () => ({
+  sequelize: { query: mockQuery, QueryTypes: { SELECT: 'SELECT' } },
+}));
 
 const {
   evaluate,
@@ -45,6 +48,15 @@ describe('normalizeLookalike', () => {
 
   test('deux pseudos réellement différents ne se confondent pas', () => {
     expect(normalizeLookalike('marie')).not.toBe(normalizeLookalike('julien'));
+  });
+
+  test('neutralise les homoglyphes Unicode cyrilliques et pleine largeur', () => {
+    expect(normalizeLookalike('pоliciercоngо')).toBe(normalizeLookalike('policiercongo'));
+    expect(normalizeLookalike('Ｐｏｌｉｃｉｅｒ')).toBe(normalizeLookalike('policier'));
+  });
+
+  test('retire les caractères invisibles utilisés pour masquer une copie', () => {
+    expect(normalizeLookalike('poli\u200bciercongo')).toBe(normalizeLookalike('policiercongo'));
   });
 });
 
@@ -90,6 +102,56 @@ describe('evaluate', () => {
     expect(score).toBeGreaterThanOrEqual(IMPERSONATION_SIMILARITY_THRESHOLD);
   });
 
+  test('un préfixe support ou officiel autour du pseudo est détecté', () => {
+    const result = evaluate(
+      { ...target, username: 'policiercongo' },
+      { username: 'supportpoliciercongo', full_name: null, avatar: null, bio: null },
+    );
+    expect(result.reasons).toContain('username_similar');
+    expect(result.score).toBeGreaterThanOrEqual(0.85);
+  });
+
+  test('un affixe d\'usurpation plus une faute locale reste détecté', () => {
+    const result = evaluate(
+      { ...target, username: 'policiercongo' },
+      {
+        username: 'le_vrai_policier__kOngO',
+        full_name: 'le_vrai_policier__kOngO',
+        avatar: 'https://cdn.test/default-avatar.png',
+        bio: 'le vrai policier c\'est moi je suis le compte officiel',
+        _sharedAvatarDistinctive: false,
+      },
+    );
+    expect(result.reasons).toContain('username_similar');
+    expect(result.score).toBeGreaterThanOrEqual(0.9);
+  });
+
+  test('une transposition adjacente reste une imitation forte', () => {
+    const result = evaluate(
+      { ...target, username: 'policiercongo' },
+      { username: 'polciercongo', full_name: null, avatar: null, bio: null },
+    );
+    expect(result.reasons).toContain('username_similar');
+    expect(result.score).toBeGreaterThanOrEqual(IMPERSONATION_SIMILARITY_THRESHOLD);
+  });
+
+  test('un homoglyphe cyrillique déclenche comme un lookalike', () => {
+    const result = evaluate(
+      { ...target, username: 'policiercongo' },
+      { username: 'pоliciercongo', full_name: null, avatar: null, bio: null },
+    );
+    expect(result.reasons).toContain('username_lookalike');
+    expect(result.score).toBeGreaterThanOrEqual(0.9);
+  });
+
+  test('une simple inclusion lexicale sans affixe d\'usurpation reste sous le seuil', () => {
+    const result = evaluate(
+      { ...target, username: 'marion', full_name: null, avatar: null, bio: null },
+      { username: 'marionnette', full_name: null, avatar: null, bio: null },
+    );
+    expect(result.score).toBeLessThan(IMPERSONATION_SIMILARITY_THRESHOLD);
+  });
+
   test('deux comptes sans photo ne se ressemblent pas — ils sont vides', () => {
     const { reasons } = evaluate(
       { ...target, avatar: null },
@@ -126,6 +188,33 @@ describe('evaluate', () => {
     expect(score).toBeLessThan(IMPERSONATION_SIMILARITY_THRESHOLD);
   });
 
+  test('photo distinctive, nom et bio copiés détectent un clone au pseudo différent', () => {
+    const result = evaluate(target, {
+      username: 'serviceclient2026',
+      full_name: target.full_name,
+      avatar: target.avatar,
+      bio: target.bio,
+      _sharedAvatarDistinctive: true,
+    });
+    expect(result.reasons).toEqual(expect.arrayContaining([
+      'same_avatar', 'same_bio', 'same_display_name',
+    ]));
+    expect(result.score).toBeGreaterThanOrEqual(0.9);
+  });
+
+  test('un avatar par défaut partagé ne renforce jamais le score', () => {
+    const avatar = 'https://cdn.test/default-avatar.png';
+    const result = evaluate(
+      { ...target, avatar },
+      {
+        username: 'julienmartin', full_name: null, avatar, bio: null,
+        _sharedAvatarDistinctive: false,
+      },
+    );
+    expect(result.reasons).not.toContain('same_avatar');
+    expect(result.score).toBe(0);
+  });
+
   test('une bio trop courte ne compte pas, même recopiée à l\'identique', () => {
     const { reasons } = evaluate(
       { ...target, bio: 'Salut' },
@@ -151,31 +240,41 @@ describe('evaluate', () => {
 describe('findSuspects', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockQuery.mockResolvedValue([]);
   });
 
-  test('un avatar de masse ne remplit plus le lot avant les pseudos proches', async () => {
+  test('un avatar de masse ne participe pas à la présélection', async () => {
     User.count.mockResolvedValue(3300);
-    User.findAll
-      .mockResolvedValueOnce([{ id: 'copy', username: 'gasleboss0p' }])
-      .mockResolvedValueOnce([{ id: 'recent', username: 'autrecompte' }])
-      .mockResolvedValueOnce([{ id: 'copy', username: 'gasleboss0p' }]);
+    mockQuery.mockResolvedValue([{ id: 'copy', username: 'gasleboss0p' }]);
 
     const rows = await findSuspects({ id: 'target', ...target });
+    const [sql, options] = mockQuery.mock.calls[0];
 
-    expect(rows.map((row) => row.id)).toEqual(['copy', 'recent']);
-    expect(User.findAll).toHaveBeenCalledTimes(3);
-    expect(User.findAll.mock.calls.some(([options]) => options.where.avatar === target.avatar)).toBe(false);
-    User.findAll.mock.calls.forEach(([options]) => {
-      expect(options.where.is_data_test).toBe(false);
-    });
+    expect(rows.map((row) => row.id)).toEqual(['copy']);
+    expect(sql).toContain('COALESCE(is_data_test, false) = false');
+    expect(sql).toContain('username_skeleton');
+    expect(options.replacements.avatarDistinctive).toBe(false);
+    expect(rows[0]._sharedAvatarDistinctive).toBe(false);
   });
 
   test('un avatar rare garde sa recherche dédiée', async () => {
     User.count.mockResolvedValue(2);
-    User.findAll.mockResolvedValue([]);
 
     await findSuspects({ id: 'target', ...target });
 
-    expect(User.findAll.mock.calls.some(([options]) => options.where.avatar === target.avatar)).toBe(true);
+    expect(mockQuery.mock.calls[0][1].replacements.avatarDistinctive).toBe(true);
+  });
+
+  test('la requête cherche des fragments répartis et les homoglyphes sans fallback LIMIT 200', async () => {
+    User.count.mockResolvedValue(1);
+
+    await findSuspects({ id: 'target', ...target });
+    const [sql, options] = mockQuery.mock.calls[0];
+
+    expect(sql).toContain('translate(lower');
+    expect(sql).toContain('(username_skeleton LIKE :fragmentA)::int');
+    expect(sql).toContain('LIMIT 400');
+    expect(options.replacements.confusableFrom).toContain('о');
+    expect(options.replacements.targetSkeleton).toBe('gaslebossop');
   });
 });
