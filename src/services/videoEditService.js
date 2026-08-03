@@ -1,0 +1,302 @@
+const fs = require('fs');
+const path = require('path');
+
+/**
+ * Habillage vidéo — textes incrustés, étalonnage, coupure du son.
+ *
+ * Le rendu se fait ICI et non sur le téléphone. L'app enverrait sinon une
+ * vidéo déjà réencodée, que `videoService` réencoderait une seconde fois :
+ * deux générations de compression pour un résultat visiblement plus sale.
+ * ffmpeg tourne déjà sur ce serveur pour le transcodage 720p — incruster
+ * pendant cette passe ne coûte donc presque rien de plus.
+ *
+ * Conséquence : l'éditeur du téléphone est un APERÇU. Les coordonnées et
+ * tailles voyagent en fractions du cadre (0..1), jamais en pixels, pour que
+ * l'aperçu et le rendu coïncident quelle que soit la taille de l'écran.
+ */
+
+/** Cadre de sortie imposé par `videoService` (vertical 720p). */
+const FRAME_WIDTH = 720;
+const FRAME_HEIGHT = 1280;
+
+/**
+ * Police d'incrustation. DejaVu est présente sur toute Debian ; on vérifie
+ * quand même son existence, car une `fontfile` absente fait échouer ffmpeg
+ * avec une erreur qui ne mentionne pas la police.
+ */
+const FONT_CANDIDATES = [
+  // Montserrat d'abord : géométrique et lourde, c'est la plus proche du texte
+  // TikTok parmi les polices packagées Debian — et surtout, l'app embarque la
+  // MÊME famille (@expo-google-fonts/montserrat), donc l'aperçu du téléphone
+  // et le rendu du serveur dessinent les mêmes lettres. DejaVu, elle, est
+  // large et neutre : le rendu ne ressemblait à rien de connu.
+  '/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf',
+  '/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf',
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+];
+
+let cachedFont;
+function resolveFont() {
+  if (cachedFont !== undefined) return cachedFont;
+  cachedFont = FONT_CANDIDATES.find((candidate) => {
+    try { return fs.existsSync(candidate); } catch { return false; }
+  }) || null;
+  return cachedFont;
+}
+
+/**
+ * Étalonnages disponibles.
+ *
+ * Chaque entrée a son équivalent d'aperçu côté app (voir `videoFilters.ts`) :
+ * les deux listes doivent rester alignées, sinon l'utilisateur choisit un
+ * rendu et en obtient un autre.
+ */
+const FILTERS = {
+  none: null,
+  warm: 'colortemperature=temperature=8500:mix=0.85',
+  cool: 'colortemperature=temperature=4200:mix=0.85',
+  mono: 'hue=s=0',
+  sepia: 'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
+  vivid: 'eq=saturation=1.45:contrast=1.12',
+  faded: 'eq=saturation=0.75:contrast=0.9:brightness=0.06',
+};
+
+/**
+ * Le texte n'est PAS passé en ligne à `drawtext`, mais écrit dans un fichier
+ * lu via `textfile=`.
+ *
+ * L'échappement en ligne a été essayé sous trois formes, toutes vérifiées par
+ * un rendu réel — aucune ne tient. ffmpeg analyse la chaîne de filtres à
+ * plusieurs niveaux, et l'apostrophe est irrécupérable : échappée en `\'`,
+ * elle est consommée par le premier analyseur puis OUVRE une section citée
+ * au second, qui avale toutes les options suivantes. Le résultat s'encodait
+ * sans la moindre erreur et affichait
+ * « Cest: 100% fou, non?:fontcolor=0xFFCC00:fontsize=26… » incrusté dans la
+ * vidéo. Un test qui ne regarde que le code de sortie ne voit rien.
+ *
+ * Avec `textfile`, ffmpeg lit le contenu verbatim : plus aucun caractère n'est
+ * structurant, et la question disparaît au lieu d'être contournée.
+ */
+function overlayTextPath(workDir, videoId, index) {
+  // Préfixé par la vidéo : deux encodages simultanés partageraient sinon le
+  // même `ovl_0.txt`, et le second écraserait le texte du premier en pleine
+  // lecture par ffmpeg.
+  return path.join(workDir, `ovl_${videoId}_${index}.txt`);
+}
+
+/**
+ * `#RRGGBB` → `0xRRGGBB`, refusé sinon (pas de couleur arbitraire).
+ *
+ * Accepte aussi la forme déjà normalisée : `parseEdit` assainit à l'entrée et
+ * `buildVideoFilters` réassainit par sécurité. Sans ce cas, la seconde passe
+ * ne reconnaissait plus `0xFFCC00` et repeignait tous les textes en blanc.
+ */
+function normalizeColor(value, fallback) {
+  const match = /^(?:#|0x)?([0-9a-f]{6})$/i.exec(String(value || ''));
+  return match ? `0x${match[1].toUpperCase()}` : fallback;
+}
+
+/**
+ * Largeur moyenne d'un caractère de DejaVu Sans Bold, en fraction de la
+ * hauteur de police. Mesurée grossièrement — il ne s'agit pas de composer au
+ * pixel près, seulement d'empêcher un texte de sortir du cadre.
+ */
+const GLYPH_WIDTH_RATIO = 0.58;
+
+/** Marge latérale conservée de chaque côté, en fraction de la largeur. */
+const SIDE_MARGIN = 0.06;
+
+/**
+ * Taille de police demandée, en pixels du cadre de sortie.
+ *
+ * On ne rapetisse plus pour faire tenir : TikTok garde la taille choisie et
+ * passe à la ligne. Rapetisser donnait un texte minuscule dès qu'il était un
+ * peu long, alors que l'utilisateur avait justement choisi « gros ».
+ */
+function fitFontSize(text, sizeFraction) {
+  return Math.max(16, Math.round(sizeFraction * FRAME_HEIGHT));
+}
+
+/**
+ * Découpe le texte en lignes qui tiennent dans le cadre.
+ *
+ * `drawtext` respecte les sauts de ligne du fichier mais ne replie jamais de
+ * lui-même : un texte long sortait simplement de l'image. On coupe donc aux
+ * espaces, et seulement au milieu d'un mot s'il est à lui seul trop large.
+ * La même fonction existe côté app pour que l'aperçu montre les mêmes
+ * coupures.
+ */
+function wrapText(text, fontSize) {
+  const usableWidth = FRAME_WIDTH * (1 - 2 * SIDE_MARGIN);
+  const maxChars = Math.max(6, Math.floor(usableWidth / (fontSize * GLYPH_WIDTH_RATIO)));
+
+  const lines = [];
+  let current = '';
+
+  for (const word of String(text).split(/\s+/).filter(Boolean)) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length <= maxChars) {
+      current = candidate;
+      continue;
+    }
+    if (current) lines.push(current);
+    // Mot plus large que la ligne : on le tronçonne, sinon il déborderait.
+    if (word.length > maxChars) {
+      let rest = word;
+      while (rest.length > maxChars) {
+        lines.push(rest.slice(0, maxChars));
+        rest = rest.slice(maxChars);
+      }
+      current = rest;
+    } else {
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+
+  return lines.slice(0, 6).join('\n'); // au-delà, le texte mange la vidéo
+}
+
+function clamp(value, min, max, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+/**
+ * Normalise ce qui vient du client.
+ *
+ * Rien n'est repris tel quel : ces valeurs finissent dans une ligne de
+ * commande ffmpeg. Une taille absurde ou une couleur inventée doit produire
+ * un défaut, jamais une chaîne de filtres malformée.
+ */
+function sanitizeOverlays(raw) {
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    try { parsed = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  return parsed
+    .slice(0, 10) // au-delà, c'est du bruit — et une ligne de commande énorme
+    .map((item) => {
+      const text = String(item?.text ?? '').trim().slice(0, 120);
+      if (!text) return null;
+      return {
+        text,
+        // Fractions du cadre : l'aperçu du téléphone parle le même langage.
+        x: clamp(item?.x, 0, 1, 0.5),
+        y: clamp(item?.y, 0, 1, 0.5),
+        size: clamp(item?.size, 0.02, 0.2, 0.055),
+        color: normalizeColor(item?.color, '0xFFFFFF'),
+        background: item?.background ? normalizeColor(item.background, '0x000000') : null,
+      };
+    })
+    .filter(Boolean);
+}
+
+/**
+ * Construit les filtres vidéo à ajouter APRÈS le redimensionnement.
+ *
+ * L'ordre compte : incruster avant le `crop` placerait le texte d'après un
+ * cadre qui n'existe plus dans le fichier final.
+ */
+function buildVideoFilters(edit = {}, workDir = null, videoId = 'x') {
+  const filters = [];
+
+  const grade = FILTERS[edit.filter] || null;
+  if (grade) filters.push(grade);
+
+  const font = resolveFont();
+  const overlays = sanitizeOverlays(edit.overlays);
+
+  // Sans police ou sans dossier de travail, on publie la vidéo SANS les
+  // textes plutôt que d'échouer : perdre l'habillage est moins grave que
+  // perdre la vidéo.
+  if (!overlays.length || !font || !workDir) return filters;
+
+  overlays.forEach((overlay, index) => {
+    const fontSize = fitFontSize(overlay.text, overlay.size);
+    const target = overlayTextPath(workDir, videoId, index);
+    try {
+      // Sans saut de ligne final : ffmpeg le rendrait comme une ligne vide,
+      // ce qui décale visiblement le texte vers le haut.
+      fs.writeFileSync(target, wrapText(overlay.text, fontSize), 'utf8');
+    } catch {
+      return; // ce texte-là saute, les autres restent
+    }
+
+    const options = [
+      `fontfile=${font}`,
+      `textfile=${target}`,
+      // `expansion=none` reste utile : le CONTENU du fichier serait sinon
+      // parcouru pour y développer `%{...}` (date, métadonnées).
+      'expansion=none',
+      `fontcolor=${overlay.color}`,
+      `fontsize=${fontSize}`,
+      // Lignes centrées les unes sous les autres, comme sur TikTok — le défaut
+      // de drawtext les aligne à gauche, ce qui fait « sous-titre » et non
+      // « habillage ».
+      'text_align=C',
+      `line_spacing=${Math.round(fontSize * 0.18)}`,
+      // `(w-text_w)*x` centre le texte sur le point choisi au lieu de
+      // l'ancrer par son coin : un texte long déborderait sinon à droite.
+      `x=(w-text_w)*${overlay.x.toFixed(4)}`,
+      `y=(h-text_h)*${overlay.y.toFixed(4)}`,
+    ];
+
+    if (overlay.background) {
+      // Style « fond » : pavé plein derrière le texte.
+      options.push('box=1', `boxcolor=${overlay.background}@0.6`, `boxborderw=${Math.round(fontSize * 0.35)}`);
+    } else {
+      // Style par défaut de TikTok : pas de pavé, mais un contour net qui
+      // détache le texte de n'importe quelle scène. Une simple ombre portée
+      // ne suffit pas sur un fond clair et chargé.
+      options.push(`borderw=${Math.max(2, Math.round(fontSize * 0.07))}`, 'bordercolor=0x000000@0.45');
+    }
+
+    filters.push(`drawtext=${options.join(':')}`);
+  });
+
+  return filters;
+}
+
+/** Efface les fichiers texte d'une incrustation une fois l'encodage fini. */
+function cleanupOverlayFiles(workDir, videoId, count = 10) {
+  if (!workDir) return;
+  for (let index = 0; index < count; index += 1) {
+    try { fs.unlinkSync(overlayTextPath(workDir, videoId, index)); } catch { /* déjà absent */ }
+  }
+}
+
+/** Le son doit-il être supprimé de la sortie ? */
+function isMuted(edit = {}) {
+  return edit.muted === true || edit.muted === 'true' || edit.muted === 1 || edit.muted === '1';
+}
+
+/** Normalise le bloc d'édition reçu du client, pour journalisation et usage. */
+function parseEdit(source = {}) {
+  const filter = Object.prototype.hasOwnProperty.call(FILTERS, source.filter) ? source.filter : 'none';
+  return {
+    muted: isMuted(source),
+    filter,
+    overlays: sanitizeOverlays(source.overlays),
+  };
+}
+
+module.exports = {
+  FRAME_WIDTH,
+  FRAME_HEIGHT,
+  FILTERS,
+  buildVideoFilters,
+  cleanupOverlayFiles,
+  fitFontSize,
+  wrapText,
+  GLYPH_WIDTH_RATIO,
+  SIDE_MARGIN,
+  isMuted,
+  parseEdit,
+  sanitizeOverlays,
+  resolveFont,
+};

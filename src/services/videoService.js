@@ -4,6 +4,7 @@ const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
+const videoEditService = require('./videoEditService');
 const { sequelize } = require('../database');
 
 // Dossier cible pour le stockage (dans le code API)
@@ -67,8 +68,12 @@ class VideoService {
    * @param {string} socketRoomId ID du salon socket pour les notifications (par défaut videoId)
    * @returns {Promise<{videoPath: string, publicUrl: string, duration: number, thumbnailPath: string, publicThumbnailUrl: string}>}
    */
-  async processVideo(inputPath, videoId, socketRoomId = null) {
+  async processVideo(inputPath, videoId, socketRoomId = null, edit = null) {
     const roomId = socketRoomId || videoId;
+    // Habillage demandé par l'app (textes, étalonnage, coupure du son). Il
+    // s'applique DANS cette passe : réencoder une seconde fois pour incruster
+    // empilerait deux générations de compression.
+    const editSpec = edit ? videoEditService.parseEdit(edit) : null;
     return new Promise((resolve, reject) => {
       const targetDir = STORAGE_DIR;
       
@@ -88,20 +93,21 @@ class VideoService {
         const exactDuration = metadata.format.duration; // en secondes
         let targetDuration = exactDuration;
 
+        // L'habillage vient APRÈS scale+crop : incruster avant placerait les
+        // textes d'après un cadre qui n'existe plus dans le fichier final.
+        const editFilters = editSpec
+          ? videoEditService.buildVideoFilters(editSpec, targetDir, videoId)
+          : [];
+
         let command = ffmpeg(inputPath)
           .format('mp4')
           .videoCodec('libx264')
           .audioCodec('aac')
           // Force vertical 720p (720x1280) avec crop si nécessaire
           .videoFilters([
-            {
-              filter: 'scale',
-              options: '720:1280:force_original_aspect_ratio=increase'
-            },
-            {
-              filter: 'crop',
-              options: '720:1280'
-            }
+            'scale=720:1280:force_original_aspect_ratio=increase',
+            'crop=720:1280',
+            ...editFilters,
           ])
           // Optimisation pour streaming fluide et boucles sans freeze (-g 30 = I-Frame chaque sec)
           .outputOptions([
@@ -113,6 +119,12 @@ class VideoService {
             '-g 30',   // Keyframe chaque 1 seconde (évite le lag lors du loop Playback)
             '-sc_threshold 0' // Améliore la fluidité de lecture en boucle
           ]);
+
+        // Couper le son se fait ici, à l'encodage : supprimer la piste après
+        // coup demanderait un remux de plus, pour le même résultat.
+        if (editSpec && editSpec.muted) {
+          command = command.noAudio();
+        }
 
         // Limiter à 60 secondes max uniquement si nécessaire
         if (exactDuration > 60) {
@@ -131,6 +143,10 @@ class VideoService {
         });
 
         command.on('end', () => {
+            // Les fichiers texte des incrustations ont fini leur office : les
+            // laisser encombrerait le dossier de stockage sans qu'on les y
+            // cherche jamais.
+            if (editSpec) videoEditService.cleanupOverlayFiles(targetDir, videoId);
             logger.info(`✅ Vidéo analysée et compressée: ${outputPath}`);
             
             // 2ème étape: Générer la miniature au milieu de la vidéo (ou à 1 sec si très court)
@@ -175,6 +191,7 @@ class VideoService {
           })
           .on('error', (err) => {
             logger.error(`Erreur FFMPEG pendant la compression vidéo [${videoId}]:`, err);
+            if (editSpec) videoEditService.cleanupOverlayFiles(targetDir, videoId);
             // Essayer de supprimer le fichier temporaire
             fs.unlink(inputPath, () => {});
             reject(new Error('Erreur de traitement de la vidéo. FFMPEG est-il installé sur le serveur ?'));

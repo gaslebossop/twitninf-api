@@ -1634,11 +1634,34 @@ router.post('/video', authenticateToken, denySuspended, (req, res, next) => {
     // Identifiant unique pour le salon socket (priorité à l'id passé en query/body)
     const socketRoomId = req.query.uploadId || uploadSessionId || videoId;
 
+    /**
+     * Habillage demandé par l'app : textes incrustés, étalonnage, coupure du
+     * son. Il est appliqué pendant le transcodage déjà prévu — le téléphone
+     * envoie la vidéo BRUTE et une description de l'habillage, jamais une
+     * vidéo déjà réencodée, qui subirait ici une seconde compression.
+     *
+     * Les champs arrivent en multipart, donc en chaînes : `videoEditService`
+     * s'occupe de les interpréter et de refuser ce qui n'a pas de sens.
+     */
+    const editSpec = {
+      muted: req.body.muted,
+      filter: req.body.filter,
+      overlays: req.body.overlays,
+    };
+    const hasEdit = editSpec.muted !== undefined
+      || editSpec.filter !== undefined
+      || editSpec.overlays !== undefined;
+
     // Étape 3 : Traitement en arrière-plan (Compression + Thumbnail)
     setImmediate(async () => {
       try {
         logger.info(`🎞️ [Background] Début compression vidéo pour ${videoId}`);
-        const processResult = await videoService.processVideo(req.file.path, videoId, socketRoomId);
+        const processResult = await videoService.processVideo(
+          req.file.path,
+          videoId,
+          socketRoomId,
+          hasEdit ? editSpec : null,
+        );
 
         if (!processResult || !processResult.publicUrl) {
           throw new Error('Échec du traitement vidéo.');
