@@ -308,7 +308,56 @@ async function fetchTweetsByIds(tweetIds, userId, experimentAssignments = []) {
     });
   }
 
-  return spaceOutReplies(tweets, 4);
+  // `minGap = 0` : l'espacement des fils est décidé par le recommandeur, qui
+  // plafonne déjà les réponses à 25 % du feed (`MAX_REPLY_RATIO`) et connaît
+  // les scores. Réappliquer un écart ici écarterait des réponses qu'il a
+  // délibérément placées, sans rien savoir de ce qui a motivé leur place. Ce
+  // qui reste à l'API est l'INVARIANT — aucune réponse sans son parent
+  // au-dessus — parce qu'il doit tenir même quand le feed vient d'ailleurs.
+  return withThreadContext(spaceOutReplies(tweets, 0));
+}
+
+/**
+ * Annote chaque réponse de son fil, et retire le contexte devenu redondant.
+ *
+ * Deux façons d'afficher une réponse coexistent dans les clients :
+ *   * le fil PLAT — le parent est une ligne du feed, juste au-dessus (mobile,
+ *     via `isThreadParent`/`isThreadChild`) ;
+ *   * la carte de CONTEXTE — le parent est dessiné dans la carte de la réponse
+ *     (Windows, via `parentTweet` et `FeedReplyThread`).
+ *
+ * Depuis que le recommandeur sert le parent comme une entrée à part entière,
+ * les deux se déclenchent en même temps et Windows affiche le même tweet deux
+ * fois : une fois en ligne, une fois enchâssé. On retire donc `parentTweet`
+ * quand le parent est déjà à l'écran juste au-dessus — il n'est pas perdu, il
+ * est simplement rendu par la ligne précédente, avec ses vraies statistiques.
+ *
+ * `parentTweet` reste servi dans le cas inverse (parent hors page), où c'est la
+ * seule façon de donner son contexte à la réponse.
+ */
+function withThreadContext(feed) {
+  const rootOf = new Map();
+  const depthOf = new Map();
+
+  return feed.map((tweet, index) => {
+    const parentId = tweet.parent_tweet_id ? String(tweet.parent_tweet_id) : null;
+    if (!parentId) return tweet;
+
+    const previous = feed[index - 1];
+    const parentIsAdjacent = Boolean(previous) && String(previous.id) === parentId;
+    if (!parentIsAdjacent) return tweet;
+
+    const root = rootOf.get(parentId) || parentId;
+    const depth = (depthOf.get(parentId) || 0) + 1;
+    rootOf.set(String(tweet.id), root);
+    depthOf.set(String(tweet.id), depth);
+
+    return {
+      ...tweet,
+      parentTweet: null,
+      thread: { parent_id: parentId, root_id: root, depth },
+    };
+  });
 }
 
 

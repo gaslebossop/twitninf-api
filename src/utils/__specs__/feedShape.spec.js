@@ -82,6 +82,51 @@ describe('spaceOutReplies', () => {
     expect(ids(feed)).toEqual([12, 'r']);
   });
 
+  test('une réponse à une réponse reste dans le fil', () => {
+    // Le recommandeur Rust envoie des chaînes complètes. L'ancienne version ne
+    // rattachait les réponses qu'aux RACINES : `feuille` retombait dans le cas
+    // « parent absent » et disparaissait, alors que `mid` était juste au-dessus.
+    const input = [tweet('racine'), reply('mid', 'racine'), reply('feuille', 'mid')];
+    const feed = spaceOutReplies(input, 0);
+
+    expect(everyReplyFollowsItsParent(feed)).toBe(true);
+    expect(ids(feed)).toEqual(['racine', 'mid', 'feuille']);
+  });
+
+  test('un fil déjà adjacent traverse sans être réordonné', () => {
+    // Ce que produit `shape_feed` côté Rust : les fils sont déjà en place. La
+    // mise en forme de l'API ne doit alors être qu'un filet de sécurité, pas
+    // une seconde mise en page qui défait la première.
+    const input = [
+      tweet('a'), reply('ra', 'a'),
+      tweet('b'),
+      tweet('c'), reply('rc', 'c'),
+    ];
+    const feed = spaceOutReplies(input, 0);
+
+    expect(ids(feed)).toEqual(['a', 'ra', 'b', 'c', 'rc']);
+  });
+
+  test('une réponse dont le parent est lui-même orphelin disparaît avec lui', () => {
+    // `mid` répond à un tweet hors page : il est écarté. `feuille` ne peut donc
+    // pas être servie non plus — un contexte à moitié reconstitué n'en est pas.
+    const input = [tweet('a'), reply('mid', 'hors_page'), reply('feuille', 'mid')];
+    const feed = spaceOutReplies(input, 0);
+
+    expect(everyReplyFollowsItsParent(feed)).toBe(true);
+    expect(ids(feed)).toEqual(['a']);
+  });
+
+  test('un cycle parent/enfant en base ne fait pas boucler la mise en forme', () => {
+    // Rien n'interdit structurellement à deux tweets de se désigner l'un
+    // l'autre : la fonction doit en sortir, pas y tourner.
+    const input = [reply('x', 'y'), reply('y', 'x'), tweet('sain')];
+    const feed = spaceOutReplies(input, 0);
+
+    expect(everyReplyFollowsItsParent(feed)).toBe(true);
+    expect(ids(feed)).toEqual(['sain']);
+  });
+
   test('une entrée vide ou absente ne fait pas tomber la route', () => {
     expect(spaceOutReplies([], 4)).toEqual([]);
     expect(spaceOutReplies(undefined, 4)).toEqual([]);

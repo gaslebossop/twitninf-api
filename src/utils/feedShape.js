@@ -9,8 +9,25 @@
  */
 
 /**
+ * Profondeur maximale d'un fil affiché d'un bloc dans le feed.
+ *
+ * Alignée sur `MAX_THREAD_DEPTH` du recommandeur Rust (`recommender.rs`) : le
+ * moteur ne sert jamais de chaîne plus profonde, et l'API n'a aucune raison
+ * d'en tronquer une qu'il a jugée affichable.
+ */
+const MAX_THREAD_DEPTH = 4;
+
+/**
  * Place chaque réponse JUSTE APRÈS le tweet auquel elle répond, et écarte
  * celles dont le parent n'est pas dans la page.
+ *
+ * ── Fils profonds ────────────────────────────────────────────────────────
+ * Une réponse à une réponse est servie comme le reste du fil. La version
+ * précédente ne rattachait les réponses qu'aux RACINES : dès que le
+ * recommandeur Rust a commencé à envoyer des chaînes complètes (racine →
+ * réponse → réponse), le maillon du bas retombait dans le cas « parent absent »
+ * et disparaissait — alors que son parent était juste là, deux lignes plus
+ * haut.
  *
  * ── Le bug d'origine ─────────────────────────────────────────────────────
  * La version précédente séparait la liste en `others` (sans parent) et
@@ -39,38 +56,65 @@
  */
 function spaceOutReplies(tweets, minGap = 4) {
   const list = Array.isArray(tweets) ? tweets : [];
-  const roots = list.filter((tweet) => !tweet.parent_tweet_id);
-  if (roots.length === list.length) return roots;
+  if (list.length === 0) return [];
 
-  const rootIds = new Set(roots.map((tweet) => String(tweet.id)));
+  const byId = new Map(list.map((tweet) => [String(tweet.id), tweet]));
 
-  // Réponses rattachables : leur parent est diffusé dans cette même page. Les
-  // autres sont écartées — mieux vaut un tweet de moins qu'une ligne hors sujet.
-  const repliesByParent = new Map();
+  // Une seule réponse par parent — au-delà, le fil de découverte devient un fil
+  // de conversation. C'est la PREMIÈRE rencontrée qui est retenue, donc la
+  // mieux classée : la liste arrive dans l'ordre du scoring.
+  const childOf = new Map();
   for (const tweet of list) {
     if (!tweet.parent_tweet_id) continue;
     const parentId = String(tweet.parent_tweet_id);
-    if (!rootIds.has(parentId)) continue;
-    if (!repliesByParent.has(parentId)) repliesByParent.set(parentId, []);
-    repliesByParent.get(parentId).push(tweet);
+    // Parent absent de la page : la réponse est écartée. Mieux vaut un tweet de
+    // moins qu'une ligne hors sujet.
+    if (!byId.has(parentId)) continue;
+    if (childOf.has(parentId)) continue;
+    childOf.set(parentId, tweet);
   }
-  if (repliesByParent.size === 0) return roots;
+
+  // Chaque bloc est un fil complet : [racine, réponse, réponse à la réponse…].
+  // Les blocs, pas les tweets, sont l'unité d'émission — c'est ce qui rend
+  // l'adjacence indestructible par la suite.
+  const blocks = [];
+  for (const tweet of list) {
+    // Une réponse rejoint le bloc de son parent, ou n'est pas servie du tout :
+    // dans les deux cas elle n'ouvre jamais un bloc.
+    if (tweet.parent_tweet_id) continue;
+
+    const block = [tweet];
+    const seen = new Set([String(tweet.id)]);
+    let cursor = tweet;
+    while (block.length < MAX_THREAD_DEPTH) {
+      const next = childOf.get(String(cursor.id));
+      // `seen` protège d'un cycle parent/enfant en base : sans lui, deux tweets
+      // qui se répondent mutuellement boucleraient jusqu'à la profondeur max à
+      // chaque page servie.
+      if (!next || seen.has(String(next.id))) break;
+      block.push(next);
+      seen.add(String(next.id));
+      cursor = next;
+    }
+    blocks.push(block);
+  }
 
   const merged = [];
   // Distance depuis la dernière réponse insérée, pour ne pas enchaîner les
   // fils. Initialisée à `minGap` : la première réponse rencontrée est admise.
   let sinceLastReply = minGap;
 
-  for (const root of roots) {
-    merged.push(root);
+  for (const block of blocks) {
+    merged.push(block[0]);
     sinceLastReply += 1;
 
-    const replies = repliesByParent.get(String(root.id));
-    if (!replies || sinceLastReply < minGap) continue;
+    if (block.length === 1) continue;
+    // Fil trop rapproché du précédent : on garde la racine seule plutôt que de
+    // décaler la réponse ailleurs. `minGap` espace les fils, il ne déplace
+    // jamais une réponse loin de son parent.
+    if (sinceLastReply < minGap) continue;
 
-    // Une seule réponse par parent : au-delà, le fil devient une conversation
-    // et n'a plus sa place dans un feed de découverte.
-    merged.push(replies[0]);
+    for (const reply of block.slice(1)) merged.push(reply);
     sinceLastReply = 0;
   }
 
