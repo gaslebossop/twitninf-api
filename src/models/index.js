@@ -1,6 +1,9 @@
 const { Sequelize } = require('sequelize');
 const config = require('../config/config');
 const logger = require('../utils/logger');
+const {
+  runSubscriberTweetCreditBackfill,
+} = require('../services/subscriberTweetCreditBackfill');
 
 // Import des modèles
 const User = require('./User');
@@ -1439,6 +1442,15 @@ async function syncDatabase() {
     // Utiliser force: false pour ne JAMAIS supprimer de données existantes
     // alter: false pour éviter les modifications de colonnes qui causent des conflits
     await sequelize.sync({ force: false, alter: false });
+
+    // Après sync : sur une base neuve, la table users n'existait pas encore
+    // pendant les garde-fous de colonnes ci-dessus.
+    const tweetCreditBackfill = await runSubscriberTweetCreditBackfill(sequelize);
+    if (tweetCreditBackfill.applied) {
+      logger.info(
+        `[schema] Crédit de lancement appliqué à ${tweetCreditBackfill.credited} abonné(s) actif(s).`
+      );
+    }
     logger.info('Modèles synchronisés avec succès');
     
     // ÉTAPE 3: Recréer les vues optimisées
