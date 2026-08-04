@@ -19,6 +19,10 @@ const { getPlatformCurrency } = require('../../../economy/platformCurrency');
 const { getOrCreateEurCurrency } = require('../../../economy/eurCurrency');
 const { convertUserCurrency, getCurrencyDetail, listUserCurrencies } = require('../../../economy/userCurrency');
 const { TIER, TIER_PRICES_TWC, DEFAULT_DURATION_DAYS } = require('../../../constants/subscriptionTiers');
+const {
+  SUBSCRIPTION_TWEET_CREDITS,
+  creditsAfterSubscriptionPurchase,
+} = require('../../../constants/tweetGeneration');
 const { maybeExpireSubscription, isSubscriptionActive, computeNewExpiry } = require('../../../utils/subscriptionHelpers');
 
 const UUID = { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' };
@@ -743,6 +747,7 @@ async function buyPremiumSubscription(models, { tier = TIER.PLUS, duration_days 
     await user.update({
       subscription_tier: selectedTier,
       subscription_expires_at: nextExpiry,
+      tweet_generation_credits: creditsAfterSubscriptionPurchase(user.tweet_generation_credits),
       updated_at: new Date()
     }, { transaction });
 
@@ -753,6 +758,8 @@ async function buyPremiumSubscription(models, { tier = TIER.PLUS, duration_days 
       premium: true,
       subscription_tier: selectedTier,
       subscription_expires_at: nextExpiry,
+      tweet_generation_credits: user.tweet_generation_credits,
+      tweet_generation_credits_granted: SUBSCRIPTION_TWEET_CREDITS,
       duration_days: durationDays,
       amount_spent: price,
       currency: currency.symbol,

@@ -221,6 +221,14 @@ const userSchema = {
     allowNull: true,
     defaultValue: null
   },
+
+  /** Solde du générateur de tweets à la demande (5 offerts par achat payant). */
+  tweet_generation_credits: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0,
+    validate: { min: 0 }
+  },
   
   // Informations de plateforme
   platform: {

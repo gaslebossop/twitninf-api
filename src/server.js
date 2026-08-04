@@ -373,7 +373,7 @@ app.use('/api/track', trackingRoutes);
 
 app.use('/api/user-stats', userStatsRoutes);
 
-// Analytics prédictifs, co-pilote IA, radar de tendances — palier Pro
+// Générateur à crédits (Plus/Pro), analytics prédictifs, co-pilote et radar (Pro)
 app.use('/api/creator-intelligence', creatorIntelligenceRoutes);
 
 // Support par ticket (traitement prioritaire pour le palier Pro)

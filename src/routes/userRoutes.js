@@ -31,6 +31,10 @@ const {
 } = require('../constants/subscriptionTiers');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
 const {
+  SUBSCRIPTION_TWEET_CREDITS,
+  creditsAfterSubscriptionPurchase,
+} = require('../constants/tweetGeneration');
+const {
   maybeExpireSubscription,
   isSubscriptionActive,
   computeNewExpiry,
@@ -262,6 +266,9 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
       {
         subscription_tier: tier,
         subscription_expires_at: nextExpiry,
+        // Chaque paiement confirmé recharge le générateur, y compris un
+        // renouvellement ou un passage Plus → Pro.
+        tweet_generation_credits: creditsAfterSubscriptionPurchase(user.tweet_generation_credits),
         updated_at: new Date()
       },
       { transaction }
@@ -276,6 +283,8 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
         premium: true,
         subscription_tier: tier,
         subscription_expires_at: nextExpiry,
+        tweet_generation_credits: user.tweet_generation_credits,
+        tweet_generation_credits_granted: SUBSCRIPTION_TWEET_CREDITS,
         duration_days: durationDays,
         payment_confirmed: true,
         transaction_id: paymentTransactionId,

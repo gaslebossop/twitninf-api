@@ -1,19 +1,21 @@
 const express = require('express');
 const router = express.Router();
-const { authenticateToken, requirePro } = require('../middleware/authMiddleware');
+const { authenticateToken, requirePremium, requirePro } = require('../middleware/authMiddleware');
 const predictive = require('../services/predictiveAnalyticsService');
 const copilot = require('../services/aiCopilotService');
 const trendRadar = require('../services/trendRadarService');
+const tweetGenerator = require('../services/customTweetGenerationService');
 const codex = require('../services/codexTextClient');
 const { resolveTweetCharLimit, TWEET_MAX_CHARS_SUBSCRIBER } = require('../utils/tweetLimits');
 const logger = require('../utils/logger');
 
 /**
  * Analytics prédictifs, co-pilote IA et radar de tendances — palier Pro.
+ * Le générateur libre placé en tête de fichier est, lui, commun à Plus et Pro.
  *
- * Tout est derrière `requirePro`, qui revalide le palier ET l'expiration en
- * base à chaque appel : se fier au jeton laisserait un abonné expiré consommer
- * l'avantage jusqu'à son prochain rafraîchissement de session.
+ * Chaque route payante passe par `requirePremium` ou `requirePro`, qui revalide
+ * le palier ET l'expiration en base à chaque appel : se fier au jeton laisserait
+ * un abonné expiré consommer l'avantage jusqu'à son prochain rafraîchissement.
  *
  * Ces routes ne lisent JAMAIS l'identifiant d'auteur depuis le corps de la
  * requête. Prédire sur `req.body.userId` reviendrait à offrir les statistiques
@@ -23,6 +25,53 @@ const logger = require('../utils/logger');
 
 /** Le co-pilote est plus lent qu'une route normale : on l'annonce à l'app. */
 const COPILOT_HINT_SECONDS = 15;
+
+/**
+ * GET /api/creator-intelligence/generator
+ * Solde et disponibilité du générateur libre. Plus et Pro y ont accès : le
+ * crédit vient de l'achat de l'abonnement, pas du palier choisi.
+ */
+router.get('/generator', authenticateToken, requirePremium, async (req, res) => {
+  try {
+    const status = await tweetGenerator.getStatus(req.user.id);
+    res.json({ success: true, data: status });
+  } catch (error) {
+    logger.error('[CreatorIntel] Statut générateur en échec:', error);
+    res.status(500).json({ success: false, message: 'Impossible de charger tes crédits.' });
+  }
+});
+
+/**
+ * POST /api/creator-intelligence/generator
+ * Génère un seul brouillon depuis une consigne libre et l'historique d'écriture
+ * du compte. Le service sérialise le débit et rembourse tout échec IA.
+ */
+router.post('/generator', authenticateToken, requirePremium, async (req, res) => {
+  try {
+    const result = await tweetGenerator.generateForUser(req.user.id, req.body?.request);
+    if (!result.success) {
+      const status = ['request_too_short', 'request_too_long'].includes(result.error) ? 400
+        : result.error === 'no_credits' ? 409
+          : result.error === 'subscription_required' ? 403
+            : result.error === 'no_style_profile' ? 409
+              : result.error === 'user_not_found' ? 404
+                : 503;
+      return res.status(status).json({
+        success: false,
+        message: result.message,
+        code: result.error,
+        data: Number.isFinite(result.creditsRemaining)
+          ? { creditsRemaining: result.creditsRemaining }
+          : undefined,
+      });
+    }
+
+    res.json({ success: true, data: result });
+  } catch (error) {
+    logger.error('[CreatorIntel] Génération libre en échec:', error);
+    res.status(500).json({ success: false, message: 'Impossible de générer ce tweet.' });
+  }
+});
 
 /**
  * GET /api/creator-intelligence/profile

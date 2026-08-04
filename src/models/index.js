@@ -999,6 +999,46 @@ async function ensureUsersSubscriptionColumns() {
   }
 }
 
+/**
+ * Solde du générateur à la demande. La migration reste la source de vérité,
+ * ce garde-fou couvre les déploiements historiques qui démarrent directement
+ * avec `sequelize.sync({ alter: false })`.
+ */
+async function ensureUsersTweetGenerationCreditsColumn() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'users'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) return;
+
+    await sequelize.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS tweet_generation_credits INTEGER NOT NULL DEFAULT 0;
+    `);
+    await sequelize.query(`
+      DO $constraint$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'users_tweet_generation_credits_nonnegative'
+        ) THEN
+          ALTER TABLE users
+            ADD CONSTRAINT users_tweet_generation_credits_nonnegative
+            CHECK (tweet_generation_credits >= 0);
+        END IF;
+      END
+      $constraint$;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureUsersTweetGenerationCreditsColumn:', e.message);
+    throw e;
+  }
+}
+
 /** Bannière profil : le modèle expose `banner` mais sync({ alter: false }) ne crée pas la colonne. */
 /**
  * Fuseau de l'auteur sur une publication programmée.
@@ -1380,6 +1420,7 @@ async function syncDatabase() {
     }
 
     await ensureUsersSubscriptionColumns();
+    await ensureUsersTweetGenerationCreditsColumn();
     await ensureUsersBannerColumn();
     await ensureUsersProfileCustomizationColumn();
     await ensureUsersPrivacyColumn();
