@@ -7,6 +7,7 @@ const {
   denySuspended,
 } = require('../middleware/authMiddleware');
 const paidContent = require('../services/paidContentService');
+const { InsufficientFundsError } = require('../economy/multiCurrencyPayment');
 const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 const { PaidContent, ContentPurchase } = require('../models');
 const {
@@ -64,6 +65,20 @@ function fail(res, error, fallback) {
       success: false,
       message: error.message,
       code: error.code,
+    });
+  }
+
+  // Fonds insuffisants : le DÉTAIL est la seule partie utile. « Solde
+  // insuffisant » tout court laisse l'acheteur sans savoir combien il lui
+  // manque ni qu'il possède ailleurs de quoi couvrir — alors que c'est
+  // exactement ce que le calcul vient d'établir. `402 Payment Required` plutôt
+  // que 400 : la requête est valide, c'est le paiement qui manque.
+  if (error instanceof InsufficientFundsError) {
+    return res.status(error.httpStatus || 402).json({
+      success: false,
+      message: error.message,
+      code: 'INSUFFICIENT_FUNDS',
+      data: error.details || {},
     });
   }
 
@@ -150,12 +165,21 @@ router.post('/:id/purchase', [
   authenticateToken,
   denySuspended,
   param('id').isUUID().withMessage('Contenu invalide'),
+  // Consentement explicite pour mobiliser les AUTRES monnaies du compte.
+  // Absent, le comportement reste celui d'avant : solde insuffisant, et rien
+  // n'est vendu. Vendre les avoirs de quelqu'un ne se déduit pas d'un achat.
+  body('auto_convert').optional().isBoolean().toBoolean(),
+  // Restriction facultative : « complète, mais pas avec ma monnaie fétiche ».
+  body('allowed_currency_ids').optional().isArray({ max: 20 }),
+  body('allowed_currency_ids.*').optional().isUUID(),
   handleValidationErrors,
 ], async (req, res) => {
   try {
     const result = await paidContent.purchase({
       buyerId: req.user.id,
       paidContentId: req.params.id,
+      autoConvert: req.body.auto_convert === true,
+      allowedCurrencyIds: req.body.allowed_currency_ids || null,
     });
     res.json({
       success: true,
@@ -165,10 +189,35 @@ router.post('/:id/purchase', [
         content_type: result.lock.content_type,
         content_id: result.lock.content_id,
         price_twc: result.price,
+        // Ce qui a réellement été converti : l'utilisateur doit pouvoir
+        // constater ce qui a bougé sur ses portefeuilles, sans aller fouiller
+        // son historique de transactions.
+        conversions: result.conversions || [],
       },
     });
   } catch (error) {
     fail(res, error, 'Achat impossible pour le moment.');
+  }
+});
+
+/**
+ * GET /api/paid-content/:id/quote
+ * Ce que coûterait l'achat, et ce qu'il faudrait convertir pour l'honorer.
+ * N'écrit rien : sert à afficher le détail avant de demander confirmation.
+ */
+router.get('/:id/quote', [
+  authenticateToken,
+  param('id').isUUID().withMessage('Contenu invalide'),
+  handleValidationErrors,
+], async (req, res) => {
+  try {
+    const quote = await paidContent.purchaseQuote({
+      buyerId: req.user.id,
+      paidContentId: req.params.id,
+    });
+    res.json({ success: true, data: quote });
+  } catch (error) {
+    fail(res, error, 'Estimation impossible pour le moment.');
   }
 });
 

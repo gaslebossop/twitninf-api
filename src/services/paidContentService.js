@@ -10,6 +10,7 @@ const {
 const { sequelize } = require('../database/index');
 const { EconomyLedger, roundTWC, toAmount } = require('../economy');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
+const { spendWithAutoConversion, planPayment } = require('../economy/multiCurrencyPayment');
 const {
   PLATFORM_CONTENT_FEE_RATE,
   PAID_CONTENT_MIN_PRICE_TWC,
@@ -208,7 +209,7 @@ async function unlockContent({ creatorId, paidContentId }) {
  * l'acheteur débité et le créateur non payé — le pire des trois états
  * possibles, et celui qu'on ne peut pas rattraper automatiquement.
  */
-async function purchase({ buyerId, paidContentId }) {
+async function purchase({ buyerId, paidContentId, autoConvert = false, allowedCurrencyIds = null }) {
   return sequelize.transaction(async (t) => {
     const lock = await PaidContent.findByPk(paidContentId, { transaction: t });
     if (!lock) throw new Error('Contenu introuvable');
@@ -231,16 +232,25 @@ async function purchase({ buyerId, paidContentId }) {
     // achat qui n'a pas eu lieu.
     const net = roundTWC(price - fee);
 
-    const spend = await EconomyLedger.spendToTreasury(
-      buyerId,
-      lock.currency_id,
-      price,
+    // Le prix est libellé dans UNE monnaie, mais l'acheteur en détient
+    // souvent plusieurs. `autoConvert` l'autorise à compléter avec ses autres
+    // avoirs — dans cette même transaction, donc une conversion ne survit
+    // jamais à un achat qui échoue. Sans le drapeau, comportement inchangé :
+    // solde insuffisant, et rien n'est vendu dans le dos de personne.
+    const { spend, conversions } = await spendWithAutoConversion(
       {
-        description: 'Achat de contenu',
-        itemType: 'paid_content',
-        itemId: lock.id,
-        spendingCategory: 'content',
-        metadata: { creatorId: lock.creator_id, contentType: lock.content_type },
+        userId: buyerId,
+        currencyId: lock.currency_id,
+        amount: price,
+        autoConvert,
+        allowedCurrencyIds,
+        meta: {
+          description: 'Achat de contenu',
+          itemType: 'paid_content',
+          itemId: lock.id,
+          spendingCategory: 'content',
+          metadata: { creatorId: lock.creator_id, contentType: lock.content_type },
+        },
       },
       t,
     );
@@ -276,7 +286,7 @@ async function purchase({ buyerId, paidContentId }) {
       net_twc: roundTWC(toAmount(lock.net_twc) + net),
     }, { transaction: t });
 
-    return { purchase: record, lock, price, fee, net };
+    return { purchase: record, lock, price, fee, net, conversions };
   }).then(async (result) => {
     // La notification est hors transaction : elle n'a pas à pouvoir annuler
     // une vente déjà encaissée.
@@ -578,10 +588,46 @@ async function purchaseHistory(buyerId, { limit = 50 } = {}) {
   }));
 }
 
+/**
+ * Aperçu d'achat : de quoi afficher « il te manque 10 NF, on convertira
+ * 125 KOSP » AVANT que l'utilisateur valide.
+ *
+ * En lecture seule, hors transaction d'écriture. Les cours pouvant bouger d'ici
+ * la validation, c'est une estimation honnête et non un prix garanti — le plan
+ * réellement appliqué est recalculé au moment de l'achat.
+ */
+async function purchaseQuote({ buyerId, paidContentId, allowedCurrencyIds = null }) {
+  const lock = await PaidContent.findByPk(paidContentId);
+  if (!lock) throw new Error('Contenu introuvable');
+  if (!lock.is_active) throw new Error('Ce contenu n\'est plus payant');
+
+  const price = toAmount(lock.price_twc);
+  const plan = await sequelize.transaction(async (t) =>
+    planPayment({ userId: buyerId, currencyId: lock.currency_id, amount: price, allowedCurrencyIds }, t));
+
+  return {
+    price,
+    currencyId: lock.currency_id,
+    balance: plan.available,
+    needsConversion: plan.needsConversion,
+    shortfall: plan.shortfall,
+    missing: plan.missing,
+    affordable: plan.missing === 0,
+    conversions: plan.steps.map((step) => ({
+      symbol: step.symbol,
+      currency_id: step.currencyId,
+      debit: step.debit,
+      credit: step.credit,
+      rate: step.rate,
+    })),
+  };
+}
+
 module.exports = {
   lockContent,
   unlockContent,
   purchase,
+  purchaseQuote,
   refundPurchase,
   accessMapFor,
   maskTweets,
