@@ -12,6 +12,7 @@ const express = require('express');
 const router = express.Router();
 const { authenticateToken } = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
+const { spaceOutReplies } = require('../utils/feedShape');
 const rustClient = require('../services/rustRecommenderClient');
 const paidContentService = require('../services/paidContentService');
 const { sequelize } = require('../database');
@@ -310,27 +311,6 @@ async function fetchTweetsByIds(tweetIds, userId, experimentAssignments = []) {
   return spaceOutReplies(tweets, 4);
 }
 
-/**
- * Réétale les réponses dans le fil pour qu'il n'y en ait jamais plus d'une
- * par bloc de `minGap` tweets (une réponse tous les 4 tweets maximum), tout
- * en conservant l'ordre relatif du scoring Rust pour le reste du fil.
- */
-function spaceOutReplies(tweets, minGap = 4) {
-  const others = tweets.filter(tweet => !tweet.parent_tweet_id);
-  const replies = tweets.filter(tweet => tweet.parent_tweet_id);
-  if (!replies.length) return others;
-
-  const merged = [];
-  let replyIndex = 0;
-  for (let i = 0; i < others.length; i++) {
-    merged.push(others[i]);
-    if ((i + 1) % minGap === 0 && replyIndex < replies.length) {
-      merged.push(replies[replyIndex++]);
-    }
-  }
-  while (replyIndex < replies.length) merged.push(replies[replyIndex++]);
-  return merged;
-}
 
 /**
  * GET /api/neural-rank/recommendations
@@ -541,6 +521,7 @@ router.get('/health', authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
+
 
 function normalizeMediaList(...values) {
   const result = [];
