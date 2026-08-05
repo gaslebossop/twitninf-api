@@ -90,6 +90,8 @@ function request(user, path, parseBody = false) {
         accept: 'application/json', 'accept-encoding': 'identity',
         'x-twitninf-client': 'mobile-expo', 'user-platform': user.index % 2 ? 'android' : 'ios',
         'x-device-id': `capacity-${prefix()}-${user.index}`,
+        'x-twitninf-capacity-run': runId,
+        'x-internal-secret': process.env.INTERNAL_SECRET || '',
         'user-agent': 'TwitninfClusterCapacity/1.0', connection: 'keep-alive',
       },
     }, response => {

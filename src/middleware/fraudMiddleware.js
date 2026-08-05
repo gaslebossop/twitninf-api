@@ -1,6 +1,7 @@
 const fraudService = require('../services/fraudDetectionService');
 const authService = require('../services/authService');
 const logger = require('../utils/logger');
+const crypto = require('crypto');
 
 // L'exemption des clients first-party (desktop Windows, app mobile) reste
 // volontairement étroite. Les en-têtes seuls sont falsifiables : ils doivent
@@ -264,6 +265,22 @@ function getIp(req) {
   return normalizeIp(ip) || '0.0.0.0';
 }
 
+// Les benchmarks admin emettent uniquement des GET depuis 127/8 sur le VPS A.
+// Le secret empeche un client externe de fabriquer cette exemption et le garde
+// loopback la rend inutilisable meme si le secret fuitait dans un journal.
+function isTrustedCapacityRequest(req) {
+  if (String(req.method || '').toUpperCase() !== 'GET') return false;
+  const ip = getIp(req);
+  if (!ip.startsWith('127.') && ip !== '::1') return false;
+  const runId = String(req.headers?.['x-twitninf-capacity-run'] || '');
+  if (!/^capacity-\d{8}T\d{6}-[a-f0-9]{6}$/.test(runId)) return false;
+  if (!String(req.headers?.['user-agent'] || '').startsWith('TwitninfClusterCapacity/')) return false;
+  const expected = String(process.env.INTERNAL_SECRET || '');
+  const received = String(req.headers?.['x-internal-secret'] || '');
+  if (!expected || expected.length !== received.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(received));
+}
+
 // Helper: extract device fingerprint from headers
 function getDeviceId(req) {
   return (
@@ -293,6 +310,7 @@ function getUserId(req) {
 
 // ─── Middleware 1: Check if IP is blocked (fast, before any processing) ────────
 const blockBannedIp = async (req, res, next) => {
+  if (isTrustedCapacityRequest(req)) return next();
   if (!fraudService.isReady()) return next();
   if (isAppNavigationNoise(req) && getVerifiedBearerUserId(req)) return next();
 
@@ -481,6 +499,7 @@ const checkApiRequest = async (req, res, next) => {
   // de vues) dépassent des seuils calibrés pour du trafic web et provoquaient
   // des bans d'IP sur du trafic parfaitement légitime.
   if (isTrustedFirstPartyClient(req)) return next();
+  if (isTrustedCapacityRequest(req)) return next();
   if (isAppNavigationNoise(req)) return next();
 
   if (!fraudService.isReady()) return next();
@@ -550,4 +569,5 @@ module.exports = {
   hasWindowsElectronTransport,
   hasMobileAppTransport,
   isAppNavigationNoise,
+  isTrustedCapacityRequest,
 };
