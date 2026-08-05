@@ -97,7 +97,8 @@ if ! systemctl reload nginx; then
 fi
 rm -f "$backup_log_config"
 systemctl daemon-reload
-systemctl enable --now twitninf-autoscaler.timer
+systemctl enable twitninf-autoscaler.timer
+systemctl restart twitninf-autoscaler.timer
 
 echo "Autoscaler installé. Sauvegarde Nginx: $backup_site"
 systemctl --no-pager status twitninf-autoscaler.timer
