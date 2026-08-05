@@ -1,5 +1,6 @@
 const { Tweet, TweetVelocityAlert, Notification } = require('../models');
 const { sequelize } = require('../database/index');
+const { queryRead } = require('../database/readReplica');
 const {
   VELOCITY_ALERT_MULTIPLIER,
   VELOCITY_ALERT_MIN_ENGAGEMENTS,
@@ -39,7 +40,7 @@ async function risingAccounts(userId, { days = 7, limit = 20 } = {}) {
   const window = Math.min(Math.max(parseInt(days, 10) || 7, 1), 30);
   const max = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);
 
-  const rows = await sequelize.query(`
+  const rows = await queryRead(`
     WITH recent AS (
       SELECT f.following_id, COUNT(*)::int AS new_followers
       FROM user_follows f
@@ -146,7 +147,7 @@ async function nicheTrendingTweets(userId, { days = 7, limit = 20 } = {}) {
   const window = Math.min(Math.max(parseInt(days, 10) || 7, 1), 30);
   const max = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);
 
-  const rows = await sequelize.query(`
+  const rows = await queryRead(`
     WITH mine AS (
       SELECT following_id
       FROM user_follows
@@ -376,7 +377,7 @@ async function baselineFor(userId, ageHours = 24) {
   // sort de la fenêtre d'alerte de toute façon.
   const window = Math.min(Math.max(Number(ageHours) || 1, 0.25), 48);
 
-  const rows = await sequelize.query(`
+  const rows = await queryRead(`
     SELECT
       t.id,
       (
@@ -423,7 +424,7 @@ async function baselineFor(userId, ageHours = 24) {
 async function scanVelocity({ limit = 300 } = {}) {
   const since = new Date(Date.now() - VELOCITY_ALERT_MAX_TWEET_AGE_MS);
 
-  const candidates = await sequelize.query(`
+  const candidates = await queryRead(`
     SELECT
       t.id, t.user_id, t.created_at,
       EXTRACT(EPOCH FROM (NOW() - t.created_at)) / 3600 AS age_hours,

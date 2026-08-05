@@ -16,6 +16,7 @@ const { ProviderRouter } = require('./provider');
 const { ContextEngine } = require('./contextEngine');
 const { AgentLoop } = require('./agentLoop');
 const { PersistentWakeScheduler } = require('./wakeScheduler');
+const { isWorker } = require('../../../config/role');
 
 class PolicierCongoV3Runtime {
   constructor(options = {}) {
@@ -67,7 +68,18 @@ class PolicierCongoV3Runtime {
       } else {
         this.logger.info?.(`[pc3] Réveil persistant retrouvé pour ${nextWake.run_after || nextWake.runAfter}`);
       }
-      this.scheduler.start(this.config.schedulerIntervalMs);
+      // La boucle de réveil ne démarre que sur le process worker. Sans cette
+      // garde, n'importe quelle instance web la lancerait au premier tour de
+      // chat (`run()` appelle `initialize()` paresseusement), et l'agent
+      // autonome tournerait en autant d'exemplaires qu'il y a de nœuds.
+      // Les réveils eux-mêmes sont déjà protégés par un bail en base
+      // (`claimDueWakes`, FOR UPDATE SKIP LOCKED) — ceci évite le gaspillage
+      // et les appels de modèle concurrents, la base évite les doublons.
+      if (isWorker) {
+        this.scheduler.start(this.config.schedulerIntervalMs);
+      } else {
+        this.logger.info?.('[pc3] Scheduler non démarré sur ce process (role != worker).');
+      }
     }
     this.initialized = true;
     const primaryProvider = this.config.providerOrder[0] || 'codex';

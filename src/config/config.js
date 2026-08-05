@@ -92,10 +92,30 @@ const config = {
   },
 
   // Configuration Redis optimisée
+  //
+  // ⚠️ Le bloc `socket` n'est pas décoratif. Ce fichier était écrit pour
+  // node-redis v3, où `host` et `port` étaient des clés de premier niveau. La
+  // v4 (celle qui est installée) ne les lit plus : elle attend
+  // `socket: { host, port }` et, à défaut, se rabat silencieusement sur
+  // 127.0.0.1:6379. Tant que Redis tournait sur la même machine que l'API, le
+  // bug était invisible — la valeur par défaut se trouvait être la bonne. Dès
+  // qu'une instance doit joindre un Redis distant, elle se connecte à sa
+  // propre boucle locale et échoue en ECONNREFUSED sans que `REDIS_HOST`
+  // apparaisse nulle part dans l'erreur.
+  //
+  // Les clés de premier niveau sont conservées : plusieurs endroits du code
+  // lisent `config.redis.host` pour journaliser ou diagnostiquer.
   redis: {
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT, 10) || 6379,
+    socket: {
+      host: process.env.REDIS_HOST || 'localhost',
+      port: parseInt(process.env.REDIS_PORT, 10) || 6379,
+      keepAlive: 30000,
+      family: 4
+    },
     password: process.env.REDIS_PASSWORD || null,
+    database: parseInt(process.env.REDIS_DB, 10) || 0,
     db: parseInt(process.env.REDIS_DB, 10) || 0,
     retryDelayOnFailover: 100,
     enableReadyCheck: false,

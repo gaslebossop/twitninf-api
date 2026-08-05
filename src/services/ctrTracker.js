@@ -17,8 +17,11 @@
 
 const logger = require('../utils/logger');
 
-const RUST_RECOMMENDER_URL = process.env.RUST_RECOMMENDER_URL || 'http://localhost:3002';
-const INTERNAL_SECRET = process.env.INTERNAL_SECRET || 'changeme-internal-secret';
+// Lues à chaque appel : ce module est chargé avant que dotenv n'ait tourné, et
+// figer ces valeurs revenait à envoyer les événements CTR sur `localhost` avec
+// une clé bidon — refusés en 401 par le moteur Rust, sans que rien ne remonte.
+const rustRecommenderUrl = () => process.env.RUST_RECOMMENDER_URL || 'http://localhost:3002';
+const internalSecret = () => process.env.INTERNAL_SECRET || 'changeme-internal-secret';
 
 /**
  * Envoie une interaction au recommandeur Rust
@@ -45,11 +48,11 @@ async function trackInteraction(userId, tweetId, interactionType, dwellMs = null
       payload.dwell_ms = Math.min(dwellMs, 60000); // Max 1 min
     }
 
-    const response = await fetch(`${RUST_RECOMMENDER_URL}/track`, {
+    const response = await fetch(`${rustRecommenderUrl()}/track`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Service-Key': INTERNAL_SECRET,
+        'X-Service-Key': internalSecret(),
       },
       body: JSON.stringify(payload),
     });

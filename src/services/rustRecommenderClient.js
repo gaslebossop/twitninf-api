@@ -8,7 +8,35 @@
 const http = require('http');
 const logger = require('../utils/logger');
 
-const RUST_BASE_URL = process.env.RUST_RECOMMENDER_URL || 'http://127.0.0.1:3002';
+// Lu à chaque appel, pas une fois pour toutes au chargement du module.
+//
+// Figer cette valeur à l'évaluation du fichier a coûté cher : ce module est
+// chargé indirectement avant que dotenv n'ait tourné, donc `process.env` était
+// vide et le repli 127.0.0.1 devenait définitif. Sur un serveur qui n'héberge
+// pas le moteur Rust, 100 % des requêtes basculaient sur le classement JS sans
+// qu'aucune erreur ne remonte — seule la qualité des recommandations baissait.
+const rustBaseUrl = () => process.env.RUST_RECOMMENDER_URL || 'http://127.0.0.1:3002';
+
+/**
+ * Hôte et port du moteur Rust, résolus à chaque appel.
+ *
+ * `rustPost` et `rustGet` codaient `127.0.0.1:3002` en dur dans leurs options :
+ * `RUST_RECOMMENDER_URL` était lue mais ne servait à rien. Tant que le moteur
+ * tournait sur la même machine, la valeur en dur se trouvait être la bonne et
+ * personne ne pouvait s'en apercevoir. Depuis un second serveur, chaque appel
+ * échouait en ECONNREFUSED et retombait sur le classement JS.
+ */
+function rustTarget() {
+  try {
+    const u = new URL(rustBaseUrl());
+    return { hostname: u.hostname, port: Number(u.port) || 3002 };
+  } catch {
+    return { hostname: '127.0.0.1', port: 3002 };
+  }
+}
+
+/** Clé service-à-service, lue au moment de l'appel (voir le commentaire ci-dessus). */
+const internalSecret = () => process.env.INTERNAL_SECRET || '';
 const TIMEOUT_MS = 4000; // 4s max — sinon fallback JS
 
 // Clé interne service-to-service attendue par le moteur Rust sur /track,
@@ -16,10 +44,14 @@ const TIMEOUT_MS = 4000; // 4s max — sinon fallback JS
 // service répondait donc 401 à tout le tracking, et le modèle CTR n'a jamais
 // reçu le moindre événement (d'où un `ctr_samples` bloqué à 0, qui désactive
 // en permanence le blending ML et l'auto-tuner).
-const INTERNAL_SECRET = process.env.INTERNAL_SECRET || '';
-if (!INTERNAL_SECRET) {
-  logger.warn('[RustRecommender] INTERNAL_SECRET absent — le moteur Rust rejettera les appels (401)');
-}
+// L'avertissement est différé : au chargement de ce module, dotenv n'a pas
+// forcément tourné, et une alerte « secret absent » émise trop tôt était
+// systématiquement fausse — donc ignorée, donc inutile.
+setTimeout(() => {
+  if (!internalSecret()) {
+    logger.warn('[RustRecommender] INTERNAL_SECRET absent — le moteur Rust rejettera les appels (401)');
+  }
+}, 5000).unref?.();
 
 // Connexion persistante vers le service Rust (co-localisé sur le VPS) : évite
 // de renégocier une connexion TCP à chaque appel /recommendations, appelé à
@@ -35,15 +67,16 @@ const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
 async function rustPost(path, body) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
+    const { hostname, port } = rustTarget();
     const options = {
-      hostname: '127.0.0.1',
-      port: 3002,
+      hostname,
+      port,
       path,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
-        'X-Service-Key': INTERNAL_SECRET,
+        'X-Service-Key': internalSecret(),
       },
       timeout: TIMEOUT_MS,
       agent: keepAliveAgent,
@@ -76,8 +109,8 @@ async function rustGet(path) {
   return new Promise((resolve, reject) => {
     const req = http.get(
       {
-        hostname: '127.0.0.1', port: 3002, path, timeout: TIMEOUT_MS, agent: keepAliveAgent,
-        headers: { 'X-Service-Key': INTERNAL_SECRET },
+        ...rustTarget(), path, timeout: TIMEOUT_MS, agent: keepAliveAgent,
+        headers: { 'X-Service-Key': internalSecret() },
       },
       (res) => {
         let data = '';

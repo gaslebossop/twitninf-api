@@ -1,3 +1,27 @@
+// ⚠️ CHARGEMENT DE L'ENVIRONNEMENT — DOIT RESTER LA TOUTE PREMIÈRE INSTRUCTION.
+//
+// `config/config.js` chargeait déjà dotenv, mais il n'est requis qu'à la ligne
+// ~20 de ce fichier. Or `authMiddleware` (ligne suivante) et `miningSocket`
+// entraînent le chargement de modules qui lisent `process.env` au moment de
+// leur évaluation — `rustRecommenderClient`, `ctrTracker`. Ces modules
+// voyaient donc un environnement VIDE et retenaient définitivement leurs
+// valeurs de repli.
+//
+// Conséquences observées en production :
+//   - `RUST_RECOMMENDER_URL` ignoré → repli figé sur 127.0.0.1:3002. Invisible
+//     tant que le recommandeur tournait sur la même machine ; sur un second
+//     serveur, tout le trafic bascule sur le classement JS en silence.
+//   - `INTERNAL_SECRET` ignoré → le tracking CTR envoyait une clé vide et se
+//     faisait refuser en 401 par le moteur Rust. C'est l'explication du
+//     `ctr_samples` qui ne montait pas.
+//
+// Charger dotenv ici règle les deux d'un coup, quel que soit l'ordre des
+// `require` en dessous.
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+require('dotenv').config();
+
 const express = require('express');
 const { Op } = require('sequelize');
 const cors = require('cors');
@@ -6,7 +30,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const compression = require('compression');
 const morgan = require('morgan');
-const path = require('path');
+// `path` est déjà requis tout en haut, pour le chargement de dotenv.
 const fs = require('fs');
 const redis = require('redis');
 const cron = require('node-cron');
@@ -16,8 +40,16 @@ const { registerMiningHandlers } = require('./sockets/miningSocket');
 
 // Configuration pour désactiver PolicierCongo
 const DISABLE_POLICIERCONGO = false; // Désactiver l'automatisation de PolicierCongo
+// Permet d'isoler complètement PolicierCongo sur un nœud précis. En production,
+// A garde la valeur par défaut (`true`) et B définit cette variable à `false`.
+// Nginx épingle parallèlement toutes les routes PolicierCongo sur A ; ce garde-
+// fou empêche aussi un accès direct à B d'initialiser le moteur ou ses providers.
+const POLICIERCONGO_LOCAL_ENABLED = process.env.POLICIERCONGO_LOCAL_ENABLED !== 'false';
 
 const config = require('./config/config');
+// Rôle du process (web / worker / all) — pilote l'exécution des tâches de fond
+// et des migrations quand l'API tourne sur plusieurs machines. Voir config/role.js.
+const { role: nodeRole, isWorker, runMigrations, instanceId } = require('./config/role');
 const logger = require('./utils/logger');
 const { sequelize, testConnection, syncDatabase, closeConnection } = require('./database');
 const BanService = require('./services/banService');
@@ -145,6 +177,38 @@ redisClient.on('connect', () => logger.info('Connexion Redis établie'));
 // servirait plus tard pour du cache aurait échoué avec "The client is closed".
 redisClient.connect().catch((err) => logger.error('[redis] Connexion initiale échouée:', err.message));
 
+// ── Rate limiting partagé entre instances ───────────────────────────────────
+// `express-rate-limit` compte par défaut en mémoire du process. Avec plusieurs
+// instances derrière le répartiteur, chacune tient son propre compteur : la
+// limite réelle est multipliée par le nombre de nœuds, et une même IP change de
+// compteur à chaque requête selon le nœud qui la reçoit. On déporte donc les
+// compteurs dans Redis, qui est déjà partagé par tout le parc.
+//
+// Le repli mémoire n'est pas un détail de confort : si Redis est momentanément
+// indisponible, on préfère un rate limit trop permissif à une API qui renvoie
+// des 500 sur chaque requête.
+let RedisRateLimitStore = null;
+try {
+  RedisRateLimitStore = require('rate-limit-redis').default || require('rate-limit-redis');
+} catch (e) {
+  logger.warn('[rate-limit] rate-limit-redis absent — compteurs en mémoire (par instance).');
+}
+
+const makeRateLimitStore = (prefix) => {
+  if (!RedisRateLimitStore) return undefined; // → MemoryStore par défaut
+  try {
+    return new RedisRateLimitStore({
+      prefix: `rl:${prefix}:`,
+      // node-redis v4 : la lib n'accepte pas le client directement, elle veut
+      // un émetteur de commandes brut.
+      sendCommand: (...args) => redisClient.sendCommand(args)
+    });
+  } catch (error) {
+    logger.warn(`[rate-limit] Store Redis indisponible pour "${prefix}": ${error.message}`);
+    return undefined;
+  }
+};
+
 // Connexion du service de détection des fraudes sur le même Redis
 fraudService.connect(config.redis).catch((e) =>
   logger.warn('[fraud] Service non disponible au démarrage:', e.message)
@@ -179,6 +243,7 @@ app.use(compression(config.performance.compression));
 // navigation) pouvait dépasser 1000 req/15min et recevait un 429 générique
 // alors qu'aucune fraude n'était en cause.
 const limiter = rateLimit({
+  store: makeRateLimitStore('global'),
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 1000, // 1000 requêtes par fenêtre (trafic non first-party)
   // Le minage (app Windows) soumet un nonce à chaque bloc trouvé — en usage
@@ -196,6 +261,7 @@ app.use('/api/', limiter);
 // Limitation dédiée au minage : plus permissive que le quota global, car un
 // mineur actif (surtout GPU) peut légitimement soumettre beaucoup de blocs.
 const miningLimiter = rateLimit({
+  store: makeRateLimitStore('mining'),
   windowMs: 60 * 1000, // 1 minute
   max: 300, // 300 requêtes/minute (round + submit cumulés)
   message: {
@@ -207,6 +273,7 @@ app.use('/api/new-economy/mining', miningLimiter);
 
 // Protection rate limit sur les routes d'authentification
 const authLimiter = rateLimit({
+  store: makeRateLimitStore('auth'),
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // 100 tentatives par fenêtre (augmenté de 5 à 100)
   message: {
@@ -224,6 +291,7 @@ app.use('/api/auth/register', authLimiter);
 // `velocity_rules.rs`), calibré pour la cadence réelle de l'app (feed, likes,
 // vues) plutôt que sur un compteur générique par route.
 const tweetLimiter = rateLimit({
+  store: makeRateLimitStore('tweets'),
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 200, // 200 tweets par fenêtre (trafic non first-party)
   skip: (req) => isTrustedFirstPartyClient(req),
@@ -237,6 +305,7 @@ app.use('/api/tweets', tweetLimiter);
 
 // Protection rate limit sur les routes de recherche
 const searchLimiter = rateLimit({
+  store: makeRateLimitStore('search'),
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 300, // 300 recherches par fenêtre (trafic non first-party)
   skip: (req) => isTrustedFirstPartyClient(req),
@@ -412,6 +481,21 @@ app.use('/api/admin/economy', economyAdminRoutes);
 app.use('/api/admin/similarity', similarityAdminRoutes);
 app.use('/api/admin/shadowban', shadowbanAdminRoutes);
 
+// PolicierCongo vit exclusivement sur A. Les routes publiques sont épinglées
+// sur A dans nginx ; si quelqu'un contourne le proxy et appelle B directement,
+// on refuse avant que le routeur V1/V2/V3 puisse initialiser le moteur.
+app.use([
+  '/api/admin/policiercongo',
+  '/api/policiercongo',
+  '/api/debug/policiercongo'
+], (req, res, next) => {
+  if (POLICIERCONGO_LOCAL_ENABLED) return next();
+  return res.status(503).json({
+    success: false,
+    message: 'PolicierCongo est exécuté sur le nœud principal.'
+  });
+});
+
 // 🛡️ Routes d'administration de PolicierCongo
 app.use('/api/admin/policiercongo', policierCongoAdminRoutes);
 
@@ -476,13 +560,13 @@ app.get('/api/ping', (req, res) => {
 });
 
 // Endpoint de diagnostic du scheduler (administrateurs uniquement)
-app.get('/api/debug/policiercongo/scheduler', authenticateToken, requireAdminRole, (req, res) => {
+app.get('/api/debug/policiercongo/scheduler', authenticateToken, requireAdminRole, async (req, res) => {
   try {
     const schedulerManager = require('./services/policiercongo/schedulerManager');
-    schedulerManager.load();
+    await schedulerManager.load();
     const nextRun = schedulerManager.nextRunTime;
     const now = new Date();
-    const isReady = schedulerManager.isTimeForRun();
+    const isReady = await schedulerManager.isTimeForRun();
     let minutesUntilRun = null;
     if (nextRun && !isReady) {
       minutesUntilRun = Math.max(0, Math.round((nextRun.getTime() - now.getTime()) / 60000));
@@ -502,13 +586,13 @@ app.get('/api/debug/policiercongo/scheduler', authenticateToken, requireAdminRol
 });
 
 // Endpoint pour obtenir le statut du scheduler PolicierCongo (Direct avec Auth)
-app.get('/api/admin/policiercongo/scheduler', authenticateToken, requireAdminRole, (req, res) => {
+app.get('/api/admin/policiercongo/scheduler', authenticateToken, requireAdminRole, async (req, res) => {
   try {
     const schedulerManager = require('./services/policiercongo/schedulerManager');
-    schedulerManager.load();
+    await schedulerManager.load();
     const nextRun = schedulerManager.nextRunTime;
     const now = new Date();
-    const isReady = schedulerManager.isTimeForRun();
+    const isReady = await schedulerManager.isTimeForRun();
     let minutesUntilRun = null;
     if (nextRun && !isReady) {
       minutesUntilRun = Math.max(0, Math.round((nextRun.getTime() - now.getTime()) / 60000));
@@ -530,10 +614,10 @@ app.get('/api/admin/policiercongo/scheduler', authenticateToken, requireAdminRol
 });
 
 // Endpoint pour réinitialiser le scheduler (Direct avec Auth)
-app.delete('/api/admin/policiercongo/scheduler', authenticateToken, requireAdminRole, (req, res) => {
+app.delete('/api/admin/policiercongo/scheduler', authenticateToken, requireAdminRole, async (req, res) => {
   try {
     const schedulerManager = require('./services/policiercongo/schedulerManager');
-    schedulerManager.reset();
+    await schedulerManager.reset();
     res.json({ success: true, message: 'Scheduler réinitialisé' });
   } catch (error) {
     logger.error('❌ Erreur route directe scheduler DELETE:', error);
@@ -614,7 +698,19 @@ app.get('/api/health', async (req, res) => {
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       environment: config.server.env,
+      // Rôle et identité du process : derrière le répartiteur de charge, c'est
+      // le seul moyen de savoir QUI a répondu. Le script de déploiement s'en
+      // sert pour valider chaque hôte individuellement, et un `role: worker`
+      // qui apparaîtrait sur deux nœuds signale une erreur de configuration.
+      role: nodeRole,
+      instance: instanceId,
+      policiercongo_local: POLICIERCONGO_LOCAL_ENABLED,
       database: dbStatus ? 'connected' : 'disconnected',
+      // État de la réplique de lecture : `configured: false` = mono-serveur,
+      // `reachable: false` = réplique déclarée mais injoignable (le service
+      // tourne quand même, replié sur le primaire, mais il faut le savoir).
+      // `lag_seconds` est le retard de réplication réel.
+      read_replica: await require('./database/readReplica').checkRead(),
       redis: redisStatus,
       transaction_authorization: fraudService.isReady() ? 'ready' : 'fail_closed',
       memory: process.memoryUsage(),
@@ -861,13 +957,16 @@ function setupCronJobs() {
       const schedulerManager = require('./services/policiercongo/schedulerManager');
 
       // GATE : Respecter le planning décidé par l'IA
-      if (!schedulerManager.isTimeForRun()) {
+      if (!(await schedulerManager.isTimeForRun())) {
         // Pas encore l'heure, on log discrètement et on skip
         return;
       }
 
-      // Verrouiller pour éviter les exécutions parallèles
-      schedulerManager.startRun();
+      // Verrou atomique partagé : si un autre process a déjà pris le cycle,
+      // on s'arrête ici plutôt que de lancer une analyse en double.
+      if (!(await schedulerManager.tryStartRun())) {
+        return;
+      }
 
       logger.info('🔄 [Cron] Lancement de l\'analyse PolicierCongo (scheduler ready)...');
       const result = await policiercongoAutomatisation.runOptimizedAutomation();
@@ -929,14 +1028,17 @@ async function launchPolicierCongoAnalysis() {
     const schedulerManager = require('./services/policiercongo/schedulerManager');
     
     // GATE : Vérifier immédiatement si c'est l'heure du run
-    if (!schedulerManager.isTimeForRun()) {
+    if (!(await schedulerManager.isTimeForRun())) {
       logger.info('⏰ PolicierCongo : Pas encore l\'heure du run (planification respectée).');
       return;
     }
 
     // NOUVEAU : On marque immédiatement le début du run pour éviter les lancements multiples
-    // durant le temps de calcul de l'IA.
-    schedulerManager.startRun();
+    // durant le temps de calcul de l'IA — verrou partagé entre instances.
+    if (!(await schedulerManager.tryStartRun())) {
+      logger.info('🔒 PolicierCongo : cycle déjà pris par une autre instance.');
+      return;
+    }
 
     logger.info('👤 Démarrage de l\'analyse intelligente pour le bot...');
     
@@ -1018,11 +1120,20 @@ async function startServer() {
       throw new Error('Impossible de se connecter à PostgreSQL');
     }
 
-    // Synchroniser la base de données (créer les tables si elles n'existent pas)
-    await syncDatabase();
-
-    // Exécuter la migration automatique pour les colonnes de modération
-    await runAutoMigration();
+    // Synchronisation du schéma et migrations : réservées au worker.
+    //
+    // Avec plusieurs instances, laisser chaque process jouer `sync()` puis
+    // `runAutoMigration()` au démarrage les fait se marcher dessus sur les
+    // mêmes ALTER TABLE — au mieux des erreurs au boot, au pire un schéma à
+    // moitié migré. Un seul process est responsable du schéma ; les instances
+    // web se contentent de le consommer. `RUN_MIGRATIONS=1` permet de forcer
+    // ponctuellement le passage sur un autre nœud.
+    if (runMigrations) {
+      await syncDatabase();
+      await runAutoMigration();
+    } else {
+      logger.info(`⏭️ [role=${nodeRole}] Migrations ignorées (réservées au worker).`);
+    }
 
     // Crée le registre durable avant d'accepter le moindre achat ou mouvement
     // de valeur. Si cette étape échoue, l'API ne démarre pas en mode fail-open.
@@ -1059,6 +1170,13 @@ async function startServer() {
     // Aucune n'est critique : un échec est journalisé, jamais fatal. Un
     // serveur qui refuse de démarrer parce qu'un scan de ressemblance a
     // échoué serait une très mauvaise affaire.
+    //
+    // Réservées au worker : ce sont des tâches périodiques, pas du service de
+    // requêtes. Les faire tourner sur chaque instance web reviendrait à scanner
+    // les abonnés et purger les vues autant de fois qu'il y a de nœuds.
+    if (!isWorker) {
+      logger.info(`⏭️ [role=${nodeRole}] Tâches de fond créateur non démarrées (réservées au worker).`);
+    } else {
     try {
       scheduledTweetService.startWorker();
       creatorRadarService.startVelocityWorker();
@@ -1109,6 +1227,7 @@ async function startServer() {
     } catch (error) {
       logger.error('❌ Erreur démarrage des tâches de fond créateur:', error);
     }
+    }
 
     // 🎯 Initialiser le module de ciblage étendu
     logger.info('🎯 Initialisation du module de ciblage étendu...');
@@ -1130,6 +1249,33 @@ async function startServer() {
       pingTimeout: 60000,
       pingInterval: 25000
     });
+
+    // ── Socket.io multi-instances ────────────────────────────────────────────
+    // Sans adaptateur, chaque instance ne connaît que ses propres sockets : un
+    // `io.to('user_42').emit(...)` déclenché sur le nœud B n'atteint jamais un
+    // client connecté au nœud A, et `fetchSockets()` (salons de minage) ne voit
+    // qu'une fraction des participants. L'adaptateur Redis fait transiter les
+    // diffusions par le Redis déjà partagé, ce qui rend les salons globaux.
+    //
+    // On duplique le client : node-redis interdit d'utiliser une connexion en
+    // mode abonnement pour autre chose, donc l'adaptateur ne peut pas partager
+    // le client de cache.
+    try {
+      const { createAdapter } = require('@socket.io/redis-adapter');
+      const pubClient = redisClient.duplicate();
+      const subClient = redisClient.duplicate();
+      pubClient.on('error', (err) => logger.error('[socket.io/redis pub]', err.message));
+      subClient.on('error', (err) => logger.error('[socket.io/redis sub]', err.message));
+      await Promise.all([pubClient.connect(), subClient.connect()]);
+      io.adapter(createAdapter(pubClient, subClient));
+      logger.info('✅ Socket.io : adaptateur Redis actif (diffusion inter-instances)');
+    } catch (error) {
+      // Volontairement non fatal : en mono-serveur, l'adaptateur par défaut
+      // suffit et l'API doit démarrer même si le paquet n'est pas installé.
+      logger.warn(
+        `⚠️ Socket.io : adaptateur Redis indisponible (${error.message}) — diffusion limitée à cette instance.`
+      );
+    }
 
     // Exposer io pour les routes et services
     app.set('io', io);
@@ -1283,25 +1429,42 @@ async function startServer() {
 
       // 📡 Radar de tendances (avantage Pro) — départ différé, il partage le
       // modèle d'embeddings avec l'index sémantique ci-dessus.
-      require('./services/trendRadarService').startScheduler();
+      // Planificateur périodique : worker uniquement (voir config/role.js).
+      if (isWorker) {
+        require('./services/trendRadarService').startScheduler();
+      }
     } catch (err) {
       logger.error('❌ Erreur initialisation recommandations:', err.message);
     }
 
-    // Configurer les tâches cron
-    setupCronJobs();
+    // Configurer les tâches cron — worker uniquement.
+    //
+    // C'est le point le plus important du découpage : ces crons publient des
+    // tweets, lancent PolicierCongo et TwitNinfAI, purgent des tables. Sur N
+    // instances, chaque tâche s'exécuterait N fois — un auto-tweet horaire
+    // deviendrait N tweets par heure. Un seul process porte NODE_ROLE=worker,
+    // donc PolicierCongo ne tourne qu'en un exemplaire par construction.
+    if (isWorker) {
+      setupCronJobs();
+    } else {
+      logger.info(`⏭️ [role=${nodeRole}] Tâches cron non planifiées (réservées au worker).`);
+    }
 
     // ⏰ Initialiser le scheduler PolicierCongo SANS run immédiat
     // Le cron */10 prendra le relais après le délai de grâce
-    if (!DISABLE_POLICIERCONGO) {
+    if (!DISABLE_POLICIERCONGO && POLICIERCONGO_LOCAL_ENABLED) {
       const policierCongoV3 = getPolicierCongoV3();
       if (policierCongoV3.config.enabled) {
+        // Le moteur et ses routes ne sont initialisés que sur A. La boucle de
+        // réveil persistante reste en plus réservée au process worker.
         await policierCongoV3.initialize();
-        logger.info('🧠 PolicierCongo V3 activé au démarrage; scheduler persistant prêt.');
-      } else {
-      const schedulerManager = require('./services/policiercongo/schedulerManager');
-      schedulerManager.initOnStartup(3); // 3 min de grâce après démarrage
+        logger.info(`🧠 PolicierCongo V3 activé au démarrage (role=${nodeRole}).`);
+      } else if (isWorker) {
+        const schedulerManager = require('./services/policiercongo/schedulerManager');
+        await schedulerManager.initOnStartup(3); // 3 min de grâce après démarrage
       }
+    } else if (!POLICIERCONGO_LOCAL_ENABLED) {
+      logger.info(`⏭️ [role=${nodeRole}] PolicierCongo non initialisé sur ce nœud.`);
     }
 
   // 🛑 Desactive au demarrage, execution uniquement via cron horaire
@@ -1314,6 +1477,7 @@ async function startServer() {
         logger.info('Serveur arrêté');
         await getPolicierCongoV3().close();
         await closeConnection();
+        await require('./database/readReplica').closeRead();
         redisClient.quit();
         process.exit(0);
       });
@@ -1325,6 +1489,7 @@ async function startServer() {
         logger.info('Serveur arrêté');
         await getPolicierCongoV3().close();
         await closeConnection();
+        await require('./database/readReplica').closeRead();
         redisClient.quit();
         process.exit(0);
       });

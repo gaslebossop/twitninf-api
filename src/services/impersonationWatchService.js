@@ -1,5 +1,10 @@
 const { User, ImpersonationAlert, Notification } = require('../models');
 const { sequelize } = require('../database/index');
+// Veille horaire : elle balaie toute la table `users` pour chaque abonné, et
+// n'écrit rien. C'est exactement le type de requête à sortir du primaire —
+// une donnée vieille d'une seconde ne change strictement rien à une alerte
+// d'usurpation. Repli automatique sur le primaire s'il n'y a pas de réplique.
+const { queryRead } = require('../database/readReplica');
 const {
   IMPERSONATION_SIMILARITY_THRESHOLD,
   IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS,
@@ -495,7 +500,7 @@ async function findSuspects(target) {
   }
   const fragments = fragmentValues.map((fragment) => `%${fragment}%`);
 
-  const rows = await sequelize.query(`
+  const rows = await queryRead(`
     WITH recent_accounts AS (
       SELECT
         id, username, full_name, avatar, bio, created_at, updated_at, verified,
@@ -644,7 +649,7 @@ async function scanUser(userId) {
  * exécutable.
  */
 async function scanAllSubscribers({ limit = 200 } = {}) {
-  const subscribers = await sequelize.query(`
+  const subscribers = await queryRead(`
     SELECT id FROM users
     WHERE subscription_tier <> 'free'
       AND premium = true

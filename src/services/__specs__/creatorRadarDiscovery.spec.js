@@ -9,9 +9,11 @@ jest.mock('../../models', () => ({
 }));
 jest.mock('../../database/index', () => ({
   sequelize: {
-    query: mockQuery,
     QueryTypes: { SELECT: 'SELECT' },
   },
+}));
+jest.mock('../../database/readReplica', () => ({
+  queryRead: mockQuery,
 }));
 
 const { risingAccounts, nicheTrendingTweets } = require('../creatorRadarService');

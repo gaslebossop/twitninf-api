@@ -314,7 +314,7 @@ async function runPolicierCongoV2Turn({ event, buildOptions = {}, geminiIntellig
 
         // Prochain passage planifié
         try {
-          schedulerManager.load();
+          await schedulerManager.load();
           const nextRun = schedulerManager.nextRunTime;
           if (nextRun) {
             const diffMin = Math.round((nextRun.getTime() - Date.now()) / 60000);
@@ -437,18 +437,18 @@ async function runPolicierCongoV2Turn({ event, buildOptions = {}, geminiIntellig
       const minutes = parseInt(nextMinutes);
       if (!isNaN(minutes)) {
         const nextDate = new Date(Date.now() + minutes * 60000);
-        schedulerManager.scheduleNextRun(nextDate);
+        await schedulerManager.scheduleNextRun(nextDate);
         // Afficher l'heure Paris (UTC+2) pour le log
         const nextDateParis = new Intl.DateTimeFormat('fr-FR', {
           timeZone: 'Europe/Paris', timeStyle: 'short'
         }).format(nextDate);
         logger.info(`⏰ [pc2.bridge] Planning mis à jour via IA : +${minutes} min (Réveil à ${nextDateParis} Paris)`);
       } else {
-        schedulerManager.scheduleNextRun(null);
+        await schedulerManager.scheduleNextRun(null);
       }
     } else {
       // Fallback auto si l'IA oublie de planifier
-      schedulerManager.scheduleNextRun(null);
+      await schedulerManager.scheduleNextRun(null);
       logger.info('⏰ [pc2.bridge] Pas de next_check_in_minutes, planification par défaut (2h) activée.');
     }
   }

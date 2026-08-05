@@ -26,6 +26,7 @@
  */
 
 const { sequelize, User, Notification } = require('../models');
+const { queryRead } = require('../database/readReplica');
 const { createLocalEmbedQuery, cosineSimilarity } = require('./policiercongo/policiercongoV2Embeddings');
 const codex = require('./codexTextClient');
 const { TIER } = require('../constants/subscriptionTiers');
@@ -107,7 +108,7 @@ async function fetchWindow(startDate, endDate, limit = 4000) {
       AND t.created_at < :endDate`;
 
   const [rows, [totals]] = await Promise.all([
-    sequelize.query(`
+    queryRead(`
       SELECT t.id, t.user_id, t.content, t.hashtags, t.created_at
       FROM tweets t
       ${WHERE}
@@ -117,7 +118,7 @@ async function fetchWindow(startDate, endDate, limit = 4000) {
       replacements: { startDate, endDate, limit },
       type: sequelize.QueryTypes.SELECT,
     }),
-    sequelize.query(`SELECT COUNT(*)::int AS n FROM tweets t ${WHERE}`, {
+    queryRead(`SELECT COUNT(*)::int AS n FROM tweets t ${WHERE}`, {
       replacements: { startDate, endDate },
       type: sequelize.QueryTypes.SELECT,
     }),
@@ -238,7 +239,7 @@ async function detectRisingTopics() {
  */
 async function buildUserTopicProfile(userId) {
   const startDate = new Date(Date.now() - USER_PROFILE_DAYS * 86400000);
-  const rows = await sequelize.query(`
+  const rows = await queryRead(`
     SELECT t.content
     FROM tweets t
     WHERE t.user_id::text = :userId
@@ -354,7 +355,7 @@ function codexPlatformContext() {
 /** Idées déjà envoyées aujourd'hui à cet abonné. */
 async function countIdeasToday(userId) {
   const since = new Date(Date.now() - 86400000);
-  const [row] = await sequelize.query(`
+  const [row] = await queryRead(`
     SELECT COUNT(*)::int AS n
     FROM notifications
     WHERE recipient_id::text = :userId
@@ -370,7 +371,7 @@ async function countIdeasToday(userId) {
 /** Sujets déjà proposés récemment — évite de resservir le même mot chaque jour. */
 async function recentlyNotifiedTerms(userId) {
   const since = new Date(Date.now() - TOPIC_COOLDOWN_DAYS * 86400000);
-  const rows = await sequelize.query(`
+  const rows = await queryRead(`
     SELECT metadata->>'topic' AS topic
     FROM notifications
     WHERE recipient_id::text = :userId

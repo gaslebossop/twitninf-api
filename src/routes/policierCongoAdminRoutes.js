@@ -246,14 +246,16 @@ router.get('/memory/v2', authenticateToken, adminOnly, async (req, res) => {
  * ⏰ Récupère le planning du bot (next_check_in)
  * GET /api/admin/policiercongo/scheduler
  */
-router.get('/scheduler', authenticateToken, adminOnly, (req, res) => {
+router.get('/scheduler', authenticateToken, adminOnly, async (req, res) => {
   try {
-    // Recharger depuis le fichier (au cas où le fichier a été modifié depuis le démarrage du serveur)
-    schedulerManager.load();
-    
+    // Recharger l'état partagé : l'horaire vit dans Redis, et cette requête
+    // peut très bien être servie par une autre instance que celle qui exécute
+    // le cycle.
+    await schedulerManager.load();
+
     const nextRun = schedulerManager.nextRunTime;
     const now = new Date();
-    const isReady = schedulerManager.isTimeForRun();
+    const isReady = await schedulerManager.isTimeForRun();
     
     let minutesUntilRun = null;
     if (nextRun && !isReady) {
@@ -279,10 +281,10 @@ router.get('/scheduler', authenticateToken, adminOnly, (req, res) => {
  * 🔄 Réinitialise le scheduler (force le prochain tour immédiatement)
  * DELETE /api/admin/policiercongo/scheduler
  */
-router.delete('/scheduler', authenticateToken, adminOnly, (req, res) => {
+router.delete('/scheduler', authenticateToken, adminOnly, async (req, res) => {
   try {
     logger.info(`🗑️ Tentative de reset du scheduler par l'admin ${req.user.id}`);
-    schedulerManager.reset();
+    await schedulerManager.reset();
     logger.info(`✅ Scheduler PolicierCongo réinitialisé.`);
     res.json({
       success: true,

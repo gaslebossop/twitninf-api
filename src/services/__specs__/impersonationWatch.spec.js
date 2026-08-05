@@ -19,7 +19,10 @@ jest.mock('../../models', () => ({
   Notification: {},
 }));
 jest.mock('../../database/index', () => ({
-  sequelize: { query: mockQuery, QueryTypes: { SELECT: 'SELECT' } },
+  sequelize: { QueryTypes: { SELECT: 'SELECT' } },
+}));
+jest.mock('../../database/readReplica', () => ({
+  queryRead: mockQuery,
 }));
 
 const {

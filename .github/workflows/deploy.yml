@@ -1,27 +1,52 @@
 name: Deploy API
 
-# Déploiement automatique de l'API sur le VPS à chaque push sur `main`.
+# Déploiement automatique de l'API sur les VPS à chaque push sur `main`.
 #
 # Points sensibles, tous vérifiés dans le code de l'app avant d'écrire ceci :
 #
 #  - Les médias uploadés par les utilisateurs vivent DANS l'arbre déployé :
-#    `src/public/avatars/` (servi par /static/avatars) et `storage/` (servi
-#    par /storage, voir src/server.js). Sept avatars de test sont en plus
-#    suivis par git. Une synchro naïve de tout l'arbre écraserait donc les
-#    avatars de production par ceux du dépôt. Ces deux dossiers sont exclus,
-#    et `rsync` tourne SANS `--delete` : ce qui existe sur le VPS et pas dans
-#    le dépôt n'est jamais supprimé.
+#    `src/public/` (avatars, bannières, messages, stories — servis par /static)
+#    et `storage/` (servi par /storage, voir src/server.js). Sept avatars de
+#    test sont en plus suivis par git. Une synchro naïve de tout l'arbre
+#    écraserait donc les médias de production par ceux du dépôt. Ces dossiers
+#    sont exclus, et `rsync` tourne SANS `--delete` : ce qui existe sur le VPS
+#    et pas dans le dépôt n'est jamais supprimé.
 #
 #  - `.env` n'est pas dans le dépôt (gitignore) et ne doit jamais être
-#    écrasé : il est exclu explicitement.
+#    écrasé : il est exclu explicitement. C'est d'autant plus vital depuis le
+#    passage à deux serveurs : chaque hôte a le sien (NODE_ROLE, PORT, hôtes
+#    base/cache/recommandeur différents).
 #
 #  - `package-lock.json` est gitignoré, donc absent du dépôt : `npm ci` ne
 #    peut pas fonctionner. On utilise `npm install --omit=dev`.
 #
 #  - pm2 est la source de vérité, PAS systemd. Un service systemd
-#    `twitninf-api.service` existe encore sur le VPS mais est stoppé : le
-#    démarrer replante en boucle sur EADDRINUSE (même port 3001). On utilise
-#    donc uniquement `pm2 restart`.
+#    `twitninf-api.service` existe encore sur le VPS A mais est stoppé : le
+#    démarrer replante en boucle sur EADDRINUSE (même port 3001).
+#
+# ── Déploiement sur deux serveurs ───────────────────────────────────────────
+#
+#  - Les hôtes sont traités l'un APRÈS l'autre, jamais en parallèle : pendant
+#    que l'un redémarre, l'autre continue de servir le trafic derrière le
+#    répartiteur nginx. Les redémarrer ensemble, c'est une coupure franche.
+#
+#  - Si le premier hôte échoue à son contrôle de santé, le second n'est pas
+#    touché : la moitié du parc reste sur la version qui fonctionne.
+#
+#  - Les noms des process pm2 diffèrent d'un hôte à l'autre (`twitninf-api` +
+#    `twitninf-api-worker` sur A, `twitninf-api-web` sur B). On les découvre au
+#    lieu de les coder en dur, et on ne touche qu'à ceux préfixés
+#    `twitninf-api` — un `pm2 reload all` emporterait les autres process de la
+#    machine.
+#
+#  - Contrôle final : il ne doit exister QU'UN SEUL process `NODE_ROLE=worker`
+#    dans tout le parc. Deux workers = PolicierCongo, TwitNinfAI et les purges
+#    exécutés en double. Ce contrôle interroge /api/health, qui expose le rôle
+#    réellement retenu par le process — la configuration, elle, peut mentir.
+#
+# Secrets attendus : VPS_SSH_KEY, VPS_KNOWN_HOSTS, VPS_USER, VPS_PATH,
+# VPS_HOST (serveur A) et VPS_HOST_B (serveur B, facultatif — s'il est absent,
+# le workflow déploie uniquement sur A et le dit).
 
 on:
   push:
@@ -35,10 +60,13 @@ concurrency:
   group: deploy-api-production
   cancel-in-progress: false
 
+env:
+  SSH_OPTS: "-i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       # Historique complet : le garde-fou anti-retour-arriere plus bas doit
@@ -52,6 +80,7 @@ jobs:
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_HOST_B: ${{ secrets.VPS_HOST_B }}
         run: |
           set -euo pipefail
           if [ -z "${SSH_KEY:-}" ]; then
@@ -86,7 +115,9 @@ jobs:
             printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           else
             echo "::warning::VPS_KNOWN_HOSTS absent — empreinte relevee au vol (ssh-keyscan)."
-            ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+            for h in "$VPS_HOST" "${VPS_HOST_B:-}"; do
+              [ -n "$h" ] && ssh-keyscan -H "$h" >> ~/.ssh/known_hosts 2>/dev/null || true
+            done
           fi
           chmod 600 ~/.ssh/known_hosts
 
@@ -97,7 +128,9 @@ jobs:
           VPS_PATH: ${{ secrets.VPS_PATH }}
         run: |
           set -euo pipefail
-          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 ${VPS_USER}@${VPS_HOST}"
+          # Le garde-fou s'appuie sur le serveur A, qui fait foi : c'est lui qui
+          # porte la base et les medias.
+          SSH="ssh $SSH_OPTS ${VPS_USER}@${VPS_HOST}"
 
           DEPLOYED=$($SSH "cat '${VPS_PATH}/.deployed_sha' 2>/dev/null || true" | tr -d '[:space:]')
 
@@ -133,9 +166,10 @@ jobs:
 
           echo "Le commit est posterieur a celui en production — deploiement autorise."
 
-      - name: Synchroniser le code
+      - name: Déployer, hôte par hôte
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_HOST_B: ${{ secrets.VPS_HOST_B }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_PATH: ${{ secrets.VPS_PATH }}
         run: |
@@ -145,73 +179,120 @@ jobs:
           # repertoire au nom errone et echoue sur « No such file or
           # directory », alors que la vraie cible existe. On nettoie.
           VPS_USER=$(printf '%s' "$VPS_USER" | tr -d '[:space:]')
-          VPS_HOST=$(printf '%s' "$VPS_HOST" | tr -d '[:space:]')
           VPS_PATH=$(printf '%s' "$VPS_PATH" | tr -d '[:space:]')
           VPS_PATH=${VPS_PATH%/}
 
-          # La cible doit exister AVANT rsync : sinon il essaie de la creer et
-          # masque une erreur de configuration derriere une erreur d'IO.
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20             "${VPS_USER}@${VPS_HOST}"             "test -d '${VPS_PATH}' || { echo \"Repertoire cible introuvable : ${VPS_PATH}\" >&2; exit 1; }"
+          HOSTS="$(printf '%s' "$VPS_HOST" | tr -d '[:space:]')"
+          if [ -n "${VPS_HOST_B:-}" ]; then
+            HOSTS="$HOSTS $(printf '%s' "$VPS_HOST_B" | tr -d '[:space:]')"
+          else
+            echo "::warning::VPS_HOST_B absent — deploiement sur le seul serveur A."
+          fi
 
-          rsync -az --human-readable \
-            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20" \
-            --exclude='.git/' \
-            --exclude='.github/' \
-            --exclude='node_modules/' \
-            --exclude='.env' \
-            --exclude='*.log' \
-            --exclude='src/public/avatars/' \
-            --exclude='storage/' \
-            --exclude='core.*' \
-            --exclude='tmp/' \
-            --exclude='reports/' \
-            --exclude='.task-cache/' \
-            ./ "${VPS_USER}@${VPS_HOST}:${VPS_PATH}/"
+          for host in $HOSTS; do
+            echo "::group::Deploiement sur $host"
+            SSH="ssh $SSH_OPTS ${VPS_USER}@${host}"
 
-      - name: Installer les dépendances et redémarrer
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_PATH: ${{ secrets.VPS_PATH }}
-        run: |
-          set -euo pipefail
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
-            "${VPS_USER}@${VPS_HOST}" bash -s <<EOF
+            # La cible doit exister AVANT rsync : sinon il essaie de la creer et
+            # masque une erreur de configuration derriere une erreur d'IO.
+            $SSH "test -d '${VPS_PATH}' || { echo \"Repertoire cible introuvable : ${VPS_PATH}\" >&2; exit 1; }"
+
+            rsync -az --human-readable \
+              -e "ssh $SSH_OPTS" \
+              --exclude='.git/' \
+              --exclude='.github/' \
+              --exclude='node_modules/' \
+              --exclude='.env' \
+              --exclude='*.log' \
+              --exclude='src/public/avatars/' \
+              --exclude='src/public/banners/' \
+              --exclude='src/public/messages/' \
+              --exclude='src/public/stories/' \
+              --exclude='src/public/tweets/' \
+              --exclude='src/public/videos/' \
+              --exclude='storage/' \
+              --exclude='data/' \
+              --exclude='core.*' \
+              --exclude='tmp/' \
+              --exclude='reports/' \
+              --exclude='.task-cache/' \
+              --exclude='src/services/policiercongo/scheduler.json' \
+              ./ "${VPS_USER}@${host}:${VPS_PATH}/"
+
+            # Les noms de process different d'un hote a l'autre : on les
+            # decouvre. `reload` plutot que `restart` pour ne pas couper net.
+            $SSH bash -s <<EOF
           set -euo pipefail
           cd "${VPS_PATH}"
-          # Pas de 'npm ci' : package-lock.json est gitignore, donc absent.
           npm install --omit=dev --no-audit --no-fund
-          pm2 restart twitninf-api --update-env
+          names=\$(pm2 jlist 2>/dev/null | grep -o '"name":"twitninf-api[^"]*"' | cut -d'"' -f4 | sort -u)
+          if [ -z "\$names" ]; then
+            echo "Aucun process pm2 nomme twitninf-api* sur cet hote." >&2
+            exit 1
+          fi
+          for n in \$names; do
+            echo "reload \$n"
+            pm2 reload "\$n" --update-env
+          done
           pm2 save
-          # Trace du commit reellement en place : c'est ce que lit le
-          # garde-fou anti-retour-arriere au deploiement suivant.
           echo "${GITHUB_SHA}" > "${VPS_PATH}/.deployed_sha"
           EOF
 
-      - name: Vérifier que l'API répond
+            # Un reload rend la main avant que le process ecoute a nouveau : le
+            # demarrage prend une trentaine de secondes (modele d'embeddings,
+            # index semantique, moteurs de recommandation). On attend jusqu'a
+            # 120 s, puis on echoue franchement — un deploiement qui casse la
+            # prod ne doit pas apparaitre vert.
+            ok=0
+            for i in $(seq 1 24); do
+              code=$($SSH "curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:3001/api/health || true")
+              echo "  $host — tentative $i/24 : /api/health => ${code:-aucune reponse}"
+              if [ "$code" = "200" ]; then ok=1; break; fi
+              sleep 5
+            done
+
+            if [ "$ok" != "1" ]; then
+              echo "::error::$host ne repond pas sur /api/health apres le rechargement."
+              echo "Les hotes suivants n'ont PAS ete deployes : ils continuent de servir l'ancienne version."
+              $SSH "pm2 list; pm2 logs --lines 40 --nostream" || true
+              exit 1
+            fi
+            echo "  $host — en ligne."
+            echo "::endgroup::"
+          done
+
+      - name: Vérifier qu'il n'y a qu'un seul worker
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_HOST_B: ${{ secrets.VPS_HOST_B }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
-          # Un 'pm2 restart' rend la main avant que le process ecoute. On
-          # laisse jusqu'a 60 s, puis on echoue franchement : un deploiement
-          # qui casse la prod ne doit pas apparaitre vert.
-          for i in $(seq 1 12); do
-            code=$(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
-              "${VPS_USER}@${VPS_HOST}" \
-              "curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/api/health || true")
-            echo "Tentative $i/12 — /api/health => ${code:-aucune reponse}"
-            if [ "$code" = "200" ]; then
-              echo "API en ligne."
-              exit 0
-            fi
-            sleep 5
+          VPS_USER=$(printf '%s' "$VPS_USER" | tr -d '[:space:]')
+          HOSTS="$(printf '%s' "$VPS_HOST" | tr -d '[:space:]')"
+          [ -n "${VPS_HOST_B:-}" ] && HOSTS="$HOSTS $(printf '%s' "$VPS_HOST_B" | tr -d '[:space:]')"
+
+          workers=0
+          for host in $HOSTS; do
+            for port in 3001 3003 3004; do
+              body=$(ssh $SSH_OPTS "${VPS_USER}@${host}" \
+                "curl -s --max-time 6 http://127.0.0.1:${port}/api/health || true")
+              case "$body" in *'"success":true'*) ;; *) continue ;; esac
+              role=$(printf '%s' "$body" | grep -o '"role":"[a-z]*"' | cut -d'"' -f4)
+              echo "  ${host}:${port} => ${role:-inconnu}"
+              case "$role" in worker|all) workers=$((workers + 1)) ;; esac
+            done
           done
-          echo "::error::L'API ne repond pas sur /api/health apres le redemarrage."
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
-            "${VPS_USER}@${VPS_HOST}" "pm2 list; pm2 logs twitninf-api --lines 40 --nostream" || true
-          exit 1
+
+          if [ "$workers" -gt 1 ]; then
+            echo "::error::${workers} process worker detectes. PolicierCongo, TwitNinfAI et les purges"
+            echo "tourneraient en double. Un seul process doit avoir NODE_ROLE=worker — et attention,"
+            echo "NODE_ROLE absent vaut 'all', donc compte comme un worker."
+            exit 1
+          fi
+          if [ "$workers" -eq 0 ]; then
+            echo "::warning::Aucun worker detecte — les taches de fond ne tournent nulle part."
+          fi
 
       - name: Nettoyer la clé
         if: always()
