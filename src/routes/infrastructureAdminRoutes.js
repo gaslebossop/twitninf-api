@@ -143,6 +143,7 @@ function buildServices(local, remote, nodes) {
     ], detail: 'Ecriture sur A, lectures lourdes possibles sur B' },
     { id: 'redis', name: 'Redis', nodes: active(local?.services?.redis) ? ['A'] : [], detail: 'Cache et coordination du cluster' },
     { id: 'recommender', name: 'Recommandeur Rust', nodes: active(local?.services?.recommender) ? ['A'] : [], detail: 'Classement neural et tracking CTR' },
+    { id: 'fraud', name: 'Detection fraude Rust', nodes: active(local?.services?.fraud_detector) || active(local?.services?.fraud_dashboard) ? ['A'] : [], detail: 'Detection temps reel et tableau de bord fraude' },
     { id: 'autoscaler', name: 'Autoscaler C1-C3', nodes: active(local?.services?.autoscaler) ? ['A'] : [], detail: 'Cree ou retire les replicas web' },
   ];
 }

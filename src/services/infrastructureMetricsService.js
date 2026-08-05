@@ -81,13 +81,14 @@ async function readServiceState(unit) {
 async function collectNodeMetrics() {
   const totalMb = os.totalmem() / 1024 / 1024;
   const freeMb = os.freemem() / 1024 / 1024;
-  const [processes, nginx, postgresql, redis, recommender, fraud, autoscaler] = await Promise.all([
+  const [processes, nginx, postgresql, redis, recommender, fraud, fraudDetector, autoscaler] = await Promise.all([
     readPm2Processes(),
     readServiceState('nginx.service'),
     readServiceState('postgresql.service'),
     readServiceState('redis-server.service'),
-    readServiceState('twitninf-recommender.service'),
+    readServiceState('rust-recommender.service'),
     readServiceState('fraud-dashboard.service'),
+    readServiceState('fraude-service-detector.service'),
     readServiceState('twitninf-autoscaler.timer'),
   ]);
 
@@ -105,7 +106,7 @@ async function collectNodeMetrics() {
     },
     uptime_seconds: Math.round(os.uptime()),
     processes,
-    services: { nginx, postgresql, redis, recommender, fraud_dashboard: fraud, autoscaler },
+    services: { nginx, postgresql, redis, recommender, fraud_dashboard: fraud, fraud_detector: fraudDetector, autoscaler },
     api: {
       role: process.env.NODE_ROLE || 'all',
       instance: process.env.INSTANCE_ID || null,
