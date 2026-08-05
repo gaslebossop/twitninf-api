@@ -1,0 +1,13 @@
+[Unit]
+Description=Évaluation de l'autoscaling web TwitNinf sur le VPS A
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/twitninf-autoscaler
+ExecStart=/usr/local/sbin/twitninf-autoscaler
+StateDirectory=twitninf-autoscaler
+RuntimeDirectory=twitninf-autoscaler
+TimeoutStartSec=120
+Nice=5

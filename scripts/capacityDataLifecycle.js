@@ -370,6 +370,20 @@ async function cleanup(client) {
   }
 
   const deleted = {};
+  // Certaines routes GET consultées par le benchmark enregistrent une visite
+  // de profil. `profile_views` ne porte pas les marqueurs is_data_test : on ne
+  // supprime donc que les lignes dont le profil OU le visiteur appartient au
+  // lot strictement identifié. Sans cette étape, la FK vers users bloque le
+  // nettoyage final alors que toutes les tables directement semées sont déjà
+  // vides.
+  const profileViews = await client.query(`
+    DELETE FROM profile_views pv
+    USING users u
+    WHERE (pv.profile_id = u.id OR pv.viewer_id = u.id)
+      AND u.is_data_test IS TRUE
+      AND u.data_test_batch_id = $1
+  `, [runId]);
+  deleted.profile_views = profileViews.rowCount;
   const ordered = ['user_behavior_data', 'tweet_likes', 'tweet_retweets', 'user_follows', 'tweets', 'users'];
   for (const table of ordered) {
     deleted[table] = await deleteChunked(
@@ -449,4 +463,3 @@ main().catch(error => {
   process.stderr.write(`${error.stack || error.message}\n`);
   process.exitCode = 1;
 });
-

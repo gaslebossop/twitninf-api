@@ -11,6 +11,8 @@ build/
 *.swp
 *.swo
 *~
+__pycache__/
+*.py[cod]
 .git/
 .claude/
 package-lock.json

@@ -1,4 +1,4 @@
-# Architecture à deux VPS — état déployé
+# Architecture A/B avec autoscaling local — état déployé
 
 **Déployé et vérifié le 2026-08-05.** Ce document décrit ce qui tourne
 réellement, pas une cible.
@@ -10,6 +10,8 @@ réellement, pas une cible.
               │ VPS A — 51.210.11.74 — 12 Go / 6 vCPU        │
               │  nginx (TLS + répartiteur)                   │
               │  ├─ twitninf-api  :3001   NODE_ROLE=web      │
+              │  ├─ C1/C2/C3 :3005-3007  NODE_ROLE=web       │
+              │  │    └─ répliques créées à la demande        │
               │  ├─ twitninf-api-worker :3004 NODE_ROLE=worker│
               │  │    └─ crons, PolicierCongo, radars         │
               │  ├─ Postgres 17 (primaire) + Redis           │
@@ -33,9 +35,13 @@ Le **même code** tourne partout ; c'est `NODE_ROLE` qui décide du comportement
 
 ## Répartition du trafic
 
-- **Réparti entre A et B** : tout le trafic API, en `ip_hash` (un client reste
-  collé à un nœud — nécessaire au repli polling de socket.io ; les diffusions,
-  elles, traversent les nœuds via Redis).
+- **Réparti entre A et B** : tout le trafic API, en hash cohérent pondéré 13:7
+  (environ 65 % sur A et 35 % sur B). Un client reste collé à un nœud —
+  nécessaire au repli polling de socket.io ; les diffusions, elles, traversent
+  les nœuds via Redis. La pondération reflète les 6 vCPU de A contre 2 sur B et
+  évite la saturation observée sur B avec l'ancien partage 50/50. Le mode
+  `consistent` ne remappe qu'une petite partie des clients quand C apparaît ou
+  disparaît, ce qui protège les sessions socket.io actives.
 - **Épinglé sur A** : `/storage/`, `/static/`, toutes les routes
   `/api/**/policiercongo*`, et les cinq points d'entrée qui reçoivent un fichier
   — `/api/users/me/avatar`, `/api/users/me/banner`, `/api/tweets/video`,
@@ -62,6 +68,45 @@ Le **même code** tourne partout ; c'est `NODE_ROLE` qui décide du comportement
 > **PolicierCongo ne s'exécute que sur A.** Nginx épingle son chat, V3, admin et
 > debug sur A. B porte `POLICIERCONGO_LOCAL_ENABLED=false`, refuse un appel
 > direct avec 503 et n'initialise ni moteur ni provider Codex.
+
+## Autoscaling C1–C3 sur A
+
+Le timer `twitninf-autoscaler.timer` évalue le trafic toutes les 10 secondes à
+partir d'un journal Nginx minimal qui ne contient ni URI, ni IP, ni jeton. Le
+premier scale-out exige que **A et B** dépassent pendant deux évaluations soit
+800 ms de p95, soit 5 % d'erreurs serveur, avec au moins 30 requêtes de chaque
+côté sur 30 secondes. Si l'épisode reste mauvais, C2 puis C3 peuvent suivre,
+avec 60 secondes de refroidissement entre deux créations.
+
+Chaque C est un process PM2 isolé sur A : C1 `:3005`, C2 `:3006`, C3 `:3007`.
+Il écoute uniquement sur `127.0.0.1`, porte obligatoirement `NODE_ROLE=web` et
+`POLICIERCONGO_LOCAL_ENABLED=false`, puis chauffe 15 secondes et passe un
+health-check avant d'entrer dans Nginx. La liste d'upstreams est écrite
+atomiquement, validée par `nginx -t`, et restaurée si le reload échoue.
+
+Garde-fous : maximum trois C, au moins 3,5 Go disponibles avant une création et
+2,5 Go après, aucune persistance des C dans `pm2 save`, puis retrait un par un
+après 10 minutes stables ou sans trafic. PolicierCongo reste le seul worker sur
+A:3004 pendant tout le cycle.
+
+Commandes opérateur sur A :
+
+```bash
+sudo /usr/local/sbin/twitninf-autoscaler --status
+sudo /usr/local/sbin/twitninf-autoscaler --force-up
+sudo /usr/local/sbin/twitninf-autoscaler --force-down
+journalctl -u twitninf-autoscaler.service --since '30 min ago'
+```
+
+Les seuils sont dans `/etc/default/twitninf-autoscaler`. Les fichiers sources
+sont `deploy/twitninf-autoscaler.py`, les unités systemd associées, le format de
+journal `deploy/nginx-twitninf-autoscale-log.conf` et
+`deploy/install-twitninf-autoscaler.sh`.
+
+> Ce mécanisme absorbe des pointes dans la limite des 6 vCPU et de la RAM de A ;
+> il ne transforme pas un seul VPS en capacité infinie. Le canari 10 000 VU a
+> saturé A immédiatement : C1–C3 réduisent le risque et le délai, mais une vraie
+> garantie à cette échelle demanderait des machines supplémentaires externes.
 
 ## Le recommandeur Rust est partagé par les deux nœuds
 
