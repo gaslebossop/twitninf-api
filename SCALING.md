@@ -94,6 +94,10 @@ source de vérité : les processus PM2 orphelins sont supprimés et le dump PM2
 est resauvegardé, ce qui empêche leur retour aléatoire après un déploiement.
 PolicierCongo reste le seul worker sur A:3004 pendant tout le cycle.
 
+Un C arrêté manuellement reste désactivé, même si les mesures des 30 secondes
+précédentes sont encore hautes. L'autoscaler peut choisir un autre numéro ; le
+bouton **Démarrer** réactive explicitement le C arrêté.
+
 Commandes opérateur sur A :
 
 ```bash

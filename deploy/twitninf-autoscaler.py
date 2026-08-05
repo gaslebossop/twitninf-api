@@ -494,12 +494,22 @@ def overloaded(summary: dict[str, Any], minimum: int) -> bool:
 
 
 def load_state() -> dict[str, Any]:
-    defaults = {"high_streak": 0, "low_streak": 0, "last_action": 0.0}
+    defaults = {
+        "high_streak": 0,
+        "low_streak": 0,
+        "last_action": 0.0,
+        "disabled_replicas": [],
+    }
     try:
         loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         defaults.update(loaded)
     except (FileNotFoundError, json.JSONDecodeError, TypeError):
         pass
+    defaults["disabled_replicas"] = sorted({
+        str(label).lower()
+        for label in defaults.get("disabled_replicas", [])
+        if str(label).lower() in REPLICA_BY_LABEL
+    })
     return defaults
 
 
@@ -523,8 +533,10 @@ def snapshot(active: list[dict[str, Any]]) -> dict[str, Any]:
         for label, address in backend_addresses.items()
     }
     available_mb = mem_available_mb()
+    disabled_replicas = load_state().get("disabled_replicas", [])
     return {
         "active_replicas": [item["label"] for item in active],
+        "disabled_replicas": disabled_replicas,
         "max_replicas": MAX_REPLICAS,
         "additional_replica_capacity": additional_replica_capacity(len(active), available_mb),
         "memory_available_mb": available_mb,
@@ -568,8 +580,14 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
         if target is None:
             emit("replica_action_rejected", action=action, replica=replica_label)
             return 1
+        disabled = set(state.get("disabled_replicas", []))
         if action == "start":
+            # "Démarrer" réactive explicitement ce numéro pour les futurs
+            # cycles automatiques, même si sa création immédiate échoue.
+            disabled.discard(str(target["label"]))
+            state["disabled_replicas"] = sorted(disabled)
             if target in active:
+                save_state(state)
                 emit("start_skipped", reason="réplique déjà active", replica=target["label"])
                 return 0
             changed = start_replica(target, active)
@@ -579,17 +597,26 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
                 return 1
             changed = restart_replica(target, active)
         else:
+            # Un arrêt opérateur doit tenir : sans ce marqueur, les mesures
+            # encore chaudes sur 30 s recréaient le même C cinq secondes après.
+            disabled.add(str(target["label"]))
+            state["disabled_replicas"] = sorted(disabled)
             if target not in active:
-                emit("delete_skipped", reason="réplique inactive", replica=target["label"])
+                save_state(state)
+                emit("delete_skipped", reason="réplique déjà inactive et désactivée", replica=target["label"])
                 return 0
             changed = stop_replica(target, [item for item in active if item != target])
         if changed:
             state.update({"high_streak": 0, "low_streak": 0, "last_action": now})
-            save_state(state)
+        save_state(state)
         return 0 if changed else 1
 
     if action == "force-up":
-        target = next((item for item in REPLICAS if item not in active), None)
+        disabled = set(state.get("disabled_replicas", []))
+        target = next(
+            (item for item in REPLICAS if item not in active and item["label"] not in disabled),
+            None,
+        )
         if target is None:
             emit("force_up_skipped", reason="maximum déjà actif", **report)
             return 0
@@ -610,7 +637,10 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
         remaining = [item for item in active if item != target]
         changed = stop_replica(target, remaining)
         if changed:
+            disabled = set(state.get("disabled_replicas", []))
+            disabled.add(str(target["label"]))
             state.update({"high_streak": 0, "low_streak": 0, "last_action": now})
+            state["disabled_replicas"] = sorted(disabled)
             save_state(state)
         return 0 if changed else 1
 
@@ -640,7 +670,11 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
         and len(active) < MAX_REPLICAS
         and since_action >= SCALE_OUT_COOLDOWN
     ):
-        missing = [item for item in REPLICAS if item not in active]
+        disabled = set(state.get("disabled_replicas", []))
+        missing = [
+            item for item in REPLICAS
+            if item not in active and item["label"] not in disabled
+        ]
         capacity = additional_replica_capacity(len(active), report["memory_available_mb"])
         catastrophic = (
             report["all"]["error_rate"] >= max(0.10, HIGH_ERROR_RATE * 2)
