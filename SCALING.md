@@ -102,6 +102,11 @@ le temps que la fenêtre de mesures se vide. Le workflow de déploiement pose un
 pause de maintenance de 180 secondes avant les reloads : leurs 5xx transitoires
 ne peuvent donc plus créer de C.
 
+Le backend du panneau n'accepte qu'une commande C à la fois. Son PID est
+persisté dans `reports/admin-load/autoscaler-control.json` ; les clics doublés
+ou concurrents reçoivent un HTTP 409 au lieu de s'empiler et de s'exécuter dans
+un ordre imprévisible. Le panneau désactive tous les boutons jusqu'à la fin.
+
 Commandes opérateur sur A :
 
 ```bash

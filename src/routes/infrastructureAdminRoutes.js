@@ -19,6 +19,8 @@ const DEFAULT_MAX_REPLICAS = 32;
 const ACTIVE_JOB_STATES = new Set(['preparing', 'running', 'stopping']);
 const REPORT_DIRECTORY = path.resolve(__dirname, '../../reports/admin-load');
 const CURRENT_JOB_FILE = path.join(REPORT_DIRECTORY, 'current.json');
+const AUTOSCALER_CONTROL_FILE = path.join(REPORT_DIRECTORY, 'autoscaler-control.json');
+const AUTOSCALER_CONTROL_MAX_AGE_MS = 5 * 60 * 1000;
 const SUPERVISOR_SCRIPT = path.resolve(__dirname, '../../scripts/adminLoadSimulation.js');
 const AUTOSCALER = '/usr/local/sbin/twitninf-autoscaler';
 const AUTOSCALER_UPSTREAMS = '/etc/nginx/twitninf-autoscale-upstreams.conf';
@@ -51,6 +53,14 @@ function currentJob() {
     return { ...job, status: 'failed', stage: 'processus_interrompu', pid: null, error: 'Le superviseur ne tourne plus.' };
   }
   return job;
+}
+
+function currentAutoscalerControl() {
+  const control = readJson(AUTOSCALER_CONTROL_FILE);
+  if (!control || control.status !== 'running') return null;
+  const age = Date.now() - new Date(control.started_at || 0).getTime();
+  if (age > AUTOSCALER_CONTROL_MAX_AGE_MS || !processExists(control.pid)) return null;
+  return control;
 }
 
 function parseAutoscalerOutput(output) {
@@ -207,14 +217,45 @@ function makeRunId() {
 }
 
 function spawnAutoscaler(flag, replica = null) {
+  const running = currentAutoscalerControl();
+  if (running) return { accepted: false, control: running };
+
   const args = ['-n', AUTOSCALER, flag];
   if (replica) args.push(replica);
   const child = spawn('/usr/bin/sudo', args, { detached: true, stdio: 'ignore' });
-  child.on('error', (error) => logger.error('[infrastructure] commande autoscaler non lancee', {
-    flag, replica, error: error.message,
-  }));
+  const control = {
+    id: crypto.randomUUID(), pid: child.pid, status: 'running',
+    action: flag.replace(/^--/, ''), replica, started_at: new Date().toISOString(),
+  };
+  fs.mkdirSync(REPORT_DIRECTORY, { recursive: true });
+  writeJsonAtomic(AUTOSCALER_CONTROL_FILE, control);
+  const finish = (status, detail = {}) => {
+    const current = readJson(AUTOSCALER_CONTROL_FILE);
+    if (current?.id === control.id) {
+      writeJsonAtomic(AUTOSCALER_CONTROL_FILE, {
+        ...control, ...detail, status, finished_at: new Date().toISOString(),
+      });
+    }
+  };
+  child.once('error', (error) => {
+    finish('failed', { error: error.message });
+    logger.error('[infrastructure] commande autoscaler non lancee', {
+      flag, replica, error: error.message,
+    });
+  });
+  child.once('exit', (code, signal) => finish(code === 0 ? 'completed' : 'failed', { code, signal }));
   child.unref();
-  return child.pid;
+  return { accepted: true, control };
+}
+
+function rejectBusyControl(res, command) {
+  const running = command.control;
+  const target = running.replica ? ` ${String(running.replica).toUpperCase()}` : '';
+  return res.status(409).json({
+    success: false,
+    message: `Une commande ${running.action}${target} est déjà en cours`,
+    replica_control: running,
+  });
 }
 
 router.get('/status', async (_req, res) => {
@@ -242,6 +283,7 @@ router.get('/status', async (_req, res) => {
         a_online: Boolean(local), b_online: Boolean(remote),
       },
       load_test: currentJob(),
+      replica_control: currentAutoscalerControl(),
       limits: { max_users: 10000, max_duration_seconds: 300, min_interval_ms: 1000, max_estimated_rps: 1000 },
     });
   } catch (error) {
@@ -298,9 +340,10 @@ router.post('/load-tests/:id/stop', (req, res) => {
 });
 
 router.post('/replicas/scale-out', (req, res) => {
-  const pid = spawnAutoscaler('--force-up');
+  const command = spawnAutoscaler('--force-up');
+  if (!command.accepted) return rejectBusyControl(res, command);
   logger.warn('[infrastructure] scale-out manuel', { admin_id: req.user.id });
-  return res.status(202).json({ success: true, pid, message: 'Creation du prochain replica mise en file' });
+  return res.status(202).json({ success: true, pid: command.control.pid, message: 'Creation du prochain replica lancee' });
 });
 
 router.post('/replicas/:id/:action', (req, res) => {
@@ -309,17 +352,19 @@ router.post('/replicas/:id/:action', (req, res) => {
   if (!REPLICA_RE.test(id) || !['start', 'restart'].includes(action)) {
     return res.status(400).json({ success: false, message: 'Action ou replica invalide' });
   }
-  const pid = spawnAutoscaler(`--${action}`, id);
+  const command = spawnAutoscaler(`--${action}`, id);
+  if (!command.accepted) return rejectBusyControl(res, command);
   logger.warn('[infrastructure] action replica', { admin_id: req.user.id, replica: id, action });
-  return res.status(202).json({ success: true, pid, message: `${action} mis en file pour ${id.toUpperCase()}` });
+  return res.status(202).json({ success: true, pid: command.control.pid, message: `${action} lance pour ${id.toUpperCase()}` });
 });
 
 router.delete('/replicas/:id', (req, res) => {
   const id = String(req.params.id || '').toLowerCase();
   if (!REPLICA_RE.test(id)) return res.status(400).json({ success: false, message: 'Replica invalide' });
-  const pid = spawnAutoscaler('--delete', id);
+  const command = spawnAutoscaler('--delete', id);
+  if (!command.accepted) return rejectBusyControl(res, command);
   logger.warn('[infrastructure] suppression replica', { admin_id: req.user.id, replica: id });
-  return res.status(202).json({ success: true, pid, message: `Arret mis en file pour ${id.toUpperCase()}` });
+  return res.status(202).json({ success: true, pid: command.control.pid, message: `Arret lance pour ${id.toUpperCase()}` });
 });
 
 module.exports = router;
