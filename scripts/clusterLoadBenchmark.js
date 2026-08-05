@@ -205,9 +205,14 @@ async function benchmark() {
   const mapping = skipMapping
     ? { skipped: true, reason: 'distribution already verified independently' }
     : await mapUsers(users);
-  if (!skipMapping && (mapping.errors || !mapping.counts.A || !mapping.counts.B)) {
+  // Avec moins de 20 clients et un hash sticky, il est possible (et normal)
+  // que l'echantillon tombe sur un seul des deux backends. Au-dela, on exige
+  // toujours de voir A et B pour detecter une vraie rupture de repartition.
+  const distributionRequired = users.length >= 20;
+  if (!skipMapping && (mapping.errors || (distributionRequired && (!mapping.counts.A || !mapping.counts.B)))) {
     fail(`mapping invalide ${JSON.stringify(mapping)}`);
   }
+  if (!skipMapping) mapping.distribution_required = distributionRequired;
   const results = [], sequence = { value: 0 };
   let stop_reason = null;
   try {
