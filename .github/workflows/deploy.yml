@@ -219,13 +219,15 @@ jobs:
               --exclude='src/services/policiercongo/scheduler.json' \
               ./ "${VPS_USER}@${host}:${VPS_PATH}/"
 
-            # Les noms de process different d'un hote a l'autre : on les
-            # decouvre. `reload` plutot que `restart` pour ne pas couper net.
+            # Les noms de process fixes different d'un hote a l'autre : on les
+            # decouvre. Les C elastiques sont exclus : les recharger ici les
+            # ressuscitait sans trafic et pouvait en lancer plusieurs ensemble.
+            # `reload` plutot que `restart` pour ne pas couper net.
             $SSH bash -s <<EOF
           set -euo pipefail
           cd "${VPS_PATH}"
           npm install --omit=dev --no-audit --no-fund
-          names=\$(pm2 jlist 2>/dev/null | grep -o '"name":"twitninf-api[^"]*"' | cut -d'"' -f4 | sort -u)
+          names=\$(pm2 jlist 2>/dev/null | grep -o '"name":"twitninf-api[^"]*"' | cut -d'"' -f4 | sort -u | grep -Ev '^twitninf-api-c([1-9]|[12][0-9]|3[0-2])$' || true)
           if [ -z "\$names" ]; then
             echo "Aucun process pm2 nomme twitninf-api* sur cet hote." >&2
             exit 1

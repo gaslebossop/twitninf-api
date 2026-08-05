@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Autoscaling borné par la RAM des répliques web TwitNinf sur le VPS A.
 
-Le premier scale-out exige que les backends A et B soient tous les deux en
-surcharge. Une fois l'épisode commencé, une surcharge globale persistante peut
-ajouter autant de C que la marge mémoire le permet. Les processus créés ont
-toujours NODE_ROLE=web et ne
-peuvent donc lancer ni PolicierCongo, ni cron, ni migration.
+Une surcharge globale persistante ajoute les C un par un tant que la marge
+mémoire le permet. Les processus créés ont toujours NODE_ROLE=web et ne peuvent
+donc lancer ni PolicierCongo, ni cron, ni migration.
 """
 
 from __future__ import annotations
@@ -80,14 +78,15 @@ HIGH_STREAK_REQUIRED = env_int("AUTOSCALE_HIGH_STREAK", 1)
 LOW_STREAK_REQUIRED = env_int("AUTOSCALE_LOW_STREAK", 120)
 SCALE_OUT_COOLDOWN = env_int("AUTOSCALE_OUT_COOLDOWN_SECONDS", 5)
 SCALE_IN_COOLDOWN = env_int("AUTOSCALE_IN_COOLDOWN_SECONDS", 600)
-MIN_AVAILABLE_BEFORE_MB = env_int("AUTOSCALE_MIN_AVAILABLE_BEFORE_MB", 3072)
-MIN_AVAILABLE_AFTER_MB = env_int("AUTOSCALE_MIN_AVAILABLE_AFTER_MB", 2500)
-REPLICA_MEMORY_BUDGET_MB = max(256, env_int("AUTOSCALE_REPLICA_MEMORY_BUDGET_MB", 512))
-MAX_SCALE_OUT_BATCH = max(1, min(env_int("AUTOSCALE_MAX_SCALE_OUT_BATCH", 4), 8))
+MIN_AVAILABLE_BEFORE_MB = env_int("AUTOSCALE_MIN_AVAILABLE_BEFORE_MB", 4608)
+MIN_AVAILABLE_AFTER_MB = env_int("AUTOSCALE_MIN_AVAILABLE_AFTER_MB", 3072)
+REPLICA_MEMORY_BUDGET_MB = max(256, env_int("AUTOSCALE_REPLICA_MEMORY_BUDGET_MB", 1536))
+MAX_SCALE_OUT_BATCH = max(1, min(env_int("AUTOSCALE_MAX_SCALE_OUT_BATCH", 1), 8))
 START_TIMEOUT_SECONDS = env_int("AUTOSCALE_START_TIMEOUT_SECONDS", 75)
 WARMUP_SECONDS = env_int("AUTOSCALE_WARMUP_SECONDS", 3)
 DRAIN_SECONDS = env_int("AUTOSCALE_DRAIN_SECONDS", 15)
 MAX_LOG_BYTES = env_int("AUTOSCALE_MAX_LOG_BYTES", 32 * 1024 * 1024)
+MANUAL_LOCK_WAIT_SECONDS = env_int("AUTOSCALE_MANUAL_LOCK_WAIT_SECONDS", 150)
 
 BASE_A_ADDR = "127.0.0.1:3001"
 BASE_B_ADDR = "10.8.0.2:3001"
@@ -128,7 +127,10 @@ def is_pm2_online(processes: dict[str, dict[str, Any]], name: str) -> bool:
 
 
 def health(replica: dict[str, Any], timeout: float = 1.5) -> bool:
-    url = f"http://127.0.0.1:{replica['port']}/api/health"
+    # La readiness ne doit jamais dépendre de PostgreSQL, Redis ou d'un moteur
+    # annexe. Sous forte charge, l'ancien /api/health expirait et faisait
+    # retirer des C parfaitement vivants exactement au pire moment.
+    url = f"http://127.0.0.1:{replica['port']}/api/health/live"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             body = json.load(response)
@@ -169,6 +171,28 @@ def configured_replicas(processes: dict[str, dict[str, Any]] | None = None) -> l
         for replica in REPLICAS
         if replica["label"] in configured and is_pm2_online(processes, replica["name"])
     ]
+
+
+def delete_orphan_replicas(
+    processes: dict[str, dict[str, Any]], active: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Supprime les processus C que Nginx ne considère plus comme désirés.
+
+    Cela répare notamment les lancements interrompus et empêche un ancien C
+    sauvegardé par PM2 de revenir tout seul après un déploiement ou un reboot.
+    """
+    active_names = {str(replica["name"]) for replica in active}
+    orphans = [
+        replica
+        for replica in REPLICAS
+        if replica["name"] in processes and replica["name"] not in active_names
+    ]
+    for replica in orphans:
+        delete_replica(replica)
+    if orphans:
+        save_pm2_state()
+        emit("orphan_replicas_deleted", replicas=[item["label"] for item in orphans])
+    return orphans
 
 
 def upstream_content(replicas: list[dict[str, Any]]) -> str:
@@ -249,6 +273,12 @@ def delete_replica(replica: dict[str, Any]) -> None:
     pm2("delete", replica["name"], check=False)
 
 
+def save_pm2_state() -> None:
+    # Sans sauvegarde, `pm2 resurrect` peut recréer un C retiré depuis des
+    # heures. Le dump doit refléter chaque changement du parc élastique.
+    pm2("save", "--force", check=False)
+
+
 def launch_replica(replica: dict[str, Any]) -> bool:
     """Lance un processus sans l'exposer encore dans Nginx."""
     delete_replica(replica)
@@ -323,6 +353,8 @@ def start_replicas(replicas: list[dict[str, Any]], current: list[dict[str, Any]]
         emit("scale_out_health_failed", replica=replica["label"])
         delete_replica(replica)
     if not ready:
+        if launched:
+            save_pm2_state()
         return []
 
     available_after = mem_available_mb()
@@ -335,13 +367,16 @@ def start_replicas(replicas: list[dict[str, Any]], current: list[dict[str, Any]]
         )
         for replica in ready:
             delete_replica(replica)
+        save_pm2_state()
         return []
 
     if not apply_upstreams([*current, *ready]):
         for replica in ready:
             delete_replica(replica)
+        save_pm2_state()
         return []
 
+    save_pm2_state()
     for replica in ready:
         emit(
             "scaled_out",
@@ -362,6 +397,7 @@ def stop_replica(replica: dict[str, Any], remaining: list[dict[str, Any]]) -> bo
     if DRAIN_SECONDS > 0:
         time.sleep(DRAIN_SECONDS)
     delete_replica(replica)
+    save_pm2_state()
     emit("scaled_in", replica=replica["label"], port=replica["port"])
     return True
 
@@ -512,9 +548,12 @@ def status_once() -> int:
 
 def autoscale(action: str, replica_label: str | None = None) -> int:
     processes = pm2_processes()
-    active = healthy_replicas(processes)
+    # Le fichier Nginx est la source de vérité des C désirés. Un probe
+    # temporairement lent ne doit jamais vider le répartiteur sous charge.
+    active = configured_replicas(processes)
     if not apply_upstreams(active):
         return 1
+    delete_orphan_replicas(processes, active)
 
     report = snapshot(active)
     if action == "status":
@@ -578,7 +617,9 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
     a_high = overloaded(report["a"], MIN_REQUESTS_PER_SIDE)
     b_high = overloaded(report["b"], MIN_REQUESTS_PER_SIDE)
     overall_high = overloaded(report["all"], MIN_REQUESTS_PER_SIDE * 2)
-    wants_scale_out = (a_high and b_high) if not active else overall_high
+    # Ajouter un C soulage le cluster dès que le trafic global est en détresse,
+    # même si A ou B n'a pas atteint seul le minimum d'échantillons.
+    wants_scale_out = overall_high
 
     if wants_scale_out:
         state["high_streak"] = int(state.get("high_streak", 0)) + 1
@@ -605,9 +646,9 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
             report["all"]["error_rate"] >= max(0.10, HIGH_ERROR_RATE * 2)
             or report["all"]["p95_seconds"] >= max(2.0, HIGH_P95_SECONDS * 2)
         )
-        # En détresse forte, plusieurs C démarrent ensemble. Si la charge reste
-        # haute, les cycles suivants continuent jusqu'à la limite imposée par
-        # la RAM, jamais jusqu'à une liste C1-C3 codée en dur.
+        # Les C démarrent un par un. Plusieurs Node lourds lancés ensemble ont
+        # déjà saturé A avant qu'aucun ne soit prêt. Les cycles suivants
+        # continuent tant que la charge et la vraie marge RAM le justifient.
         requested = MAX_SCALE_OUT_BATCH if catastrophic else 1
         targets = missing[:min(requested, capacity)]
         emit(
@@ -675,11 +716,26 @@ def main() -> int:
 
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w", encoding="ascii") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            emit("skipped", reason="une évaluation est déjà en cours")
-            return 0
+        if action == "once":
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                emit("skipped", reason="une évaluation est déjà en cours")
+                return 0
+        else:
+            # Les boutons admin ne doivent pas perdre leur commande quand un
+            # cycle de 5 s possède déjà le verrou. Ils patientent dans leur
+            # processus détaché puis l'exécutent, dans l'ordre.
+            deadline = time.monotonic() + MANUAL_LOCK_WAIT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        emit("manual_action_timeout", action=action, replica=replica_label)
+                        return 1
+                    time.sleep(0.25)
         try:
             return autoscale(action, replica_label)
         except Exception as error:

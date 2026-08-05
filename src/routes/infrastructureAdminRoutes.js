@@ -210,7 +210,11 @@ function spawnAutoscaler(flag, replica = null) {
   const args = ['-n', AUTOSCALER, flag];
   if (replica) args.push(replica);
   const child = spawn('/usr/bin/sudo', args, { detached: true, stdio: 'ignore' });
+  child.on('error', (error) => logger.error('[infrastructure] commande autoscaler non lancee', {
+    flag, replica, error: error.message,
+  }));
   child.unref();
+  return child.pid;
 }
 
 router.get('/status', async (_req, res) => {
@@ -230,8 +234,8 @@ router.get('/status', async (_req, res) => {
         max_replicas: Number(autoscaler?.max_replicas || DEFAULT_MAX_REPLICAS),
         additional_replica_capacity: Number(autoscaler?.additional_replica_capacity || 0),
         memory_available_mb: Number(autoscaler?.memory_available_mb || local?.memory?.available_mb || 0),
-        memory_reserved_mb: Number(autoscaler?.memory_reserved_mb || 2500),
-        replica_memory_budget_mb: Number(autoscaler?.replica_memory_budget_mb || 512),
+        memory_reserved_mb: Number(autoscaler?.memory_reserved_mb || 3072),
+        replica_memory_budget_mb: Number(autoscaler?.replica_memory_budget_mb || 1536),
         total_requests_30s: Number(autoscaler?.all?.requests || 0),
         p95_ms: Math.round(Number(autoscaler?.all?.p95_seconds || 0) * 100000) / 100,
         error_rate: Number(autoscaler?.all?.error_rate || 0),
@@ -294,9 +298,9 @@ router.post('/load-tests/:id/stop', (req, res) => {
 });
 
 router.post('/replicas/scale-out', (req, res) => {
-  spawnAutoscaler('--force-up');
+  const pid = spawnAutoscaler('--force-up');
   logger.warn('[infrastructure] scale-out manuel', { admin_id: req.user.id });
-  return res.status(202).json({ success: true, message: 'Creation du prochain replica demandee' });
+  return res.status(202).json({ success: true, pid, message: 'Creation du prochain replica mise en file' });
 });
 
 router.post('/replicas/:id/:action', (req, res) => {
@@ -305,17 +309,17 @@ router.post('/replicas/:id/:action', (req, res) => {
   if (!REPLICA_RE.test(id) || !['start', 'restart'].includes(action)) {
     return res.status(400).json({ success: false, message: 'Action ou replica invalide' });
   }
-  spawnAutoscaler(`--${action}`, id);
+  const pid = spawnAutoscaler(`--${action}`, id);
   logger.warn('[infrastructure] action replica', { admin_id: req.user.id, replica: id, action });
-  return res.status(202).json({ success: true, message: `${action} demande pour ${id.toUpperCase()}` });
+  return res.status(202).json({ success: true, pid, message: `${action} mis en file pour ${id.toUpperCase()}` });
 });
 
 router.delete('/replicas/:id', (req, res) => {
   const id = String(req.params.id || '').toLowerCase();
   if (!REPLICA_RE.test(id)) return res.status(400).json({ success: false, message: 'Replica invalide' });
-  spawnAutoscaler('--delete', id);
+  const pid = spawnAutoscaler('--delete', id);
   logger.warn('[infrastructure] suppression replica', { admin_id: req.user.id, replica: id });
-  return res.status(202).json({ success: true, message: `Suppression demandee pour ${id.toUpperCase()}` });
+  return res.status(202).json({ success: true, pid, message: `Arret mis en file pour ${id.toUpperCase()}` });
 });
 
 module.exports = router;

@@ -10,7 +10,7 @@ réellement, pas une cible.
               │ VPS A — 51.210.11.74 — 12 Go / 6 vCPU        │
               │  nginx (TLS + répartiteur)                   │
               │  ├─ twitninf-api  :3001   NODE_ROLE=web      │
-              │  ├─ C1/C2/C3 :3005-3007  NODE_ROLE=web       │
+              │  ├─ C1…C32 :3005…3132  NODE_ROLE=web          │
               │  │    └─ répliques créées à la demande        │
               │  ├─ twitninf-api-worker :3004 NODE_ROLE=worker│
               │  │    └─ crons, PolicierCongo, radars         │
@@ -69,25 +69,30 @@ Le **même code** tourne partout ; c'est `NODE_ROLE` qui décide du comportement
 > debug sur A. B porte `POLICIERCONGO_LOCAL_ENABLED=false`, refuse un appel
 > direct avec 503 et n'initialise ni moteur ni provider Codex.
 
-## Autoscaling C1–C3 sur A
+## Autoscaling des C sur A
 
-Le timer `twitninf-autoscaler.timer` évalue le trafic toutes les 10 secondes à
-partir d'un journal Nginx minimal qui ne contient ni URI, ni IP, ni jeton. Le
-premier scale-out exige que **A et B** dépassent pendant deux évaluations soit
-800 ms de p95, soit 5 % d'erreurs serveur, avec au moins 30 requêtes de chaque
-côté sur 30 secondes. Si l'épisode reste mauvais, C2 puis C3 peuvent suivre,
-avec 60 secondes de refroidissement entre deux créations.
+Le timer `twitninf-autoscaler.timer` évalue le trafic toutes les 5 secondes à
+partir d'un journal Nginx minimal qui ne contient ni URI, ni IP, ni jeton. Une
+surcharge globale d'au moins 60 requêtes sur 30 secondes déclenche un scale-out
+à partir de 800 ms de p95 ou 5 % d'erreurs serveur. Tant que l'épisode reste
+mauvais, les cycles suivants peuvent ajouter d'autres C.
 
-Chaque C est un process PM2 isolé sur A : C1 `:3005`, C2 `:3006`, C3 `:3007`.
+Chaque C est un process PM2 isolé sur A : C1 `:3005`, C2 `:3006`, C3 `:3007`,
+puis C4–C32 utilisent la plage isolée `:3104`–`:3132`.
 Il écoute uniquement sur `127.0.0.1`, porte obligatoirement `NODE_ROLE=web` et
-`POLICIERCONGO_LOCAL_ENABLED=false`, puis chauffe 15 secondes et passe un
-health-check avant d'entrer dans Nginx. La liste d'upstreams est écrite
+`POLICIERCONGO_LOCAL_ENABLED=false`, puis passe `/api/health/live` avant
+d'entrer dans Nginx. Cette sonde ne touche ni PostgreSQL, ni Redis : un service
+annexe lent ne peut plus expulser un C vivant pendant une surcharge. La liste
+d'upstreams est écrite
 atomiquement, validée par `nginx -t`, et restaurée si le reload échoue.
 
-Garde-fous : maximum trois C, au moins 3,5 Go disponibles avant une création et
-2,5 Go après, aucune persistance des C dans `pm2 save`, puis retrait un par un
-après 10 minutes stables ou sans trafic. PolicierCongo reste le seul worker sur
-A:3004 pendant tout le cycle.
+Garde-fous : plafond technique de 32 C, mais limite réelle calculée avec la RAM
+disponible ; 1,5 Go budgété par C, 4,5 Go disponibles avant une création et
+3 Go conservés après. Les C démarrent strictement un par un, puis sont retirés
+un par un après 10 minutes stables ou sans trafic. Le fichier Nginx est la
+source de vérité : les processus PM2 orphelins sont supprimés et le dump PM2
+est resauvegardé, ce qui empêche leur retour aléatoire après un déploiement.
+PolicierCongo reste le seul worker sur A:3004 pendant tout le cycle.
 
 Commandes opérateur sur A :
 
@@ -95,6 +100,9 @@ Commandes opérateur sur A :
 sudo /usr/local/sbin/twitninf-autoscaler --status
 sudo /usr/local/sbin/twitninf-autoscaler --force-up
 sudo /usr/local/sbin/twitninf-autoscaler --force-down
+sudo /usr/local/sbin/twitninf-autoscaler --start c1
+sudo /usr/local/sbin/twitninf-autoscaler --restart c1
+sudo /usr/local/sbin/twitninf-autoscaler --delete c1
 journalctl -u twitninf-autoscaler.service --since '30 min ago'
 ```
 
@@ -105,7 +113,7 @@ journal `deploy/nginx-twitninf-autoscale-log.conf` et
 
 > Ce mécanisme absorbe des pointes dans la limite des 6 vCPU et de la RAM de A ;
 > il ne transforme pas un seul VPS en capacité infinie. Le canari 10 000 VU a
-> saturé A immédiatement : C1–C3 réduisent le risque et le délai, mais une vraie
+> saturé A immédiatement : les C réduisent le risque et le délai, mais une vraie
 > garantie à cette échelle demanderait des machines supplémentaires externes.
 
 ## Le recommandeur Rust est partagé par les deux nœuds

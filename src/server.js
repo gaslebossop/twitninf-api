@@ -169,6 +169,16 @@ const app = express();
 // le rate-limit. La valeur 1 = un seul proxy (Nginx) devant l'API.
 app.set('trust proxy', 1);
 
+// Sonde de vivacité volontairement indépendante des middlewares globaux et
+// des services externes. L'autoscaler ne doit pas conclure qu'un process Node
+// est mort simplement parce que PostgreSQL, Redis ou l'anti-fraude ralentit.
+app.get('/api/health/live', (_req, res) => res.status(200).json({
+  success: true,
+  role: nodeRole,
+  instance: instanceId,
+  policiercongo_local: POLICIERCONGO_LOCAL_ENABLED,
+}));
+
 // Configuration Redis pour le cache
 const redisClient = redis.createClient(config.redis);
 redisClient.on('error', (err) => logger.error('Erreur Redis:', err));
@@ -383,7 +393,7 @@ app.get('/static/avatars/:filename', (req, res) => {
 // /api/health ne contient aucune donnee utilisateur. Les deploiements et
 // l'autoscaler doivent pouvoir la sonder meme si leur IP est classee fraude.
 const exceptHealth = (middleware) => (req, res, next) => (
-  req.path === '/health' ? next() : middleware(req, res, next)
+  req.path === '/health' || req.path === '/health/live' ? next() : middleware(req, res, next)
 );
 
 app.use('/api/internal/infrastructure', infrastructureInternalRoutes);
