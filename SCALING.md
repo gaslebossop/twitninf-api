@@ -97,6 +97,10 @@ PolicierCongo reste le seul worker sur A:3004 pendant tout le cycle.
 Un C arrêté manuellement reste désactivé, même si les mesures des 30 secondes
 précédentes sont encore hautes. L'autoscaler peut choisir un autre numéro ; le
 bouton **Démarrer** réactive explicitement le C arrêté.
+Tout arrêt manuel suspend aussi les scale-out automatiques pendant 90 secondes,
+le temps que la fenêtre de mesures se vide. Le workflow de déploiement pose une
+pause de maintenance de 180 secondes avant les reloads : leurs 5xx transitoires
+ne peuvent donc plus créer de C.
 
 Commandes opérateur sur A :
 

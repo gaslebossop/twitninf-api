@@ -226,6 +226,12 @@ jobs:
             $SSH bash -s <<EOF
           set -euo pipefail
           cd "${VPS_PATH}"
+          # Les 5xx/latences provoques par un reload ne sont pas de la charge
+          # utilisateur. Sur A, on suspend les creations de C pendant la
+          # maintenance; B n'a pas cet executable et ignore simplement l'etape.
+          if [ -x /usr/local/sbin/twitninf-autoscaler ]; then
+            sudo -n /usr/local/sbin/twitninf-autoscaler --pause 180 || true
+          fi
           npm install --omit=dev --no-audit --no-fund
           names=\$(pm2 jlist 2>/dev/null | grep -o '"name":"twitninf-api[^"]*"' | cut -d'"' -f4 | sort -u | grep -Ev '^twitninf-api-c([1-9]|[12][0-9]|3[0-2])$' || true)
           if [ -z "\$names" ]; then

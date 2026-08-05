@@ -87,6 +87,7 @@ WARMUP_SECONDS = env_int("AUTOSCALE_WARMUP_SECONDS", 3)
 DRAIN_SECONDS = env_int("AUTOSCALE_DRAIN_SECONDS", 15)
 MAX_LOG_BYTES = env_int("AUTOSCALE_MAX_LOG_BYTES", 32 * 1024 * 1024)
 MANUAL_LOCK_WAIT_SECONDS = env_int("AUTOSCALE_MANUAL_LOCK_WAIT_SECONDS", 150)
+MANUAL_SCALE_OUT_PAUSE_SECONDS = env_int("AUTOSCALE_MANUAL_SCALE_OUT_PAUSE_SECONDS", 90)
 
 BASE_A_ADDR = "127.0.0.1:3001"
 BASE_B_ADDR = "10.8.0.2:3001"
@@ -499,6 +500,7 @@ def load_state() -> dict[str, Any]:
         "low_streak": 0,
         "last_action": 0.0,
         "disabled_replicas": [],
+        "scale_out_suppressed_until": 0.0,
     }
     try:
         loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -533,10 +535,13 @@ def snapshot(active: list[dict[str, Any]]) -> dict[str, Any]:
         for label, address in backend_addresses.items()
     }
     available_mb = mem_available_mb()
-    disabled_replicas = load_state().get("disabled_replicas", [])
+    state = load_state()
+    disabled_replicas = state.get("disabled_replicas", [])
+    suppressed_until = float(state.get("scale_out_suppressed_until", 0.0))
     return {
         "active_replicas": [item["label"] for item in active],
         "disabled_replicas": disabled_replicas,
+        "scale_out_pause_remaining_seconds": max(0, math.ceil(suppressed_until - time.time())),
         "max_replicas": MAX_REPLICAS,
         "additional_replica_capacity": additional_replica_capacity(len(active), available_mb),
         "memory_available_mb": available_mb,
@@ -559,6 +564,15 @@ def status_once() -> int:
 
 
 def autoscale(action: str, replica_label: str | None = None) -> int:
+    if action == "pause":
+        seconds = max(0, min(int(replica_label or 0), 3600))
+        state = load_state()
+        until = max(float(state.get("scale_out_suppressed_until", 0.0)), time.time() + seconds)
+        state["scale_out_suppressed_until"] = until
+        save_state(state)
+        emit("scale_out_paused", seconds=seconds, until=until)
+        return 0
+
     processes = pm2_processes()
     # Le fichier Nginx est la source de vérité des C désirés. Un probe
     # temporairement lent ne doit jamais vider le répartiteur sous charge.
@@ -601,6 +615,10 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
             # encore chaudes sur 30 s recréaient le même C cinq secondes après.
             disabled.add(str(target["label"]))
             state["disabled_replicas"] = sorted(disabled)
+            state["scale_out_suppressed_until"] = max(
+                float(state.get("scale_out_suppressed_until", 0.0)),
+                now + MANUAL_SCALE_OUT_PAUSE_SECONDS,
+            )
             if target not in active:
                 save_state(state)
                 emit("delete_skipped", reason="réplique déjà inactive et désactivée", replica=target["label"])
@@ -641,6 +659,10 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
             disabled.add(str(target["label"]))
             state.update({"high_streak": 0, "low_streak": 0, "last_action": now})
             state["disabled_replicas"] = sorted(disabled)
+            state["scale_out_suppressed_until"] = max(
+                float(state.get("scale_out_suppressed_until", 0.0)),
+                now + MANUAL_SCALE_OUT_PAUSE_SECONDS,
+            )
             save_state(state)
         return 0 if changed else 1
 
@@ -669,6 +691,7 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
         state["high_streak"] >= HIGH_STREAK_REQUIRED
         and len(active) < MAX_REPLICAS
         and since_action >= SCALE_OUT_COOLDOWN
+        and now >= float(state.get("scale_out_suppressed_until", 0.0))
     ):
         disabled = set(state.get("disabled_replicas", []))
         missing = [
@@ -725,6 +748,7 @@ def main() -> int:
     group.add_argument("--start", choices=sorted(REPLICA_BY_LABEL))
     group.add_argument("--restart", choices=sorted(REPLICA_BY_LABEL))
     group.add_argument("--delete", choices=sorted(REPLICA_BY_LABEL))
+    group.add_argument("--pause", type=int, metavar="SECONDS")
     args = parser.parse_args()
     if args.status:
         action, replica_label = "status", None
@@ -738,6 +762,8 @@ def main() -> int:
         action, replica_label = "restart", args.restart
     elif args.delete:
         action, replica_label = "delete", args.delete
+    elif args.pause is not None:
+        action, replica_label = "pause", str(args.pause)
     else:
         action, replica_label = "once", None
 
