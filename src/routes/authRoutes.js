@@ -112,6 +112,45 @@ const updateProfileValidation = [
     .withMessage('is_private_account doit être un booléen')
 ];
 
+const demographicsValidation = [
+  body('declaredAge')
+    .isInt({ min: 13, max: 120 })
+    .withMessage('L\'age doit etre compris entre 13 et 120 ans'),
+  body('birthDay')
+    .isInt({ min: 1, max: 31 })
+    .withMessage('Jour de naissance invalide'),
+  body('birthMonth')
+    .isInt({ min: 1, max: 12 })
+    .withMessage('Mois de naissance invalide'),
+];
+
+const sessionLocationValidation = [
+  body('captureKey')
+    .isString()
+    .trim()
+    .isLength({ min: 12, max: 180 })
+    .withMessage('Identifiant de capture invalide'),
+  body('permissionStatus')
+    .isIn(['granted', 'denied', 'restricted', 'unavailable'])
+    .withMessage('Statut de permission invalide'),
+  body('latitude').optional({ nullable: true }).isFloat({ min: -90, max: 90 }),
+  body('longitude').optional({ nullable: true }).isFloat({ min: -180, max: 180 }),
+  body('accuracy').optional({ nullable: true }).isFloat({ min: 0, max: 100000 }),
+  body('countryCode').optional({ nullable: true }).isString().isLength({ min: 2, max: 2 }),
+  body('country').optional({ nullable: true }).isString().isLength({ max: 100 }),
+  body('region').optional({ nullable: true }).isString().isLength({ max: 120 }),
+  body('city').optional({ nullable: true }).isString().isLength({ max: 120 }),
+  body('timezone').optional({ nullable: true }).isString().isLength({ max: 64 }),
+  body('capturedAt').optional({ nullable: true }).isISO8601(),
+  body().custom((value) => {
+    if (value.permissionStatus === 'granted' &&
+        (value.latitude == null || value.longitude == null)) {
+      throw new Error('Les coordonnees sont requises quand la permission est accordee');
+    }
+    return true;
+  }),
+];
+
 const changePasswordValidation = [
   body('currentPassword')
     .notEmpty()
@@ -229,6 +268,8 @@ router.post('/logout', authController.logout);
 router.get('/me', authController.getProfile); // Route /me pour l'utilisateur actuel
 router.get('/profile', authController.getProfile); // Route alternative
 router.put('/profile', updateProfileValidation, authController.updateProfile);
+router.put('/demographics', demographicsValidation, authController.updateDemographics);
+router.post('/session-location', sessionLocationValidation, authController.recordSessionLocation);
 router.put('/change-password', changePasswordValidation, authController.changePassword);
 router.get('/verify-auth', authController.verifyAuth);
 

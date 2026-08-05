@@ -308,6 +308,56 @@ class AuthController {
     }
   }
 
+  async updateDemographics(req, res) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Informations personnelles invalides',
+          errors: errors.array(),
+        });
+      }
+
+      const result = await authService.updateDemographics(req.user.id, req.body);
+      res.status(200).json(result);
+    } catch (error) {
+      logger.error('Erreur dans updateDemographics:', error);
+      const invalid = error.message.includes('invalides');
+      res.status(invalid ? 400 : 500).json({
+        success: false,
+        message: invalid ? error.message : 'Erreur lors de l\'enregistrement des informations personnelles',
+      });
+    }
+  }
+
+  async recordSessionLocation(req, res) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Donnees de localisation invalides',
+          errors: errors.array(),
+        });
+      }
+
+      const result = await authService.recordSessionLocation(
+        req.user.id,
+        req.body,
+        sessionContextFrom(req),
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      logger.error('Erreur dans recordSessionLocation:', error);
+      const invalid = error.message.includes('invalide');
+      res.status(invalid ? 400 : 500).json({
+        success: false,
+        message: invalid ? error.message : 'Erreur lors de l\'enregistrement de la localisation',
+      });
+    }
+  }
+
   // Changer le mot de passe
   async changePassword(req, res) {
     try {

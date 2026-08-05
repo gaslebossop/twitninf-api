@@ -37,6 +37,7 @@ const DeveloperAppModule = require('./DeveloperApp');
 const OAuthCodeModule = require('./OAuthCode');
 const OAuthTokenModule = require('./OAuthToken');
 const SessionModule = require('./Session');
+const UserLocationEventModule = require('./UserLocationEvent');
 const BotReputation = require('./BotReputation');
 const Conversation = require('./Conversation');
 const ConversationParticipant = require('./ConversationParticipant');
@@ -118,6 +119,7 @@ const DeveloperApp = DeveloperAppModule(sequelize);
 const OAuthCode = OAuthCodeModule(sequelize);
 const OAuthToken = OAuthTokenModule(sequelize);
 const Session = SessionModule(sequelize);
+const UserLocationEvent = UserLocationEventModule(sequelize);
 BotReputation.initBotReputationModel(sequelize);
 Conversation.initConversationModel(sequelize);
 ConversationParticipant.initConversationParticipantModel(sequelize);
@@ -761,6 +763,16 @@ User.hasMany(Session, {
   onDelete: 'CASCADE'
 });
 Session.belongsTo(User, {
+  foreignKey: 'user_id',
+  as: 'user'
+});
+
+User.hasMany(UserLocationEvent, {
+  foreignKey: 'user_id',
+  as: 'locationEvents',
+  onDelete: 'CASCADE'
+});
+UserLocationEvent.belongsTo(User, {
   foreignKey: 'user_id',
   as: 'user'
 });
@@ -1689,6 +1701,7 @@ module.exports = {
   OAuthCode,
   OAuthToken,
   Session,
+  UserLocationEvent,
   Conversation,
   ConversationParticipant,
   Message,

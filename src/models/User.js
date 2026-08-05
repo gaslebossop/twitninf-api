@@ -190,6 +190,37 @@ const userSchema = {
     allowNull: true,
     defaultValue: null
   },
+
+  // Donnees privees renseignees par le proprietaire du compte. Elles ne sont
+  // volontairement jamais incluses dans getPublicProfile().
+  declared_age: {
+    type: DataTypes.SMALLINT,
+    allowNull: true,
+    validate: { min: 13, max: 120 }
+  },
+  birth_day: {
+    type: DataTypes.SMALLINT,
+    allowNull: true,
+    validate: { min: 1, max: 31 }
+  },
+  birth_month: {
+    type: DataTypes.SMALLINT,
+    allowNull: true,
+    validate: { min: 1, max: 12 }
+  },
+  demographics_validated_at: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  location_consent_status: {
+    type: DataTypes.STRING(24),
+    allowNull: false,
+    defaultValue: 'undetermined'
+  },
+  location_consent_updated_at: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
   
   // Statuts
   verified: {

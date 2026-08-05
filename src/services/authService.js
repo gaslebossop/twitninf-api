@@ -18,6 +18,22 @@ function getSessionModel() {
   return require('../models').Session;
 }
 
+function getUserLocationEventModel() {
+  return require('../models').UserLocationEvent;
+}
+
+/** Champs strictement reserves au proprietaire du compte. */
+function getOwnerPrivateProfile(user) {
+  return {
+    declared_age: user.declared_age ?? null,
+    birth_day: user.birth_day ?? null,
+    birth_month: user.birth_month ?? null,
+    demographics_validated_at: user.demographics_validated_at || null,
+    location_consent_status: user.location_consent_status || 'undetermined',
+    location_consent_updated_at: user.location_consent_updated_at || null,
+  };
+}
+
 class AuthService {
   // ─── Sessions (jetons de rafraîchissement opaques, hachés, à rotation) ──────
 
@@ -184,7 +200,10 @@ class AuthService {
         success: true,
         message: 'Compte créé avec succès',
         data: {
-          user: user.getPublicProfile(),
+          user: {
+            ...user.getPublicProfile(),
+            ...getOwnerPrivateProfile(user),
+          },
           token,
           refreshToken
         }
@@ -242,7 +261,8 @@ class AuthService {
             is_suspended: user.is_suspended || false,
             // `null` = langue de lecture jamais choisie : c'est ce que l'app
             // attend juste après la connexion pour poser la question une fois.
-            preferred_language: user.preferred_language || null
+            preferred_language: user.preferred_language || null,
+            ...getOwnerPrivateProfile(user)
           },
           token,
           refreshToken
@@ -463,7 +483,8 @@ class AuthService {
           'role', 'moderation_permissions', 'is_private_account',
           'stats', 'created_at', 'last_activity', 'is_active',
           'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
-          'preferred_language'
+          'preferred_language', 'declared_age', 'birth_day', 'birth_month',
+          'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at'
         ]
       });
       if (!user || !user.is_active) {
@@ -486,7 +507,8 @@ class AuthService {
           'role', 'moderation_permissions', 'is_private_account',
           'stats', 'created_at', 'last_activity', 'is_active',
           'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
-          'preferred_language'
+          'preferred_language', 'declared_age', 'birth_day', 'birth_month',
+          'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at'
         ]
       });
 
@@ -498,7 +520,8 @@ class AuthService {
           'role', 'moderation_permissions', 'is_private_account',
           'stats', 'created_at', 'last_activity', 'is_active',
           'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
-          'preferred_language'
+          'preferred_language', 'declared_age', 'birth_day', 'birth_month',
+          'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at'
         ]
       });
 
@@ -510,7 +533,8 @@ class AuthService {
           // Volontairement hors de `getPublicProfile()` : la langue de lecture
           // ne regarde que son propriétaire, elle n'a pas à voyager avec
           // l'auteur d'un tweet dans le fil de tout le monde.
-          preferred_language: updatedUser.preferred_language || null
+          preferred_language: updatedUser.preferred_language || null,
+          ...getOwnerPrivateProfile(updatedUser)
         }
       };
     } catch (error) {
@@ -572,6 +596,92 @@ class AuthService {
       logger.error('Erreur lors de la mise à jour du profil:', error);
       throw error;
     }
+  }
+
+  async updateDemographics(userId, { declaredAge, birthDay, birthMonth }) {
+    const age = Number(declaredAge);
+    const day = Number(birthDay);
+    const month = Number(birthMonth);
+    const maxDay = new Date(2024, month, 0).getDate(); // 2024 accepte le 29/02.
+
+    if (!Number.isInteger(age) || age < 13 || age > 120 ||
+        !Number.isInteger(month) || month < 1 || month > 12 ||
+        !Number.isInteger(day) || day < 1 || day > maxDay) {
+      throw new Error('Informations de naissance invalides');
+    }
+
+    const user = await User.findByPk(userId);
+    if (!user || !user.is_active) throw new Error('Utilisateur non trouve');
+
+    await user.update({
+      declared_age: age,
+      birth_day: day,
+      birth_month: month,
+      demographics_validated_at: new Date(),
+    });
+
+    return {
+      success: true,
+      message: 'Informations personnelles enregistrees',
+      data: getOwnerPrivateProfile(user),
+    };
+  }
+
+  async recordSessionLocation(userId, payload, context = {}) {
+    const UserLocationEvent = getUserLocationEventModel();
+    const permissionStatus = String(payload.permissionStatus || 'undetermined');
+    const granted = permissionStatus === 'granted';
+    const latitude = payload.latitude == null ? null : Number(payload.latitude);
+    const longitude = payload.longitude == null ? null : Number(payload.longitude);
+    const accuracy = payload.accuracy == null ? null : Number(payload.accuracy);
+
+    if (granted && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+        !Number.isFinite(longitude) || longitude < -180 || longitude > 180)) {
+      throw new Error('Localisation invalide');
+    }
+
+    const user = await User.findByPk(userId);
+    if (!user || !user.is_active) throw new Error('Utilisateur non trouve');
+
+    const trim = (value, max) => value == null ? null : String(value).trim().slice(0, max) || null;
+    const eventData = {
+      user_id: userId,
+      capture_key: String(payload.captureKey).slice(0, 180),
+      permission_status: permissionStatus,
+      // Une precision d'environ 100 m suffit aux statistiques geographiques
+      // et evite de conserver une trace GPS inutilement exacte.
+      latitude: granted ? Math.round(latitude * 1000) / 1000 : null,
+      longitude: granted ? Math.round(longitude * 1000) / 1000 : null,
+      accuracy_m: granted && Number.isFinite(accuracy) ? Math.max(0, Math.min(100000, accuracy)) : null,
+      country_code: granted ? trim(payload.countryCode, 2)?.toUpperCase() : null,
+      country: granted ? trim(payload.country, 100) : null,
+      region: granted ? trim(payload.region, 120) : null,
+      city: granted ? trim(payload.city, 120) : null,
+      timezone: granted ? trim(payload.timezone, 64) : null,
+      platform: trim(context.platform, 32),
+      client_captured_at: payload.capturedAt ? new Date(payload.capturedAt) : null,
+      captured_at: new Date(),
+    };
+
+    const [event, created] = await UserLocationEvent.findOrCreate({
+      where: { capture_key: eventData.capture_key, user_id: userId },
+      defaults: eventData,
+    });
+
+    await user.update({
+      location_consent_status: permissionStatus,
+      location_consent_updated_at: new Date(),
+    });
+
+    return {
+      success: true,
+      message: granted ? 'Localisation de connexion enregistree' : 'Choix de localisation enregistre',
+      data: {
+        recorded: created,
+        captured_at: event.captured_at,
+        permission_status: permissionStatus,
+      },
+    };
   }
 
   // Changer le mot de passe

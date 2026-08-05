@@ -13,6 +13,14 @@ const formatDateKey = (input) => {
   return date.toISOString().slice(0, 10);
 };
 
+const timeframeStart = (timeframe = '30d') => {
+  const days = timeframe === '7d' ? 7 : timeframe === '90d' ? 90 : timeframe === '1y' ? 365 : 30;
+  return new Date(Date.now() - days * 86400000);
+};
+
+const int = (value) => parseInt(value, 10) || 0;
+const decimal = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+
 /**
  * GET /api/user-stats/test
  * Route de test pour vérifier que les routes fonctionnent
@@ -323,6 +331,28 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       type: sequelize.QueryTypes.SELECT
     });
 
+    const sharesCounts = await sequelize.query(`
+      SELECT
+        DATE(ubd.created_at) as date,
+        COUNT(*) as shares
+      FROM user_behavior_data ubd
+      JOIN tweets t ON t.id::text = ubd.target_id::text
+      WHERE t.user_id::text = :userId
+        AND ubd.target_type = 'tweet'
+        AND ubd.action_type = 'tweet_share'
+        AND ubd.created_at >= :startDate
+        AND ubd.created_at <= :endDate
+        AND t.deleted_at IS NULL
+      GROUP BY DATE(ubd.created_at)
+    `, {
+      replacements: {
+        userId,
+        startDate: startDate.toISOString().split('T')[0],
+        endDate: now.toISOString().split('T')[0]
+      },
+      type: sequelize.QueryTypes.SELECT
+    });
+
     const behaviorCounts = await sequelize.query(`
       SELECT 
         DATE(created_at) as date,
@@ -371,6 +401,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       const likesData = likesCounts.find(l => formatDateKey(l.date) === dateStr);
       const retweetsData = retweetsCounts.find(r => formatDateKey(r.date) === dateStr);
       const commentsData = commentsCounts.find(c => formatDateKey(c.date) === dateStr);
+      const sharesData = sharesCounts.find(s => formatDateKey(s.date) === dateStr);
       const behaviorData = behaviorCounts.find(b => formatDateKey(b.date) === dateStr);
       const followersData = followersGainedCounts.find(f => formatDateKey(f.date) === dateStr);
       
@@ -381,7 +412,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
         likes: likesData ? parseInt(likesData.likes) : 0,
         retweets: retweetsData ? parseInt(retweetsData.retweets) : 0,
         comments: commentsData ? parseInt(commentsData.comments) : 0,
-        shares: 0, // À implémenter si nécessaire
+        shares: sharesData ? parseInt(sharesData.shares) : 0,
         profile_views: behaviorData ? parseInt(behaviorData.profile_views) : 0,
         followers_gained: followersData ? parseInt(followersData.followers_gained) : 0
       };
@@ -455,27 +486,35 @@ router.get('/:userId/top-tweets', authenticateToken, async (req, res) => {
         COUNT(DISTINCT tl.id) as likes,
         COUNT(DISTINCT tr.id) as retweets,
         COUNT(DISTINCT reply.id) as comments,
-        (COUNT(DISTINCT tl.id) + COUNT(DISTINCT tr.id) + COUNT(DISTINCT reply.id)) as total_engagement,
+        COALESCE(sh.shares, 0) as shares,
+        (COUNT(DISTINCT tl.id) + COUNT(DISTINCT tr.id) + COUNT(DISTINCT reply.id) + COALESCE(sh.shares, 0)) as total_engagement,
         CASE 
           WHEN t.view_count > 0 
-          THEN ((COUNT(DISTINCT tl.id) + COUNT(DISTINCT tr.id) + COUNT(DISTINCT reply.id)) * 100.0 / t.view_count)
+          THEN ((COUNT(DISTINCT tl.id) + COUNT(DISTINCT tr.id) + COUNT(DISTINCT reply.id) + COALESCE(sh.shares, 0)) * 100.0 / t.view_count)
           ELSE 0 
         END as engagement_rate,
         (
           COALESCE(t.view_count, 0) +
           COUNT(DISTINCT tl.id) +
           COUNT(DISTINCT tr.id) +
-          COUNT(DISTINCT reply.id)
+          COUNT(DISTINCT reply.id) +
+          COALESCE(sh.shares, 0)
         ) as performance_score
       FROM tweets t
       LEFT JOIN tweet_likes tl ON t.id = tl.tweet_id
       LEFT JOIN tweet_retweets tr ON t.id = tr.tweet_id
       LEFT JOIN tweets reply ON t.id = reply.parent_tweet_id
+      LEFT JOIN (
+        SELECT target_id::text AS tweet_id, COUNT(*) AS shares
+        FROM user_behavior_data
+        WHERE target_type = 'tweet' AND action_type = 'tweet_share'
+        GROUP BY target_id::text
+      ) sh ON sh.tweet_id = t.id::text
       WHERE t.user_id::text = :userId
         AND t.created_at >= :startDate 
         AND t.parent_tweet_id IS NULL
         AND t.deleted_at IS NULL
-      GROUP BY t.id, t.content, t.view_count, t.created_at
+      GROUP BY t.id, t.content, t.view_count, t.created_at, sh.shares
       ORDER BY performance_score DESC, views DESC, likes DESC, retweets DESC, comments DESC, t.created_at DESC
       LIMIT :limit
     `, {
@@ -491,7 +530,7 @@ router.get('/:userId/top-tweets', authenticateToken, async (req, res) => {
       likes: parseInt(tweet.likes) || 0,
       retweets: parseInt(tweet.retweets) || 0,
       comments: parseInt(tweet.comments) || 0,
-      shares: Math.floor(parseInt(tweet.total_engagement) * 0.1), // Estimation
+      shares: parseInt(tweet.shares) || 0,
       engagement_rate: parseFloat(tweet.engagement_rate) || 0,
       created_at: tweet.created_at,
       performance_score: parseFloat(tweet.performance_score) || 0
@@ -575,14 +614,32 @@ router.get('/:userId/activity', authenticateToken, async (req, res) => {
       type: sequelize.QueryTypes.SELECT
     });
 
+    // Activite recue par le createur. L'ancienne requete comptait ses propres
+    // actions tout en les presentant dans l'onglet Audience.
     const engagementActivity = await sequelize.query(`
+      WITH audience_events AS (
+        SELECT tl.created_at AS occurred_at
+        FROM tweet_likes tl JOIN tweets t ON t.id = tl.tweet_id
+        WHERE t.user_id::text = :userId AND t.deleted_at IS NULL
+        UNION ALL
+        SELECT tr.created_at AS occurred_at
+        FROM tweet_retweets tr JOIN tweets t ON t.id = tr.tweet_id
+        WHERE t.user_id::text = :userId AND t.deleted_at IS NULL
+        UNION ALL
+        SELECT reply.created_at AS occurred_at
+        FROM tweets reply JOIN tweets t ON t.id = reply.parent_tweet_id
+        WHERE t.user_id::text = :userId AND t.deleted_at IS NULL AND reply.deleted_at IS NULL
+        UNION ALL
+        SELECT ubd.created_at AS occurred_at
+        FROM user_behavior_data ubd JOIN tweets t ON t.id::text = ubd.target_id::text
+        WHERE t.user_id::text = :userId AND t.deleted_at IS NULL
+          AND ubd.target_type = 'tweet' AND ubd.action_type = 'tweet_share'
+      )
       SELECT
-        ${hourInZoneSql('ubd.created_at')} as hour,
+        ${hourInZoneSql('occurred_at')} as hour,
         COUNT(*) as engagement_count
-      FROM user_behavior_data ubd
-      WHERE ubd.user_id::text = :userId
-        AND ubd.created_at >= :startDate
-        AND ubd.action_type IN ('tweet_like', 'tweet_retweet', 'tweet_reply')
+      FROM audience_events
+      WHERE occurred_at >= :startDate
       GROUP BY 1
     `, {
       replacements: { userId, startDate, timeZone },
@@ -601,7 +658,7 @@ router.get('/:userId/activity', authenticateToken, async (req, res) => {
         hour,
         tweet_count: tweetCount,
         engagement_count: engagementCount,
-        activity_score: tweetCount + engagementCount
+        activity_score: engagementCount
       };
     });
 
@@ -631,6 +688,274 @@ router.get('/:userId/activity', authenticateToken, async (req, res) => {
       success: false,
       message: 'Erreur lors de la récupération des données d\'activité',
       error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/user-stats/:userId/deep-insights
+ *
+ * Signaux reels deja presents dans la base : usage, sessions, audience
+ * engagee, demographics declarees et localisation consentie. Les donnees
+ * d'audience sensibles sont uniquement restituees par groupes comptant au
+ * moins cinq personnes, jamais sous forme de coordonnees individuelles.
+ */
+router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { timeframe = '30d' } = req.query;
+    const isOwner = req.user.id === userId;
+    if (req.user.id !== userId && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Acces non autorise' });
+    }
+
+    const startDate = timeframeStart(timeframe);
+    const audienceEventsCte = `
+      WITH audience_events AS (
+        SELECT tl.user_id AS actor_id, 'like'::text AS event_type
+        FROM tweet_likes tl JOIN tweets t ON t.id = tl.tweet_id
+        WHERE t.user_id::text = :userId AND tl.created_at >= :startDate AND t.deleted_at IS NULL
+        UNION ALL
+        SELECT tr.user_id AS actor_id, 'retweet'::text AS event_type
+        FROM tweet_retweets tr JOIN tweets t ON t.id = tr.tweet_id
+        WHERE t.user_id::text = :userId AND tr.created_at >= :startDate AND t.deleted_at IS NULL
+        UNION ALL
+        SELECT reply.user_id AS actor_id, 'reply'::text AS event_type
+        FROM tweets reply JOIN tweets t ON t.id = reply.parent_tweet_id
+        WHERE t.user_id::text = :userId AND reply.created_at >= :startDate
+          AND t.deleted_at IS NULL AND reply.deleted_at IS NULL
+        UNION ALL
+        SELECT ubd.user_id AS actor_id, 'share'::text AS event_type
+        FROM user_behavior_data ubd JOIN tweets t ON t.id::text = ubd.target_id::text
+        WHERE t.user_id::text = :userId AND ubd.created_at >= :startDate
+          AND ubd.target_type = 'tweet' AND ubd.action_type = 'tweet_share' AND t.deleted_at IS NULL
+      ), audience_users AS (
+        SELECT actor_id, COUNT(*) AS event_count
+        FROM audience_events
+        WHERE actor_id::text <> :userId
+        GROUP BY actor_id
+      )
+    `;
+
+    const [
+      behaviorRows,
+      sessionRows,
+      audienceRows,
+      ageRows,
+      ageCoverageRows,
+      countryRows,
+      locationRows,
+      contentRows,
+      profile,
+    ] = await Promise.all([
+      sequelize.query(`
+        SELECT
+          COUNT(DISTINCT DATE(created_at)) AS active_days,
+          COUNT(*) FILTER (WHERE action_type = 'screen_view') AS screen_views,
+          COUNT(*) FILTER (WHERE action_type = 'tweet_view') AS tweets_read,
+          COUNT(*) FILTER (WHERE action_type = 'profile_view') AS profiles_opened,
+          COUNT(*) FILTER (WHERE action_type IN ('search_query', 'search_completed')) AS searches,
+          COUNT(*) FILTER (WHERE action_type = 'tweet_bookmark') AS bookmarks,
+          COUNT(*) FILTER (WHERE action_type = 'tweet_share') AS shares_sent,
+          COUNT(*) FILTER (WHERE action_type = 'media_view') AS media_views,
+          COUNT(*) FILTER (WHERE action_type = 'content_pause') AS content_pauses,
+          COUNT(*) FILTER (WHERE action_type = 'content_replay') AS content_replays,
+          COUNT(*) FILTER (WHERE action_type = 'content_fullscreen') AS fullscreen_opens,
+          COUNT(*) FILTER (WHERE action_type = 'refresh') AS refreshes,
+          COALESCE(SUM(duration_ms) FILTER (WHERE action_type = 'time_spent'), 0) AS total_time_ms,
+          COALESCE(AVG(duration_ms) FILTER (WHERE action_type = 'time_spent'), 0) AS avg_time_spent_ms
+        FROM user_behavior_data
+        WHERE user_id::text = :userId AND created_at >= :startDate
+      `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
+      sequelize.query(`
+        SELECT
+          COUNT(DISTINCT family_id) AS login_sessions,
+          COUNT(DISTINCT COALESCE(device_id, family_id::text)) AS devices,
+          MAX(COALESCE(last_used_at, created_at)) AS last_session_at
+        FROM sessions
+        WHERE user_id::text = :userId AND created_at >= :startDate
+      `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
+      sequelize.query(`${audienceEventsCte}
+        SELECT
+          COALESCE(SUM(event_count), 0) AS total_interactions,
+          COUNT(*) AS unique_users,
+          COUNT(*) FILTER (WHERE event_count >= 2) AS returning_users,
+          COALESCE(AVG(event_count), 0) AS interactions_per_user
+        FROM audience_users
+      `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
+      sequelize.query(`${audienceEventsCte}
+        SELECT
+          CASE
+            WHEN u.declared_age BETWEEN 13 AND 17 THEN '13-17'
+            WHEN u.declared_age BETWEEN 18 AND 24 THEN '18-24'
+            WHEN u.declared_age BETWEEN 25 AND 34 THEN '25-34'
+            WHEN u.declared_age BETWEEN 35 AND 44 THEN '35-44'
+            WHEN u.declared_age BETWEEN 45 AND 54 THEN '45-54'
+            ELSE '55+'
+          END AS label,
+          COUNT(*) AS audience_count
+        FROM audience_users au JOIN users u ON u.id = au.actor_id
+        WHERE u.demographics_validated_at IS NOT NULL AND u.declared_age IS NOT NULL
+        GROUP BY 1
+        HAVING COUNT(*) >= 5
+        ORDER BY MIN(u.declared_age)
+      `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
+      sequelize.query(`${audienceEventsCte}
+        SELECT COUNT(*) AS declared_users
+        FROM audience_users au JOIN users u ON u.id = au.actor_id
+        WHERE u.demographics_validated_at IS NOT NULL AND u.declared_age IS NOT NULL
+      `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
+      sequelize.query(`${audienceEventsCte}, latest_locations AS (
+        SELECT DISTINCT ON (user_id) user_id, country_code, country, region
+        FROM user_location_events
+        WHERE permission_status = 'granted' AND country_code IS NOT NULL
+        ORDER BY user_id, captured_at DESC
+      )
+        SELECT
+          COALESCE(NULLIF(ll.country, ''), ll.country_code) AS label,
+          ll.country_code,
+          COUNT(*) AS audience_count
+        FROM audience_users au JOIN latest_locations ll ON ll.user_id = au.actor_id
+        GROUP BY ll.country_code, ll.country
+        HAVING COUNT(*) >= 5
+        ORDER BY audience_count DESC, label
+        LIMIT 12
+      `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
+      sequelize.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE permission_status = 'granted') AS captured_sessions,
+          COUNT(DISTINCT country_code) FILTER (WHERE permission_status = 'granted' AND country_code IS NOT NULL) AS countries,
+          COUNT(DISTINCT region) FILTER (WHERE permission_status = 'granted' AND region IS NOT NULL) AS regions,
+          MAX(captured_at) FILTER (WHERE permission_status = 'granted') AS last_captured_at
+        FROM user_location_events
+        WHERE user_id::text = :userId AND captured_at >= :startDate
+      `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
+      sequelize.query(`
+        SELECT
+          (SELECT COUNT(*) FROM stories s
+            WHERE s.user_id::text = :userId AND s.created_at >= :startDate AND s.deleted_at IS NULL) AS stories_created,
+          (SELECT COALESCE(SUM(s.views_count), 0) FROM stories s
+            WHERE s.user_id::text = :userId AND s.created_at >= :startDate AND s.deleted_at IS NULL) AS story_views,
+          (SELECT COALESCE(SUM(s.likes_count), 0) FROM stories s
+            WHERE s.user_id::text = :userId AND s.created_at >= :startDate AND s.deleted_at IS NULL) AS story_likes,
+          (SELECT COALESCE(SUM(pv.view_count), 0) FROM profile_views pv
+            WHERE pv.profile_id::text = :userId AND pv.viewed_on >= CAST(:startDate AS date)) AS canonical_profile_views,
+          (SELECT COUNT(*) FROM scheduled_tweets st
+            WHERE st.user_id::text = :userId AND st.created_at >= :startDate) AS scheduled_posts,
+          (SELECT COUNT(*) FROM scheduled_tweets st
+            WHERE st.user_id::text = :userId AND st.created_at >= :startDate AND st.status = 'published') AS published_scheduled_posts,
+          (SELECT COUNT(*) FROM paid_contents pc
+            WHERE pc.creator_id::text = :userId AND pc.created_at >= :startDate) AS paid_offers,
+          (SELECT COUNT(*) FROM content_purchases cp
+            WHERE cp.creator_id::text = :userId AND cp.created_at >= :startDate AND cp.refunded_at IS NULL) AS paid_sales,
+          (SELECT COALESCE(SUM(cp.creator_net_twc), 0) FROM content_purchases cp
+            WHERE cp.creator_id::text = :userId AND cp.created_at >= :startDate AND cp.refunded_at IS NULL) AS paid_revenue_twc,
+          (SELECT COALESCE(AVG(labels.quality_score), 0)
+            FROM tweet_llm_labels labels JOIN tweets t ON t.id::text = labels.tweet_id::text
+            WHERE t.user_id::text = :userId AND t.created_at >= :startDate AND t.deleted_at IS NULL) AS average_quality_score,
+          (SELECT COALESCE(AVG(labels.toxicity_score), 0)
+            FROM tweet_llm_labels labels JOIN tweets t ON t.id::text = labels.tweet_id::text
+            WHERE t.user_id::text = :userId AND t.created_at >= :startDate AND t.deleted_at IS NULL) AS average_toxicity_score,
+          (SELECT COALESCE(SUM(tq.total_views), 0) FROM tweet_queue tq
+            WHERE tq.user_id::text = :userId AND tq.queued_at >= :startDate) AS algorithmic_views,
+          (SELECT COALESCE(SUM(tq.evaluation_count), 0) FROM tweet_queue tq
+            WHERE tq.user_id::text = :userId AND tq.queued_at >= :startDate) AS algorithm_evaluations
+      `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
+      User.findByPk(userId, {
+        attributes: ['declared_age', 'birth_day', 'birth_month', 'demographics_validated_at', 'location_consent_status'],
+      }),
+    ]);
+
+    const behavior = behaviorRows[0] || {};
+    const sessions = sessionRows[0] || {};
+    const audience = audienceRows[0] || {};
+    const location = locationRows[0] || {};
+    const content = contentRows[0] || {};
+    const uniqueAudience = int(audience.unique_users);
+    const declaredAudience = int(ageCoverageRows[0]?.declared_users);
+    const visibleAgeTotal = ageRows.reduce((sum, row) => sum + int(row.audience_count), 0);
+    const visibleCountryTotal = countryRows.reduce((sum, row) => sum + int(row.audience_count), 0);
+
+    res.json({
+      success: true,
+      data: {
+        userId,
+        timeframe,
+        behavior: {
+          activeDays: int(behavior.active_days),
+          loginSessions: int(sessions.login_sessions),
+          devices: int(sessions.devices),
+          lastSessionAt: sessions.last_session_at || null,
+          totalMinutes: Math.round(int(behavior.total_time_ms) / 60000),
+          averageActiveSeconds: Math.round(decimal(behavior.avg_time_spent_ms) / 1000),
+          screenViews: int(behavior.screen_views),
+          tweetsRead: int(behavior.tweets_read),
+          profilesOpened: int(behavior.profiles_opened),
+          searches: int(behavior.searches),
+          bookmarks: int(behavior.bookmarks),
+          sharesSent: int(behavior.shares_sent),
+          mediaViews: int(behavior.media_views),
+          contentPauses: int(behavior.content_pauses),
+          contentReplays: int(behavior.content_replays),
+          fullscreenOpens: int(behavior.fullscreen_opens),
+          refreshes: int(behavior.refreshes),
+        },
+        audience: {
+          uniqueEngagedUsers: uniqueAudience,
+          returningUsers: int(audience.returning_users),
+          totalInteractions: int(audience.total_interactions),
+          interactionsPerUser: decimal(audience.interactions_per_user),
+          demographicsCoverage: uniqueAudience >= 5 ? declaredAudience : 0,
+          ageBands: ageRows.map((row) => ({
+            label: row.label,
+            count: int(row.audience_count),
+            percentage: visibleAgeTotal > 0 ? Math.round(int(row.audience_count) * 1000 / visibleAgeTotal) / 10 : 0,
+          })),
+          countries: countryRows.map((row) => ({
+            label: row.label,
+            code: row.country_code,
+            count: int(row.audience_count),
+            percentage: visibleCountryTotal > 0 ? Math.round(int(row.audience_count) * 1000 / visibleCountryTotal) / 10 : 0,
+          })),
+          privacyThreshold: 5,
+        },
+        location: {
+          consentStatus: profile?.location_consent_status || 'undetermined',
+          capturedSessions: int(location.captured_sessions),
+          countries: int(location.countries),
+          regions: int(location.regions),
+          lastCapturedAt: location.last_captured_at || null,
+        },
+        content: {
+          storiesCreated: int(content.stories_created),
+          storyViews: int(content.story_views),
+          storyLikes: int(content.story_likes),
+          profileViews: int(content.canonical_profile_views),
+          scheduledPosts: int(content.scheduled_posts),
+          publishedScheduledPosts: int(content.published_scheduled_posts),
+          paidOffers: int(content.paid_offers),
+          paidSales: int(content.paid_sales),
+          paidRevenueTwc: decimal(content.paid_revenue_twc),
+          averageQualityScore: decimal(content.average_quality_score),
+          averageToxicityScore: decimal(content.average_toxicity_score),
+          algorithmicViews: int(content.algorithmic_views),
+          algorithmEvaluations: int(content.algorithm_evaluations),
+        },
+        privateProfile: {
+          declaredAge: isOwner ? profile?.declared_age ?? null : null,
+          birthDay: isOwner ? profile?.birth_day ?? null : null,
+          birthMonth: isOwner ? profile?.birth_month ?? null : null,
+          validated: isOwner && Boolean(profile?.demographics_validated_at),
+        },
+        generated_at: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error('Erreur recuperation insights approfondis:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la recuperation des insights approfondis',
+      error: error.message,
     });
   }
 });
@@ -800,7 +1125,13 @@ router.get('/:userId/engagement-breakdown', authenticateToken, async (req, res) 
           COUNT(DISTINCT tl.id) as likes_count,
           COUNT(DISTINCT tr.id) as retweets_count,
           COUNT(DISTINCT reply.id) as comments_count,
-          FLOOR(COUNT(DISTINCT tl.id) * 0.1) as shares_count
+          COALESCE((
+            SELECT COUNT(*)
+            FROM user_behavior_data ubd
+            WHERE ubd.target_id::text = t.id::text
+              AND ubd.target_type = 'tweet'
+              AND ubd.action_type = 'tweet_share'
+          ), 0) as shares_count
         FROM tweets t
         LEFT JOIN tweet_likes tl ON t.id = tl.tweet_id
         LEFT JOIN tweet_retweets tr ON t.id = tr.tweet_id
