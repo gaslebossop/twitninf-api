@@ -6,7 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
+const http = require('http');
 const { spawn } = require('child_process');
 
 const args = parseArgs(process.argv.slice(2));
@@ -15,6 +15,9 @@ const users = boundedInteger(args.users, 1, 10000, 'users');
 const durationSeconds = boundedInteger(args.duration, 5, 300, 'duration');
 const intervalMs = boundedInteger(args.interval, 1000, 60000, 'interval');
 const estimatedRps = Math.round((users * 1000 / intervalMs) * 100) / 100;
+const syntheticTweetCount = Math.max(1, Math.floor(users / 4));
+const likesPerUser = Math.min(2, syntheticTweetCount);
+const followsPerUser = users > 1 ? 1 : 0;
 const runPattern = /^capacity-\d{8}T\d{6}-[a-f0-9]{6}$/;
 
 if (!runPattern.test(runId)) throw new Error('run id invalide');
@@ -129,9 +132,15 @@ function parseFinalJson(output) {
   try { return JSON.parse(output); } catch { return null; }
 }
 
-function publicHealth() {
+function edgeHealth() {
   return new Promise((resolve) => {
-    const request = https.get('https://twitninf.duckdns.org/api/health', { timeout: 3000 }, (response) => {
+    // Depuis A, le domaine public ressort avec l'IP du VPS et peut etre refuse
+    // par l'anti-fraude. Sonder Nginx en loopback exerce bien le repartiteur et
+    // les backends, sans confondre un blocage d'IP source avec une panne.
+    const request = http.get({
+      host: '127.0.0.1', port: 80, path: '/api/health', timeout: 3000,
+      headers: { host: '51.210.11.74', 'user-agent': 'TwitninfLoadHealthGuard/1.0' },
+    }, (response) => {
       response.resume();
       resolve(response.statusCode === 200);
     });
@@ -147,9 +156,9 @@ function startHealthGuard() {
     if (checking || stopping) return;
     checking = true;
     try {
-      consecutiveFailures = await publicHealth() ? 0 : consecutiveFailures + 1;
+      consecutiveFailures = await edgeHealth() ? 0 : consecutiveFailures + 1;
       if (consecutiveFailures >= 3 && activeChild) {
-        stopReason = 'arret_urgence: API publique indisponible 3 fois de suite';
+        stopReason = 'arret_urgence: repartiteur API indisponible 3 fois de suite';
         stopping = true;
         save({ status: 'stopping', stage: 'arret_urgence', stop_reason: stopReason });
         activeChild.kill('SIGTERM');
@@ -167,7 +176,9 @@ async function cleanup() {
   const env = {
     ALLOW_SMALL_CAPACITY_CANARY: 'YES',
     CAPACITY_USERS: String(users),
-    CAPACITY_TWEETS: String(Math.max(1, Math.floor(users / 4))),
+    CAPACITY_TWEETS: String(syntheticTweetCount),
+    CAPACITY_LIKES_PER_USER: String(likesPerUser),
+    CAPACITY_FOLLOWS_PER_USER: String(followsPerUser),
     CONFIRM_CAPACITY_CLEANUP: runId,
   };
   try {
@@ -199,10 +210,10 @@ async function main() {
   const sharedEnv = {
     ALLOW_SMALL_CAPACITY_CANARY: 'YES',
     CAPACITY_USERS: String(users),
-    CAPACITY_TWEETS: String(Math.max(1, Math.floor(users / 4))),
-    CAPACITY_LIKES_PER_USER: '2',
+    CAPACITY_TWEETS: String(syntheticTweetCount),
+    CAPACITY_LIKES_PER_USER: String(likesPerUser),
     CAPACITY_RETWEETS_PER_USER: '1',
-    CAPACITY_FOLLOWS_PER_USER: '1',
+    CAPACITY_FOLLOWS_PER_USER: String(followsPerUser),
     CAPACITY_BEHAVIOR_PER_USER: '2',
   };
 
@@ -245,7 +256,7 @@ async function main() {
   } catch (error) {
     save({
       status: stopping ? 'aborted' : 'failed',
-      error: String(error.stderr || error.stack || error.message).slice(-5000),
+      error: stopping ? null : String(error.stderr || error.stack || error.message).slice(-5000),
       stop_reason: stopReason || state.stop_reason,
     });
   } finally {
