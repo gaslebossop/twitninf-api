@@ -152,6 +152,25 @@ def healthy_replicas(processes: dict[str, dict[str, Any]] | None = None) -> list
     ]
 
 
+def configured_replicas(processes: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Répliques présentes dans Nginx et encore en ligne dans PM2, sans I/O DB."""
+    processes = processes or pm2_processes()
+    try:
+        content = UPSTREAM_INCLUDE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        content = ""
+    configured = {
+        line.rsplit("#", 1)[1].strip().lower()
+        for line in content.splitlines()
+        if "#" in line
+    }
+    return [
+        replica
+        for replica in REPLICAS
+        if replica["label"] in configured and is_pm2_online(processes, replica["name"])
+    ]
+
+
 def upstream_content(replicas: list[dict[str, Any]]) -> str:
     lines = ["# Géré automatiquement par twitninf-autoscaler. Ne pas éditer.\n"]
     for replica in sorted(replicas, key=lambda item: item["port"]):
@@ -482,6 +501,15 @@ def snapshot(active: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def status_once() -> int:
+    # Le panel interroge toutes les deux secondes. Cette lecture ne prend jamais
+    # le verrou du scaling et ne sonde pas /api/health (qui interroge la DB).
+    # Elle ne peut donc ni retarder ni annuler un cycle automatique.
+    active = configured_replicas(pm2_processes())
+    emit("status", **snapshot(active))
+    return 0
+
+
 def autoscale(action: str, replica_label: str | None = None) -> int:
     processes = pm2_processes()
     active = healthy_replicas(processes)
@@ -637,6 +665,13 @@ def main() -> int:
         action, replica_label = "delete", args.delete
     else:
         action, replica_label = "once", None
+
+    if action == "status":
+        try:
+            return status_once()
+        except Exception as error:
+            emit("fatal", error=str(error))
+            return 1
 
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w", encoding="ascii") as lock:
