@@ -22,6 +22,7 @@ yarn.lock
 *.ipa
 *.apk
 *.tar.gz
+reports/admin-load/
 src (2).zip
 src.zip
 

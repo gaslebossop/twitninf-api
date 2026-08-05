@@ -59,6 +59,7 @@ REPLICAS = (
     {"name": "twitninf-api-c3", "label": "c3", "port": 3007},
 )
 MAX_REPLICAS = min(env_int("AUTOSCALE_MAX_REPLICAS", 3), len(REPLICAS))
+REPLICA_BY_LABEL = {str(item["label"]): item for item in REPLICAS[:MAX_REPLICAS]}
 
 WINDOW_SECONDS = env_int("AUTOSCALE_WINDOW_SECONDS", 30)
 MIN_REQUESTS_PER_SIDE = env_int("AUTOSCALE_MIN_REQUESTS_PER_SIDE", 30)
@@ -285,6 +286,20 @@ def stop_replica(replica: dict[str, Any], remaining: list[dict[str, Any]]) -> bo
     return True
 
 
+def restart_replica(replica: dict[str, Any], active: list[dict[str, Any]]) -> bool:
+    """Retire une réplique du trafic, la redémarre puis la réinsère saine."""
+    remaining = [item for item in active if item != replica]
+    if not apply_upstreams(remaining):
+        return False
+    if DRAIN_SECONDS > 0:
+        time.sleep(DRAIN_SECONDS)
+    delete_replica(replica)
+    changed = start_replica(replica, remaining)
+    if changed:
+        emit("restarted", replica=replica["label"], port=replica["port"])
+    return changed
+
+
 def percentile(values: list[float], fraction: float) -> float:
     if not values:
         return 0.0
@@ -382,16 +397,26 @@ def snapshot(active: list[dict[str, Any]]) -> dict[str, Any]:
     a_stats = stats([item for item in attempts if item["side"] == "a"])
     b_stats = stats([item for item in attempts if item["side"] == "b"])
     all_stats = stats(attempts)
+    backend_addresses = {
+        "A": BASE_A_ADDR,
+        "B": BASE_B_ADDR,
+        **{item["label"].upper(): f"127.0.0.1:{item['port']}" for item in REPLICAS},
+    }
+    backends = {
+        label: stats([item for item in attempts if item["address"] == address])
+        for label, address in backend_addresses.items()
+    }
     return {
         "active_replicas": [item["label"] for item in active],
         "memory_available_mb": mem_available_mb(),
         "a": a_stats,
         "b": b_stats,
         "all": all_stats,
+        "backends": backends,
     }
 
 
-def autoscale(action: str) -> int:
+def autoscale(action: str, replica_label: str | None = None) -> int:
     processes = pm2_processes()
     active = healthy_replicas(processes)
     if not apply_upstreams(active):
@@ -404,6 +429,31 @@ def autoscale(action: str) -> int:
 
     state = load_state()
     now = time.time()
+
+    if action in {"start", "restart", "delete"}:
+        target = REPLICA_BY_LABEL.get(str(replica_label or "").lower())
+        if target is None:
+            emit("replica_action_rejected", action=action, replica=replica_label)
+            return 1
+        if action == "start":
+            if target in active:
+                emit("start_skipped", reason="réplique déjà active", replica=target["label"])
+                return 0
+            changed = start_replica(target, active)
+        elif action == "restart":
+            if target not in active:
+                emit("restart_skipped", reason="réplique inactive", replica=target["label"])
+                return 1
+            changed = restart_replica(target, active)
+        else:
+            if target not in active:
+                emit("delete_skipped", reason="réplique inactive", replica=target["label"])
+                return 0
+            changed = stop_replica(target, [item for item in active if item != target])
+        if changed:
+            state.update({"high_streak": 0, "low_streak": 0, "last_action": now})
+            save_state(state)
+        return 0 if changed else 1
 
     if action == "force-up":
         target = next((item for item in REPLICAS[:MAX_REPLICAS] if item not in active), None)
@@ -484,8 +534,24 @@ def main() -> int:
     group.add_argument("--status", action="store_true")
     group.add_argument("--force-up", action="store_true")
     group.add_argument("--force-down", action="store_true")
+    group.add_argument("--start", choices=sorted(REPLICA_BY_LABEL))
+    group.add_argument("--restart", choices=sorted(REPLICA_BY_LABEL))
+    group.add_argument("--delete", choices=sorted(REPLICA_BY_LABEL))
     args = parser.parse_args()
-    action = "status" if args.status else "force-up" if args.force_up else "force-down" if args.force_down else "once"
+    if args.status:
+        action, replica_label = "status", None
+    elif args.force_up:
+        action, replica_label = "force-up", None
+    elif args.force_down:
+        action, replica_label = "force-down", None
+    elif args.start:
+        action, replica_label = "start", args.start
+    elif args.restart:
+        action, replica_label = "restart", args.restart
+    elif args.delete:
+        action, replica_label = "delete", args.delete
+    else:
+        action, replica_label = "once", None
 
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w", encoding="ascii") as lock:
@@ -495,7 +561,7 @@ def main() -> int:
             emit("skipped", reason="une évaluation est déjà en cours")
             return 0
         try:
-            return autoscale(action)
+            return autoscale(action, replica_label)
         except Exception as error:
             emit("fatal", error=str(error))
             return 1

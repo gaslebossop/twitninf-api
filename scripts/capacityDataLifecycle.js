@@ -8,7 +8,7 @@
  * - confirmation contenant exactement le run id ;
  * - chaque ligne directement creee porte is_data_test + data_test_batch_id ;
  * - aucune interaction ne cible les utilisateurs/tweets existants ;
- * - le nettoyage refuse les lots incomplets ou ambigus ;
+ * - le nettoyage accepte un lot partiel interrompu, mais seulement via son marqueur exact ;
  * - jamais de mode "nettoyer tous les tests".
  *
  * Exemples :
@@ -365,8 +365,11 @@ async function cleanup(client) {
   }
   await ensureMarkerColumns(client);
   const before = await countsForRun(client);
-  if (before.users < 1 || before.tweets < 1) {
-    fail(`lot incomplet/ambigu, nettoyage refuse: ${JSON.stringify(before)}`);
+  // Un seed interrompu peut avoir cree seulement une partie du lot. Le marqueur
+  // exact du run reste la barriere de securite : on refuse uniquement quand il
+  // n'existe strictement rien a nettoyer pour ce marqueur.
+  if (Object.values(before).every((count) => Number(count) === 0)) {
+    fail(`aucune donnee synthetique trouvee pour ce lot: ${JSON.stringify(before)}`);
   }
 
   const deleted = {};

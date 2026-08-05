@@ -122,6 +122,8 @@ const paidContentRoutes = require('./routes/paidContentRoutes');
 const scheduledTweetRoutes = require('./routes/scheduledTweetRoutes');
 const insightsRoutes = require('./routes/insightsRoutes');
 const usernameMarketRoutes = require('./routes/usernameMarketRoutes');
+const infrastructureInternalRoutes = require('./routes/infrastructureInternalRoutes');
+const infrastructureAdminRoutes = require('./routes/infrastructureAdminRoutes');
 const scheduledTweetService = require('./services/scheduledTweetService');
 const creatorRadarService = require('./services/creatorRadarService');
 const impersonationWatchService = require('./services/impersonationWatchService');
@@ -376,6 +378,10 @@ app.get('/static/avatars/:filename', (req, res) => {
 });
 
 // Middleware global de vérification des bans (appliqué à toutes les routes API)
+// Canal prive A <-> B : secret interne obligatoire et aucune donnee utilisateur.
+// Il passe avant l'anti-fraude pour ne pas polluer ses compteurs.
+app.use('/api/internal/infrastructure', infrastructureInternalRoutes);
+
 app.use('/api', globalBanCheck);
 
 // ── Fraude : blocage instantané des IPs blacklistées (O(1) Redis GET) ────────
@@ -480,6 +486,7 @@ app.use('/api/admin/economy', economyAdminRoutes);
 
 app.use('/api/admin/similarity', similarityAdminRoutes);
 app.use('/api/admin/shadowban', shadowbanAdminRoutes);
+app.use('/api/admin/infrastructure', infrastructureAdminRoutes);
 
 // PolicierCongo vit exclusivement sur A. Les routes publiques sont épinglées
 // sur A dans nginx ; si quelqu'un contourne le proxy et appelle B directement,
