@@ -62,6 +62,10 @@ set_autoscaler_default AUTOSCALE_HIGH_STREAK 1
 set_autoscaler_default AUTOSCALE_OUT_COOLDOWN_SECONDS 5
 set_autoscaler_default AUTOSCALE_LOW_STREAK 120
 set_autoscaler_default AUTOSCALE_WARMUP_SECONDS 3
+set_autoscaler_default AUTOSCALE_MAX_REPLICAS 32
+set_autoscaler_default AUTOSCALE_REPLICA_MEMORY_BUDGET_MB 512
+set_autoscaler_default AUTOSCALE_MAX_SCALE_OUT_BATCH 4
+set_autoscaler_default AUTOSCALE_MIN_AVAILABLE_BEFORE_MB 3072
 
 if [[ ! -e /etc/nginx/twitninf-autoscale-upstreams.conf ]]; then
   printf '%s\n' '# Géré automatiquement par twitninf-autoscaler. Ne pas éditer.' \

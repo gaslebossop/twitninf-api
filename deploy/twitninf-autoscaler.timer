@@ -1,5 +1,5 @@
 [Unit]
-Description=Surveille A/B et ajoute C1-C3 si les deux saturent
+Description=Surveille A/B et ajoute des C tant que la RAM le permet
 
 [Timer]
 OnBootSec=2min

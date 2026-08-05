@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Autoscaling borné des répliques web TwitNinf sur le VPS A.
+"""Autoscaling borné par la RAM des répliques web TwitNinf sur le VPS A.
 
 Le premier scale-out exige que les backends A et B soient tous les deux en
 surcharge. Une fois l'épisode commencé, une surcharge globale persistante peut
-ajouter C2 puis C3. Les processus créés ont toujours NODE_ROLE=web et ne
+ajouter autant de C que la marge mémoire le permet. Les processus créés ont
+toujours NODE_ROLE=web et ne
 peuvent donc lancer ni PolicierCongo, ni cron, ni migration.
 """
 
@@ -53,13 +54,21 @@ LOCK_FILE = Path(
     os.environ.get("AUTOSCALE_LOCK_FILE", "/run/lock/twitninf-autoscaler.lock")
 )
 
-REPLICAS = (
-    {"name": "twitninf-api-c1", "label": "c1", "port": 3005},
-    {"name": "twitninf-api-c2", "label": "c2", "port": 3006},
-    {"name": "twitninf-api-c3", "label": "c3", "port": 3007},
+HARD_MAX_REPLICAS = 32
+MAX_REPLICAS = max(1, min(env_int("AUTOSCALE_MAX_REPLICAS", 32), HARD_MAX_REPLICAS))
+
+
+def replica_port(index: int) -> int:
+    # C1-C3 conservent leurs ports historiques. 3008-3099 ne sont pas réservés
+    # à TwitNinf (3010 est déjà utilisé), donc C4+ vit dans une plage isolée.
+    return 3004 + index if index <= 3 else 3100 + index
+
+
+REPLICAS = tuple(
+    {"name": f"twitninf-api-c{index}", "label": f"c{index}", "port": replica_port(index)}
+    for index in range(1, MAX_REPLICAS + 1)
 )
-MAX_REPLICAS = min(env_int("AUTOSCALE_MAX_REPLICAS", 3), len(REPLICAS))
-REPLICA_BY_LABEL = {str(item["label"]): item for item in REPLICAS[:MAX_REPLICAS]}
+REPLICA_BY_LABEL = {str(item["label"]): item for item in REPLICAS}
 
 WINDOW_SECONDS = env_int("AUTOSCALE_WINDOW_SECONDS", 30)
 MIN_REQUESTS_PER_SIDE = env_int("AUTOSCALE_MIN_REQUESTS_PER_SIDE", 30)
@@ -71,8 +80,10 @@ HIGH_STREAK_REQUIRED = env_int("AUTOSCALE_HIGH_STREAK", 1)
 LOW_STREAK_REQUIRED = env_int("AUTOSCALE_LOW_STREAK", 120)
 SCALE_OUT_COOLDOWN = env_int("AUTOSCALE_OUT_COOLDOWN_SECONDS", 5)
 SCALE_IN_COOLDOWN = env_int("AUTOSCALE_IN_COOLDOWN_SECONDS", 600)
-MIN_AVAILABLE_BEFORE_MB = env_int("AUTOSCALE_MIN_AVAILABLE_BEFORE_MB", 3500)
+MIN_AVAILABLE_BEFORE_MB = env_int("AUTOSCALE_MIN_AVAILABLE_BEFORE_MB", 3072)
 MIN_AVAILABLE_AFTER_MB = env_int("AUTOSCALE_MIN_AVAILABLE_AFTER_MB", 2500)
+REPLICA_MEMORY_BUDGET_MB = max(256, env_int("AUTOSCALE_REPLICA_MEMORY_BUDGET_MB", 512))
+MAX_SCALE_OUT_BATCH = max(1, min(env_int("AUTOSCALE_MAX_SCALE_OUT_BATCH", 4), 8))
 START_TIMEOUT_SECONDS = env_int("AUTOSCALE_START_TIMEOUT_SECONDS", 75)
 WARMUP_SECONDS = env_int("AUTOSCALE_WARMUP_SECONDS", 3)
 DRAIN_SECONDS = env_int("AUTOSCALE_DRAIN_SECONDS", 15)
@@ -136,7 +147,7 @@ def healthy_replicas(processes: dict[str, dict[str, Any]] | None = None) -> list
     processes = processes or pm2_processes()
     return [
         replica
-        for replica in REPLICAS[:MAX_REPLICAS]
+        for replica in REPLICAS
         if is_pm2_online(processes, replica["name"]) and health(replica)
     ]
 
@@ -189,6 +200,15 @@ def mem_available_mb() -> int:
         if line.startswith("MemAvailable:"):
             return int(line.split()[1]) // 1024
     raise RuntimeError("MemAvailable absent de /proc/meminfo")
+
+
+def additional_replica_capacity(active_count: int, available_mb: int | None = None) -> int:
+    """Nombre de C encore lançables sans entamer la réserve système."""
+    available_mb = mem_available_mb() if available_mb is None else available_mb
+    if available_mb < MIN_AVAILABLE_BEFORE_MB:
+        return 0
+    memory_slots = max(0, (available_mb - MIN_AVAILABLE_AFTER_MB) // REPLICA_MEMORY_BUDGET_MB)
+    return max(0, min(MAX_REPLICAS - active_count, memory_slots))
 
 
 def wait_until_ready(replica: dict[str, Any]) -> bool:
@@ -266,12 +286,14 @@ def start_replicas(replicas: list[dict[str, Any]], current: list[dict[str, Any]]
     if not replicas:
         return []
     available_before = mem_available_mb()
-    required_before = MIN_AVAILABLE_BEFORE_MB + 300 * (len(replicas) - 1)
-    if available_before < required_before:
+    capacity = additional_replica_capacity(len(current), available_before)
+    replicas = replicas[:capacity]
+    if not replicas:
         emit(
             "scale_out_blocked_memory",
             available_mb=available_before,
-            required_mb=required_before,
+            reserved_mb=MIN_AVAILABLE_AFTER_MB,
+            replica_budget_mb=REPLICA_MEMORY_BUDGET_MB,
         )
         return []
 
@@ -445,9 +467,14 @@ def snapshot(active: list[dict[str, Any]]) -> dict[str, Any]:
         label: stats([item for item in attempts if item["address"] == address])
         for label, address in backend_addresses.items()
     }
+    available_mb = mem_available_mb()
     return {
         "active_replicas": [item["label"] for item in active],
-        "memory_available_mb": mem_available_mb(),
+        "max_replicas": MAX_REPLICAS,
+        "additional_replica_capacity": additional_replica_capacity(len(active), available_mb),
+        "memory_available_mb": available_mb,
+        "memory_reserved_mb": MIN_AVAILABLE_AFTER_MB,
+        "replica_memory_budget_mb": REPLICA_MEMORY_BUDGET_MB,
         "a": a_stats,
         "b": b_stats,
         "all": all_stats,
@@ -495,9 +522,12 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
         return 0 if changed else 1
 
     if action == "force-up":
-        target = next((item for item in REPLICAS[:MAX_REPLICAS] if item not in active), None)
+        target = next((item for item in REPLICAS if item not in active), None)
         if target is None:
             emit("force_up_skipped", reason="maximum déjà actif", **report)
+            return 0
+        if additional_replica_capacity(len(active), report["memory_available_mb"]) <= 0:
+            emit("force_up_skipped", reason="marge mémoire insuffisante", **report)
             return 0
         changed = start_replica(target, active)
         if changed:
@@ -541,16 +571,23 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
         and len(active) < MAX_REPLICAS
         and since_action >= SCALE_OUT_COOLDOWN
     ):
-        missing = [item for item in REPLICAS[:MAX_REPLICAS] if item not in active]
+        missing = [item for item in REPLICAS if item not in active]
+        capacity = additional_replica_capacity(len(active), report["memory_available_mb"])
         catastrophic = (
             report["all"]["error_rate"] >= max(0.10, HIGH_ERROR_RATE * 2)
             or report["all"]["p95_seconds"] >= max(2.0, HIGH_P95_SECONDS * 2)
         )
-        # Quand A et B sont simultanement en forte detresse, attendre C1 puis
-        # C2 puis C3 prendrait plusieurs minutes. Les processus sont donc lances
-        # ensemble et ne rejoignent Nginx qu'apres leurs controles de sante.
-        targets = missing if catastrophic and a_high and b_high else missing[:1]
-        emit("scale_out_requested", replicas=[item["label"] for item in targets], catastrophic=catastrophic)
+        # En détresse forte, plusieurs C démarrent ensemble. Si la charge reste
+        # haute, les cycles suivants continuent jusqu'à la limite imposée par
+        # la RAM, jamais jusqu'à une liste C1-C3 codée en dur.
+        requested = MAX_SCALE_OUT_BATCH if catastrophic else 1
+        targets = missing[:min(requested, capacity)]
+        emit(
+            "scale_out_requested",
+            replicas=[item["label"] for item in targets],
+            catastrophic=catastrophic,
+            memory_capacity=capacity,
+        )
         changed = bool(start_replicas(targets, active))
     elif (
         active

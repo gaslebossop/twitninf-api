@@ -1,7 +1,10 @@
 # Les valeurs ci-dessous sont les valeurs de production par défaut. Copier ce
 # fichier vers /etc/default/twitninf-autoscaler pour les ajuster sans toucher au
-# code. Une évaluation a lieu toutes les 10 secondes.
-AUTOSCALE_MAX_REPLICAS=3
+# code. Une évaluation a lieu toutes les 5 secondes.
+# 32 est une garde de ports/processus; la vraie limite est calculée avec la RAM.
+AUTOSCALE_MAX_REPLICAS=32
+AUTOSCALE_REPLICA_MEMORY_BUDGET_MB=512
+AUTOSCALE_MAX_SCALE_OUT_BATCH=4
 AUTOSCALE_WINDOW_SECONDS=30
 AUTOSCALE_MIN_REQUESTS_PER_SIDE=30
 AUTOSCALE_HIGH_P95_SECONDS=0.8
@@ -16,7 +19,7 @@ AUTOSCALE_LOW_STREAK=120
 AUTOSCALE_IN_COOLDOWN_SECONDS=600
 
 # A doit conserver une marge pour le worker, PostgreSQL, Redis et Nginx.
-AUTOSCALE_MIN_AVAILABLE_BEFORE_MB=3500
+AUTOSCALE_MIN_AVAILABLE_BEFORE_MB=3072
 AUTOSCALE_MIN_AVAILABLE_AFTER_MB=2500
 AUTOSCALE_START_TIMEOUT_SECONDS=75
 AUTOSCALE_WARMUP_SECONDS=3

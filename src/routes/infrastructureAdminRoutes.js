@@ -14,7 +14,8 @@ const logger = require('../utils/logger');
 const execFileAsync = promisify(execFile);
 const router = express.Router();
 const RUN_ID_RE = /^capacity-\d{8}T\d{6}-[a-f0-9]{6}$/;
-const REPLICA_RE = /^c[1-3]$/;
+const REPLICA_RE = /^c(?:[1-9]|[12]\d|3[0-2])$/;
+const DEFAULT_MAX_REPLICAS = 32;
 const ACTIVE_JOB_STATES = new Set(['preparing', 'running', 'stopping']);
 const REPORT_DIRECTORY = path.resolve(__dirname, '../../reports/admin-load');
 const CURRENT_JOB_FILE = path.join(REPORT_DIRECTORY, 'current.json');
@@ -121,13 +122,13 @@ function trafficOf(autoscaler, id) {
 }
 
 function processFor(metrics, name, port) {
-  return metrics?.processes?.find((item) => item.name === name || item.port === port) || null;
+  return metrics?.processes?.find((item) => item.name === name || (port != null && item.port === port)) || null;
 }
 
 function configuredReplicas() {
   try {
     const content = fs.readFileSync(AUTOSCALER_UPSTREAMS, 'utf8');
-    return [...content.matchAll(/#\s*(c[1-3])\b/gi)].map((match) => match[1].toUpperCase());
+    return [...content.matchAll(/#\s*(c(?:[1-9]|[12]\d|3[0-2]))\b/gi)].map((match) => match[1].toUpperCase());
   } catch {
     return [];
   }
@@ -147,9 +148,18 @@ function buildNodes(local, remote, autoscaler) {
       process: processFor(remote, 'twitninf-api', 3001), traffic: trafficOf(autoscaler, 'B'),
     },
   ];
-  for (let index = 1; index <= 3; index += 1) {
+  const replicaIndexes = new Set([1, 2, 3]);
+  for (const id of active) {
+    const match = id.match(/^C(\d+)$/);
+    if (match) replicaIndexes.add(Number(match[1]));
+  }
+  for (const process of local?.processes || []) {
+    const match = String(process.name || '').match(/^twitninf-api-c(\d+)$/);
+    if (match) replicaIndexes.add(Number(match[1]));
+  }
+  for (const index of [...replicaIndexes].sort((a, b) => a - b)) {
     const id = `C${index}`;
-    const proc = processFor(local, `twitninf-api-c${index}`, 3004 + index);
+    const proc = processFor(local, `twitninf-api-c${index}`, null);
     nodes.push({
       id, label: id, kind: 'replica_elastique', host: 'A', online: active.has(id) && proc?.status === 'online',
       cpu_percent: proc?.cpu_percent ?? null,
@@ -174,7 +184,7 @@ function buildServices(local, remote, nodes) {
     { id: 'redis', name: 'Redis', nodes: active(local?.services?.redis) ? ['A'] : [], detail: 'Cache et coordination du cluster' },
     { id: 'recommender', name: 'Recommandeur Rust', nodes: active(local?.services?.recommender) ? ['A'] : [], detail: 'Classement neural et tracking CTR' },
     { id: 'fraud', name: 'Detection fraude Rust', nodes: active(local?.services?.fraud_detector) || active(local?.services?.fraud_dashboard) ? ['A'] : [], detail: 'Detection temps reel et tableau de bord fraude' },
-    { id: 'autoscaler', name: 'Autoscaler C1-C3', nodes: active(local?.services?.autoscaler) ? ['A'] : [], detail: 'Cree ou retire les replicas web' },
+    { id: 'autoscaler', name: 'Autoscaler C dynamiques', nodes: active(local?.services?.autoscaler) ? ['A'] : [], detail: 'Cree ou retire les replicas web selon la charge et la RAM' },
   ];
 }
 
@@ -217,6 +227,11 @@ router.get('/status', async (_req, res) => {
       services: buildServices(local, remote, nodes),
       cluster: {
         active_replicas: activeReplicas,
+        max_replicas: Number(autoscaler?.max_replicas || DEFAULT_MAX_REPLICAS),
+        additional_replica_capacity: Number(autoscaler?.additional_replica_capacity || 0),
+        memory_available_mb: Number(autoscaler?.memory_available_mb || local?.memory?.available_mb || 0),
+        memory_reserved_mb: Number(autoscaler?.memory_reserved_mb || 2500),
+        replica_memory_budget_mb: Number(autoscaler?.replica_memory_budget_mb || 512),
         total_requests_30s: Number(autoscaler?.all?.requests || 0),
         p95_ms: Math.round(Number(autoscaler?.all?.p95_seconds || 0) * 100000) / 100,
         error_rate: Number(autoscaler?.all?.error_rate || 0),
