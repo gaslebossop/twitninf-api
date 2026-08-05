@@ -20,6 +20,11 @@ const REPORT_DIRECTORY = path.resolve(__dirname, '../../reports/admin-load');
 const CURRENT_JOB_FILE = path.join(REPORT_DIRECTORY, 'current.json');
 const SUPERVISOR_SCRIPT = path.resolve(__dirname, '../../scripts/adminLoadSimulation.js');
 const AUTOSCALER = '/usr/local/sbin/twitninf-autoscaler';
+const AUTOSCALER_UPSTREAMS = '/etc/nginx/twitninf-autoscale-upstreams.conf';
+const AUTOSCALER_CACHE_MS = 1500;
+let lastAutoscalerStatus = null;
+let lastAutoscalerStatusAt = 0;
+let autoscalerStatusPromise = null;
 
 router.use(authenticateToken, requireAdminRole);
 
@@ -60,16 +65,32 @@ function parseAutoscalerOutput(output) {
 
 async function autoscalerStatus() {
   if (process.platform !== 'linux') return null;
-  try {
-    const { stdout } = await execFileAsync('/usr/bin/sudo', ['-n', AUTOSCALER, '--status'], {
-      timeout: 6000,
-      maxBuffer: 1024 * 1024,
-    });
-    return parseAutoscalerOutput(stdout);
-  } catch (error) {
-    logger.warn('[infrastructure] statut autoscaler indisponible', { error: error.message });
-    return null;
+  if (lastAutoscalerStatus && Date.now() - lastAutoscalerStatusAt < AUTOSCALER_CACHE_MS) {
+    return lastAutoscalerStatus;
   }
+  if (autoscalerStatusPromise) return autoscalerStatusPromise;
+  autoscalerStatusPromise = (async () => {
+    try {
+      const { stdout } = await execFileAsync('/usr/bin/sudo', ['-n', AUTOSCALER, '--status'], {
+        timeout: 6000,
+        maxBuffer: 1024 * 1024,
+      });
+      const status = parseAutoscalerOutput(stdout);
+      if (status) {
+        lastAutoscalerStatus = status;
+        lastAutoscalerStatusAt = Date.now();
+      }
+      // Pendant un scale-out le verrou est occupe. Garder le dernier etat connu
+      // evite d'afficher tous les C comme arretes pendant leur demarrage.
+      return status || lastAutoscalerStatus;
+    } catch (error) {
+      logger.warn('[infrastructure] statut autoscaler indisponible', { error: error.message });
+      return lastAutoscalerStatus;
+    } finally {
+      autoscalerStatusPromise = null;
+    }
+  })();
+  return autoscalerStatusPromise;
 }
 
 async function remoteNodeMetrics() {
@@ -103,8 +124,17 @@ function processFor(metrics, name, port) {
   return metrics?.processes?.find((item) => item.name === name || item.port === port) || null;
 }
 
+function configuredReplicas() {
+  try {
+    const content = fs.readFileSync(AUTOSCALER_UPSTREAMS, 'utf8');
+    return [...content.matchAll(/#\s*(c[1-3])\b/gi)].map((match) => match[1].toUpperCase());
+  } catch {
+    return [];
+  }
+}
+
 function buildNodes(local, remote, autoscaler) {
-  const active = new Set((autoscaler?.active_replicas || []).map((value) => String(value).toUpperCase()));
+  const active = new Set((autoscaler?.active_replicas || configuredReplicas()).map((value) => String(value).toUpperCase()));
   const nodes = [
     {
       id: 'A', label: 'VPS A', kind: 'principal', host: 'A', online: Boolean(local),
@@ -179,13 +209,14 @@ router.get('/status', async (_req, res) => {
       collectNodeMetrics(), remoteNodeMetrics(), autoscalerStatus(),
     ]);
     const nodes = buildNodes(local, remote, autoscaler);
+    const activeReplicas = nodes.filter((node) => node.kind === 'replica_elastique' && node.online).map((node) => node.id.toLowerCase());
     return res.json({
       success: true,
       collected_at: new Date().toISOString(),
       nodes,
       services: buildServices(local, remote, nodes),
       cluster: {
-        active_replicas: autoscaler?.active_replicas || [],
+        active_replicas: activeReplicas,
         total_requests_30s: Number(autoscaler?.all?.requests || 0),
         p95_ms: Math.round(Number(autoscaler?.all?.p95_seconds || 0) * 100000) / 100,
         error_rate: Number(autoscaler?.all?.error_rate || 0),

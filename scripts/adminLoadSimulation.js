@@ -149,16 +149,36 @@ function edgeHealth() {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForStableEdge() {
+  const deadline = Date.now() + 60_000;
+  let consecutiveSuccesses = 0;
+  save({ stage: 'attente_stabilite_repartiteur' });
+  while (Date.now() < deadline) {
+    if (stopping) throw new Error(stopReason || 'simulation arretee');
+    consecutiveSuccesses = await edgeHealth() ? consecutiveSuccesses + 1 : 0;
+    if (consecutiveSuccesses >= 3) return;
+    await sleep(1000);
+  }
+  throw new Error('repartiteur instable apres 60 secondes; simulation non lancee');
+}
+
 function startHealthGuard() {
   let consecutiveFailures = 0;
   let checking = false;
+  // L'autoscaler est autonome et peut lancer plusieurs processus Node a froid.
+  // Le garde laisse ce demarrage finir, sans jamais demander lui-meme un C.
+  const graceUntil = Date.now() + 45_000;
   const timer = setInterval(async () => {
-    if (checking || stopping) return;
+    if (checking || stopping || Date.now() < graceUntil) return;
     checking = true;
     try {
       consecutiveFailures = await edgeHealth() ? 0 : consecutiveFailures + 1;
-      if (consecutiveFailures >= 3 && activeChild) {
-        stopReason = 'arret_urgence: repartiteur API indisponible 3 fois de suite';
+      if (consecutiveFailures >= 5 && activeChild) {
+        stopReason = 'arret_urgence: repartiteur API indisponible 5 fois de suite';
         stopping = true;
         save({ status: 'stopping', stage: 'arret_urgence', stop_reason: stopReason });
         activeChild.kill('SIGTERM');
@@ -224,6 +244,9 @@ async function main() {
       ...sharedEnv,
       CONFIRM_CAPACITY_SEED: runId,
     });
+    if (stopping) throw new Error(stopReason || 'simulation arretee');
+
+    await waitForStableEdge();
     if (stopping) throw new Error(stopReason || 'simulation arretee');
 
     save({ status: 'running', stage: 'simulation' });

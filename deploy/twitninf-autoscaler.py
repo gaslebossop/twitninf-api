@@ -67,14 +67,14 @@ HIGH_P95_SECONDS = env_float("AUTOSCALE_HIGH_P95_SECONDS", 0.8)
 HIGH_ERROR_RATE = env_float("AUTOSCALE_HIGH_ERROR_RATE", 0.05)
 LOW_P95_SECONDS = env_float("AUTOSCALE_LOW_P95_SECONDS", 0.3)
 LOW_ERROR_RATE = env_float("AUTOSCALE_LOW_ERROR_RATE", 0.01)
-HIGH_STREAK_REQUIRED = env_int("AUTOSCALE_HIGH_STREAK", 2)
-LOW_STREAK_REQUIRED = env_int("AUTOSCALE_LOW_STREAK", 60)
-SCALE_OUT_COOLDOWN = env_int("AUTOSCALE_OUT_COOLDOWN_SECONDS", 60)
+HIGH_STREAK_REQUIRED = env_int("AUTOSCALE_HIGH_STREAK", 1)
+LOW_STREAK_REQUIRED = env_int("AUTOSCALE_LOW_STREAK", 120)
+SCALE_OUT_COOLDOWN = env_int("AUTOSCALE_OUT_COOLDOWN_SECONDS", 5)
 SCALE_IN_COOLDOWN = env_int("AUTOSCALE_IN_COOLDOWN_SECONDS", 600)
 MIN_AVAILABLE_BEFORE_MB = env_int("AUTOSCALE_MIN_AVAILABLE_BEFORE_MB", 3500)
 MIN_AVAILABLE_AFTER_MB = env_int("AUTOSCALE_MIN_AVAILABLE_AFTER_MB", 2500)
 START_TIMEOUT_SECONDS = env_int("AUTOSCALE_START_TIMEOUT_SECONDS", 75)
-WARMUP_SECONDS = env_int("AUTOSCALE_WARMUP_SECONDS", 15)
+WARMUP_SECONDS = env_int("AUTOSCALE_WARMUP_SECONDS", 3)
 DRAIN_SECONDS = env_int("AUTOSCALE_DRAIN_SECONDS", 15)
 MAX_LOG_BYTES = env_int("AUTOSCALE_MAX_LOG_BYTES", 32 * 1024 * 1024)
 
@@ -210,16 +210,8 @@ def delete_replica(replica: dict[str, Any]) -> None:
     pm2("delete", replica["name"], check=False)
 
 
-def start_replica(replica: dict[str, Any], current: list[dict[str, Any]]) -> bool:
-    available_before = mem_available_mb()
-    if available_before < MIN_AVAILABLE_BEFORE_MB:
-        emit(
-            "scale_out_blocked_memory",
-            available_mb=available_before,
-            required_mb=MIN_AVAILABLE_BEFORE_MB,
-        )
-        return False
-
+def launch_replica(replica: dict[str, Any]) -> bool:
+    """Lance un processus sans l'exposer encore dans Nginx."""
     delete_replica(replica)
     process_env = {
         "PORT": str(replica["port"]),
@@ -242,38 +234,85 @@ def start_replica(replica: dict[str, Any], current: list[dict[str, Any]]) -> boo
         process_env=process_env,
         check=False,
     )
-    if result.returncode != 0:
-        emit("scale_out_start_failed", replica=replica["label"], error=(result.stderr or result.stdout).strip())
-        delete_replica(replica)
-        return False
+    if result.returncode == 0:
+        return True
+    emit("scale_out_start_failed", replica=replica["label"], error=(result.stderr or result.stdout).strip())
+    delete_replica(replica)
+    return False
 
-    if not wait_until_ready(replica):
+
+def wait_until_replicas_ready(replicas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attend plusieurs demarrages en parallele, puis rend les C stables."""
+    deadline = time.monotonic() + START_TIMEOUT_SECONDS
+    first_ready_at: dict[str, float] = {}
+    ready: list[dict[str, Any]] = []
+    while time.monotonic() < deadline and len(ready) < len(replicas):
+        for replica in replicas:
+            label = str(replica["label"])
+            if replica in ready:
+                continue
+            if health(replica):
+                first_ready_at.setdefault(label, time.monotonic())
+                if time.monotonic() - first_ready_at[label] >= WARMUP_SECONDS:
+                    ready.append(replica)
+            else:
+                first_ready_at.pop(label, None)
+        if len(ready) < len(replicas):
+            time.sleep(1)
+    return ready
+
+
+def start_replicas(replicas: list[dict[str, Any]], current: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not replicas:
+        return []
+    available_before = mem_available_mb()
+    required_before = MIN_AVAILABLE_BEFORE_MB + 300 * (len(replicas) - 1)
+    if available_before < required_before:
+        emit(
+            "scale_out_blocked_memory",
+            available_mb=available_before,
+            required_mb=required_before,
+        )
+        return []
+
+    launched = [replica for replica in replicas if launch_replica(replica)]
+    ready = wait_until_replicas_ready(launched)
+    failed = [replica for replica in launched if replica not in ready]
+    for replica in failed:
         emit("scale_out_health_failed", replica=replica["label"])
         delete_replica(replica)
-        return False
+    if not ready:
+        return []
 
     available_after = mem_available_mb()
     if available_after < MIN_AVAILABLE_AFTER_MB:
         emit(
             "scale_out_rolled_back_memory",
-            replica=replica["label"],
+            replicas=[replica["label"] for replica in ready],
             available_mb=available_after,
             required_mb=MIN_AVAILABLE_AFTER_MB,
         )
-        delete_replica(replica)
-        return False
+        for replica in ready:
+            delete_replica(replica)
+        return []
 
-    if not apply_upstreams([*current, replica]):
-        delete_replica(replica)
-        return False
+    if not apply_upstreams([*current, *ready]):
+        for replica in ready:
+            delete_replica(replica)
+        return []
 
-    emit(
-        "scaled_out",
-        replica=replica["label"],
-        port=replica["port"],
-        available_mb=available_after,
-    )
-    return True
+    for replica in ready:
+        emit(
+            "scaled_out",
+            replica=replica["label"],
+            port=replica["port"],
+            available_mb=available_after,
+        )
+    return ready
+
+
+def start_replica(replica: dict[str, Any], current: list[dict[str, Any]]) -> bool:
+    return bool(start_replicas([replica], current))
 
 
 def stop_replica(replica: dict[str, Any], remaining: list[dict[str, Any]]) -> bool:
@@ -502,8 +541,17 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
         and len(active) < MAX_REPLICAS
         and since_action >= SCALE_OUT_COOLDOWN
     ):
-        target = next(item for item in REPLICAS[:MAX_REPLICAS] if item not in active)
-        changed = start_replica(target, active)
+        missing = [item for item in REPLICAS[:MAX_REPLICAS] if item not in active]
+        catastrophic = (
+            report["all"]["error_rate"] >= max(0.10, HIGH_ERROR_RATE * 2)
+            or report["all"]["p95_seconds"] >= max(2.0, HIGH_P95_SECONDS * 2)
+        )
+        # Quand A et B sont simultanement en forte detresse, attendre C1 puis
+        # C2 puis C3 prendrait plusieurs minutes. Les processus sont donc lances
+        # ensemble et ne rejoignent Nginx qu'apres leurs controles de sante.
+        targets = missing if catastrophic and a_high and b_high else missing[:1]
+        emit("scale_out_requested", replicas=[item["label"] for item in targets], catastrophic=catastrophic)
+        changed = bool(start_replicas(targets, active))
     elif (
         active
         and state["low_streak"] >= LOW_STREAK_REQUIRED

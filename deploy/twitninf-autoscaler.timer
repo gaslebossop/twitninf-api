@@ -3,7 +3,7 @@ Description=Surveille A/B et ajoute C1-C3 si les deux saturent
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=10s
+OnUnitActiveSec=5s
 AccuracySec=1s
 Unit=twitninf-autoscaler.service
 
