@@ -380,15 +380,21 @@ app.get('/static/avatars/:filename', (req, res) => {
 // Middleware global de vérification des bans (appliqué à toutes les routes API)
 // Canal prive A <-> B : secret interne obligatoire et aucune donnee utilisateur.
 // Il passe avant l'anti-fraude pour ne pas polluer ses compteurs.
+// /api/health ne contient aucune donnee utilisateur. Les deploiements et
+// l'autoscaler doivent pouvoir la sonder meme si leur IP est classee fraude.
+const exceptHealth = (middleware) => (req, res, next) => (
+  req.path === '/health' ? next() : middleware(req, res, next)
+);
+
 app.use('/api/internal/infrastructure', infrastructureInternalRoutes);
 
-app.use('/api', globalBanCheck);
+app.use('/api', exceptHealth(globalBanCheck));
 
 // ── Fraude : blocage instantané des IPs blacklistées (O(1) Redis GET) ────────
-app.use('/api', blockBannedIp);
+app.use('/api', exceptHealth(blockBannedIp));
 
 // ── Fraude : analyse asynchrone de chaque requête API (background, non-bloquant)
-app.use('/api', checkApiRequest);
+app.use('/api', exceptHealth(checkApiRequest));
 
 // Routes API - Version complète avec toutes les fonctionnalités
 app.use('/api/auth', authRoutes);
