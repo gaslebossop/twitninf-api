@@ -23,8 +23,10 @@
 
 const { UserWallet, VirtualCurrency } = require('../models');
 const EconomyLedger = require('./ledger');
+const { INTERNAL_CONVERSION_EXEMPTION } = require('./ledger');
+const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 const { roundTWC, toAmount } = require('./money');
-const { MIN_SPEND_TWC } = require('./constants');
+const { MIN_SPEND_TWC, TREASURY_USER_ID } = require('./constants');
 const logger = require('../utils/logger');
 
 /**
@@ -231,10 +233,28 @@ async function spendWithAutoConversion(
 
   const total = roundTWC(amount);
 
-  // Verrou pris AVANT toute lecture de solde : sans lui, deux paiements
-  // simultanés lisent le même solde, concluent tous les deux qu'il suffit, et
-  // le second découvre le découvert une fois les conversions faites.
-  const targetWallet = await EconomyLedger.lockWallet(userId, currencyId, dbTransaction);
+  // ⚠ LECTURE SANS VERROU, volontairement.
+  //
+  // Une première version prenait ici un `FOR UPDATE` sur le portefeuille cible,
+  // puis sur chaque monnaie source, avant de lancer les conversions. Intention :
+  // empêcher deux paiements simultanés de lire le même solde. Effet réel :
+  // l'achat mourait en `TimeoutError: unknown timed out` (retry.timeout = 3000
+  // dans `config/config.js`), un message qui ne dit rien du verrou.
+  //
+  // La raison : `exchangeCurrency` et `spendToTreasury` appellent tous deux
+  // `transactionAuthorizationService.authorize`, qui interroge le moteur Rust
+  // et écrit SUR UNE AUTRE CONNEXION. Garder des verrous de ligne pendant trois
+  // allers-retours vers un service externe fait tenir ces verrous des secondes
+  // entières, et bloque les requêtes concurrentes du même compte jusqu'au
+  // délai fatal. Ce n'est pas un hasard si le grand livre autorise TOUJOURS
+  // avant de verrouiller : c'est ce qui garde la durée de verrouillage courte.
+  //
+  // La sécurité ne repose donc pas sur un verrou tenu ici, mais sur ceux que
+  // prennent `exchangeCurrency` et `spendToTreasury` juste après leur
+  // autorisation — chacun relit et revérifie le solde sous verrou avant de
+  // débiter. Le pire cas d'une course reste un refus « solde insuffisant »,
+  // jamais un double débit.
+  const targetWallet = await EconomyLedger.findOrCreateWallet(userId, currencyId, dbTransaction);
   const available = toAmount(targetWallet.balance);
 
   if (available >= total) {
@@ -263,14 +283,26 @@ async function spendWithAutoConversion(
     });
   }
 
-  // Verrous pris dans un ordre déterministe (identifiant croissant) sur TOUTES
-  // les monnaies mobilisées, avant le moindre échange. Deux paiements
-  // concurrents qui puisent dans les deux mêmes monnaies les verrouilleraient
-  // sinon en ordre inverse l'un de l'autre — c'est la recette exacte d'un
-  // interblocage, et il n'apparaîtrait qu'en production sous charge.
-  for (const step of [...steps].sort((a, b) => String(a.currencyId).localeCompare(String(b.currencyId)))) {
-    await EconomyLedger.lockWallet(userId, step.currencyId, dbTransaction);
-  }
+  // ── L'UNIQUE autorisation du paiement, prise AVANT le premier verrou ───────
+  //
+  // Elle porte le montant TOTAL de la dépense, pas les conversions : c'est la
+  // sortie de valeur qui engage le compte. Les conversions qui suivent sont
+  // dispensées (`INTERNAL_CONVERSION_EXEMPTION`) — non par complaisance, mais
+  // parce qu'une autorisation demandée après nos verrous attendrait ces verrous
+  // pendant que nous attendons sa réponse. Voir le commentaire du symbole.
+  const targetPriceEurNow = await EconomyLedger.priceEurOf(currencyId, dbTransaction);
+  const preAuthorization = await transactionAuthorizationService.authorize({
+    userId,
+    transactionKind: 'purchase',
+    direction: 'outbound',
+    amount: total,
+    amountEur: roundTWC(total * targetPriceEurNow),
+    currencyId,
+    counterpartyUserId: TREASURY_USER_ID,
+    merchantId: meta?.itemType || 'twitninf',
+    itemType: meta?.itemType || 'purchase',
+    itemId: meta?.itemId || null
+  });
 
   const conversions = [];
   for (const step of steps) {
@@ -288,6 +320,7 @@ async function spendWithAutoConversion(
       {
         priceEur: freshSourcePrice,
         reason: 'auto_conversion_payment',
+        riskExemption: INTERNAL_CONVERSION_EXEMPTION,
         forItemType: meta?.itemType || null,
         forItemId: meta?.itemId || null
       }
@@ -304,7 +337,12 @@ async function spendWithAutoConversion(
   // Relecture du solde APRÈS conversions : c'est lui qui fait foi, pas la somme
   // des crédits annoncés. Les cours ayant pu bouger entre le plan et
   // l'exécution, on peut retomber quelques centimes en dessous.
-  const refreshed = await EconomyLedger.lockWallet(userId, currencyId, dbTransaction);
+  //
+  // Sans verrou ici non plus, et pour la même raison : `spendToTreasury` va de
+  // toute façon reverrouiller et revérifier ce solde juste après. Cette lecture
+  // ne sert qu'à produire un message utile — « les cours ont bougé » plutôt
+  // qu'un « solde insuffisant » incompréhensible après une conversion réussie.
+  const refreshed = await EconomyLedger.findOrCreateWallet(userId, currencyId, dbTransaction);
   const afterConversion = toAmount(refreshed.balance);
   if (afterConversion < total) {
     throw new InsufficientFundsError(
@@ -319,6 +357,9 @@ async function spendWithAutoConversion(
 
   const spend = await EconomyLedger.spendToTreasury(userId, currencyId, total, {
     ...meta,
+    // Consomme l'autorisation obtenue plus haut plutôt que d'en redemander une
+    // — nous tenons désormais des verrous, elle ne pourrait plus aboutir.
+    preAuthorization,
     metadata: {
       ...(meta?.metadata || {}),
       autoConverted: conversions.length > 0,

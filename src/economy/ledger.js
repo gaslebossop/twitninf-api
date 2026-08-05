@@ -26,6 +26,27 @@ const transactionAuthorizationService = require('../services/transactionAuthoriz
 const CASINO_RISK_EXEMPTION = Symbol('casino-risk-exemption');
 
 /**
+ * Dispense d'autorisation pour les conversions internes d'un paiement DÉJÀ
+ * autorisé (voir `multiCurrencyPayment`).
+ *
+ * ⚠ Ce n'est pas un trou dans le contrôle anti-fraude, c'est la seule façon de
+ * le faire fonctionner ici. Le moteur de risque écrit
+ * `UPDATE user_wallets ... WHERE user_id = :userId` — TOUS les portefeuilles du
+ * compte — sur une connexion distincte de la transaction appelante. Le grand
+ * livre autorise donc toujours AVANT de poser le moindre verrou. Cette règle ne
+ * tient que pour UNE opération : dès qu'on en enchaîne deux dans la même
+ * transaction, l'autorisation de la seconde attend les verrous posés par la
+ * première, qui attend elle-même cette autorisation. Blocage circulaire, mort
+ * au bout de `retry.timeout` (3 s) sur un `TimeoutError` muet.
+ *
+ * Ce que le risque perd est nul : une conversion déplace de la valeur entre
+ * deux portefeuilles DU MÊME compte, rien ne sort. L'événement qui engage
+ * vraiment le compte est la dépense sortante, et elle reste autorisée — pour
+ * son montant total, en amont de toute conversion.
+ */
+const INTERNAL_CONVERSION_EXEMPTION = Symbol('internal-conversion-exemption');
+
+/**
  * Grand livre : toutes les écritures passent ici (verrous pessimistes sur portefeuilles).
  */
 class EconomyLedger {
@@ -196,9 +217,15 @@ class EconomyLedger {
     const priceEur = await this.priceEurOf(currencyId, dbTransaction);
     const isCasino = String(meta?.itemType || '').toLowerCase() === 'casino'
       && meta?.riskExemption === CASINO_RISK_EXEMPTION;
-    const riskAuthorization = isCasino
-      ? { exempt: true, reason: 'casino_explicitly_excluded' }
-      : await transactionAuthorizationService.authorize({
+    // Autorisation obtenue en amont, AVANT tout verrou, par un appelant qui
+    // enchaîne plusieurs écritures dans la même transaction (paiement
+    // multi-monnaies). La redemander ici la ferait attendre les verrous déjà
+    // posés — voir `INTERNAL_CONVERSION_EXEMPTION`.
+    const riskAuthorization = meta?.preAuthorization
+      ? meta.preAuthorization
+      : isCasino
+        ? { exempt: true, reason: 'casino_explicitly_excluded' }
+        : await transactionAuthorizationService.authorize({
         userId,
         transactionKind: 'purchase',
         direction: 'outbound',
@@ -652,17 +679,22 @@ class EconomyLedger {
       throw new Error('Taux de change invalide');
     }
     const sourcePriceEur = await this.priceEurOf(fromCurrencyId, dbTransaction);
-    const riskAuthorization = await transactionAuthorizationService.authorize({
-      userId,
-      transactionKind: 'currency_exchange',
-      direction: 'outbound',
-      amount: debit,
-      amountEur: roundTWC(debit * sourcePriceEur),
-      currencyId: fromCurrencyId,
-      merchantId: 'internal_exchange',
-      itemType: 'currency_exchange',
-      itemId: toCurrencyId
-    });
+    // Conversion interne d'un paiement déjà autorisé : on ne redemande pas une
+    // autorisation qui se bloquerait sur nos propres verrous (voir
+    // `INTERNAL_CONVERSION_EXEMPTION`).
+    const riskAuthorization = extraMetadata?.riskExemption === INTERNAL_CONVERSION_EXEMPTION
+      ? { exempt: true, reason: 'internal_conversion_of_authorized_payment' }
+      : await transactionAuthorizationService.authorize({
+        userId,
+        transactionKind: 'currency_exchange',
+        direction: 'outbound',
+        amount: debit,
+        amountEur: roundTWC(debit * sourcePriceEur),
+        currencyId: fromCurrencyId,
+        merchantId: 'internal_exchange',
+        itemType: 'currency_exchange',
+        itemId: toCurrencyId
+      });
 
     const fromWallet = await this.lockWallet(userId, fromCurrencyId, dbTransaction);
     const fromBalance = toAmount(fromWallet.balance);
@@ -863,3 +895,4 @@ class EconomyLedger {
 
 EconomyLedger.CASINO_RISK_EXEMPTION = CASINO_RISK_EXEMPTION;
 module.exports = EconomyLedger;
+module.exports.INTERNAL_CONVERSION_EXEMPTION = INTERNAL_CONVERSION_EXEMPTION;
