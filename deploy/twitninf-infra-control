@@ -6,7 +6,7 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 if [[ $# -ne 1 ]]; then
-  echo "usage: twitninf-infra-control {web|db}-{start|stop|restart}|db-promote|status" >&2
+  echo "usage: twitninf-infra-control {web|db}-{start|stop|restart}|db-{promote|primary-a|stop-local|rejoin-from-a}|status" >&2
   exit 2
 fi
 
@@ -88,6 +88,71 @@ rejoin_a_from_b() {
   return 1
 }
 
+rejoin_b_from_a() {
+  local data_dir=/var/lib/postgresql/17/main auto_conf recovery
+  auto_conf="$data_dir/postgresql.auto.conf"
+  pg_ctlcluster "$PG_VERSION" "$PG_NAME" status >/dev/null 2>&1 && {
+    echo "B doit etre arrete avant pg_rewind" >&2
+    return 1
+  }
+  runuser -u postgres -- /usr/lib/postgresql/17/bin/pg_rewind \
+    --target-pgdata="$data_dir" \
+    --source-server="host=10.8.0.1 port=5432 user=replicator dbname=postgres passfile=/var/lib/postgresql/.pgpass" \
+    --write-recovery-conf --progress
+  sed -i '/^[[:space:]]*primary_slot_name[[:space:]]*=/d' "$auto_conf"
+  printf "%s\n" "primary_slot_name = 'vps_b'" >> "$auto_conf"
+  chown postgres:postgres "$auto_conf"
+  pg_ctlcluster "$PG_VERSION" "$PG_NAME" start
+  for _ in {1..30}; do
+    recovery=$(database_recovery_state)
+    [[ "$recovery" == t ]] && return 0
+    sleep 0.5
+  done
+  echo "B n'a pas rejoint A comme standby" >&2
+  return 1
+}
+
+stop_local_for_switchover() {
+  [[ "$(database_recovery_state)" == f ]] || {
+    echo "Le noeud a arreter n'est pas primaire" >&2
+    return 1
+  }
+  runuser -u postgres -- /usr/bin/psql -v ON_ERROR_STOP=1 -Atqc 'checkpoint' >/dev/null
+  local target_lsn
+  target_lsn=$(runuser -u postgres -- /usr/bin/psql -Atqc 'select pg_current_wal_lsn()')
+  [[ "$target_lsn" =~ ^[0-9A-F]+/[0-9A-F]+$ ]] || return 1
+  pg_ctlcluster --force "$PG_VERSION" "$PG_NAME" stop
+  printf '%s\n' "$target_lsn"
+}
+
+make_a_primary() {
+  [[ "$NODE_ID" == A ]] || { echo "failback disponible uniquement sur A" >&2; return 1; }
+  [[ "$(database_recovery_state)" == t ]] || { echo "A n'est pas standby" >&2; return 1; }
+  local target_lsn caught=false
+  target_lsn=$(remote_b db-stop-local)
+  [[ "$target_lsn" =~ ^[0-9A-F]+/[0-9A-F]+$ ]] || {
+    remote_b db-start >/dev/null 2>&1 || true
+    echo "LSN de bascule B invalide" >&2
+    return 1
+  }
+  for _ in {1..30}; do
+    caught=$(runuser -u postgres -- /usr/bin/psql -Atqc \
+      "select pg_wal_lsn_diff(pg_last_wal_replay_lsn(),'$target_lsn') >= 0" 2>/dev/null || true)
+    [[ "$caught" == t ]] && break
+    sleep 0.5
+  done
+  if [[ "$caught" != t ]]; then
+    remote_b db-start >/dev/null 2>&1 || true
+    echo "A n'a pas rejoue le dernier WAL de B" >&2
+    return 1
+  fi
+  pg_ctlcluster "$PG_VERSION" "$PG_NAME" promote
+  runuser -u postgres -- /usr/bin/psql -v ON_ERROR_STOP=1 -Atqc \
+    "select pg_create_physical_replication_slot('vps_b') where not exists (select 1 from pg_replication_slots where slot_name='vps_b')" \
+    >/dev/null
+  remote_b db-rejoin-from-a
+}
+
 web_online=false
 pid=$(web_pid || true)
 if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
@@ -151,6 +216,15 @@ case "$1" in
     ;;
   db-promote)
     promote_local_database
+    ;;
+  db-stop-local)
+    stop_local_for_switchover
+    ;;
+  db-rejoin-from-a)
+    rejoin_b_from_a
+    ;;
+  db-primary-a)
+    make_a_primary
     ;;
   *)
     echo "commande refusee" >&2

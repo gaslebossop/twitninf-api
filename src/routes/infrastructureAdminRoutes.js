@@ -319,6 +319,7 @@ function buildServices(local, remote, nodes, systemA, systemB, autoscaler) {
         ? (systemA?.db_in_recovery ? 'Replica de lecture suivant B' : 'Primaire d ecriture courant')
         : 'Arrete. B est promu automatiquement si A etait primaire.',
       controllable: true, control_kind: 'database', control_node: 'A', online: databaseAOnline,
+      database_role: systemA?.db_in_recovery === true ? 'replica' : systemA?.db_in_recovery === false ? 'primary' : null,
     },
     {
       id: 'postgres-b', name: 'PostgreSQL B', nodes: databaseBOnline ? ['B'] : [],
@@ -326,6 +327,7 @@ function buildServices(local, remote, nodes, systemA, systemB, autoscaler) {
         ? (systemB?.db_in_recovery ? 'Replica de lecture et cache chaud' : 'Primaire d ecriture courant apres bascule')
         : 'Arrete',
       controllable: true, control_kind: 'database', control_node: 'B', online: databaseBOnline,
+      database_role: systemB?.db_in_recovery === true ? 'replica' : systemB?.db_in_recovery === false ? 'primary' : null,
     },
     { id: 'redis', name: 'Redis', nodes: active(local?.services?.redis) ? ['A'] : [], detail: 'Cache et coordination du cluster' },
     { id: 'recommender', name: 'Recommandeur Rust', nodes: active(local?.services?.recommender) ? ['A'] : [], detail: 'Classement neural et tracking CTR' },
@@ -398,7 +400,9 @@ function spawnSystemControl(node, target, action) {
   const running = currentSystemControl();
   if (running) return { accepted: false, control: running };
 
-  const commandName = `${target}-${action}`;
+  const commandName = target === 'db' && action === 'failback'
+    ? 'db-primary-a'
+    : `${target}-${action}`;
   const command = systemCommand(node, commandName);
   const child = spawn(command.executable, command.args, { detached: true, stdio: 'ignore' });
   const control = {
@@ -441,12 +445,18 @@ function rejectBusySystemControl(res, command) {
 function validateSystemAction(req, res, target) {
   const node = String(req.params.id || '').toUpperCase();
   const action = String(req.params.action || '').toLowerCase();
-  if (!['A', 'B'].includes(node) || !['start', 'stop', 'restart'].includes(action)) {
+  if (!['A', 'B'].includes(node) || !['start', 'stop', 'restart', 'failback'].includes(action)) {
     res.status(400).json({ success: false, message: 'Action ou serveur invalide' });
     return null;
   }
+  if (action === 'failback' && (target !== 'db' || node !== 'A')) {
+    res.status(400).json({ success: false, message: 'Le retour primaire est reserve a PostgreSQL A' });
+    return null;
+  }
   if (action !== 'start') {
-    const expected = `${action.toUpperCase()} ${target === 'db' ? 'DB' : 'NODE'} ${node}`;
+    const expected = action === 'failback'
+      ? 'PRIMARY DB A'
+      : `${action.toUpperCase()} ${target === 'db' ? 'DB' : 'NODE'} ${node}`;
     if (String(req.body?.confirmation || '') !== expected) {
       res.status(400).json({ success: false, message: `Tapez exactement ${expected}` });
       return null;
