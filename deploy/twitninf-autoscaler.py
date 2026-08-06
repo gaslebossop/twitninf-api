@@ -86,7 +86,7 @@ START_TIMEOUT_SECONDS = env_int("AUTOSCALE_START_TIMEOUT_SECONDS", 75)
 WARMUP_SECONDS = env_int("AUTOSCALE_WARMUP_SECONDS", 3)
 DRAIN_SECONDS = env_int("AUTOSCALE_DRAIN_SECONDS", 15)
 MAX_LOG_BYTES = env_int("AUTOSCALE_MAX_LOG_BYTES", 32 * 1024 * 1024)
-MANUAL_LOCK_WAIT_SECONDS = env_int("AUTOSCALE_MANUAL_LOCK_WAIT_SECONDS", 150)
+MANUAL_LOCK_WAIT_SECONDS = env_int("AUTOSCALE_MANUAL_LOCK_WAIT_SECONDS", 10)
 MANUAL_SCALE_OUT_PAUSE_SECONDS = env_int("AUTOSCALE_MANUAL_SCALE_OUT_PAUSE_SECONDS", 90)
 
 BASE_A_ADDR = "127.0.0.1:3001"
@@ -311,7 +311,9 @@ def launch_replica(replica: dict[str, Any]) -> bool:
     return False
 
 
-def wait_until_replicas_ready(replicas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def wait_until_replicas_ready(
+    replicas: list[dict[str, Any]], warmup_seconds: int = WARMUP_SECONDS
+) -> list[dict[str, Any]]:
     """Attend plusieurs demarrages en parallele, puis rend les C stables."""
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
     first_ready_at: dict[str, float] = {}
@@ -323,7 +325,7 @@ def wait_until_replicas_ready(replicas: list[dict[str, Any]]) -> list[dict[str, 
                 continue
             if health(replica):
                 first_ready_at.setdefault(label, time.monotonic())
-                if time.monotonic() - first_ready_at[label] >= WARMUP_SECONDS:
+                if time.monotonic() - first_ready_at[label] >= warmup_seconds:
                     ready.append(replica)
             else:
                 first_ready_at.pop(label, None)
@@ -332,7 +334,11 @@ def wait_until_replicas_ready(replicas: list[dict[str, Any]]) -> list[dict[str, 
     return ready
 
 
-def start_replicas(replicas: list[dict[str, Any]], current: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def start_replicas(
+    replicas: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+    warmup_seconds: int = WARMUP_SECONDS,
+) -> list[dict[str, Any]]:
     if not replicas:
         return []
     available_before = mem_available_mb()
@@ -348,7 +354,7 @@ def start_replicas(replicas: list[dict[str, Any]], current: list[dict[str, Any]]
         return []
 
     launched = [replica for replica in replicas if launch_replica(replica)]
-    ready = wait_until_replicas_ready(launched)
+    ready = wait_until_replicas_ready(launched, warmup_seconds)
     failed = [replica for replica in launched if replica not in ready]
     for replica in failed:
         emit("scale_out_health_failed", replica=replica["label"])
@@ -388,15 +394,21 @@ def start_replicas(replicas: list[dict[str, Any]], current: list[dict[str, Any]]
     return ready
 
 
-def start_replica(replica: dict[str, Any], current: list[dict[str, Any]]) -> bool:
-    return bool(start_replicas([replica], current))
+def start_replica(
+    replica: dict[str, Any], current: list[dict[str, Any]], warmup_seconds: int = 0
+) -> bool:
+    return bool(start_replicas([replica], current, warmup_seconds))
 
 
-def stop_replica(replica: dict[str, Any], remaining: list[dict[str, Any]]) -> bool:
+def stop_replica(
+    replica: dict[str, Any],
+    remaining: list[dict[str, Any]],
+    drain_seconds: int = DRAIN_SECONDS,
+) -> bool:
     if not apply_upstreams(remaining):
         return False
-    if DRAIN_SECONDS > 0:
-        time.sleep(DRAIN_SECONDS)
+    if drain_seconds > 0:
+        time.sleep(drain_seconds)
     delete_replica(replica)
     save_pm2_state()
     emit("scaled_in", replica=replica["label"], port=replica["port"])
@@ -408,8 +420,8 @@ def restart_replica(replica: dict[str, Any], active: list[dict[str, Any]]) -> bo
     remaining = [item for item in active if item != replica]
     if not apply_upstreams(remaining):
         return False
-    if DRAIN_SECONDS > 0:
-        time.sleep(DRAIN_SECONDS)
+    # Une action opérateur doit être immédiate. Nginx retire d'abord le C ;
+    # les rares requêtes encore en vol peuvent être rejouées sur A/B.
     delete_replica(replica)
     changed = start_replica(replica, remaining)
     if changed:
@@ -581,11 +593,6 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
         return 1
     delete_orphan_replicas(processes, active)
 
-    report = snapshot(active)
-    if action == "status":
-        emit("status", **report)
-        return 0
-
     state = load_state()
     now = time.time()
 
@@ -623,11 +630,15 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
                 save_state(state)
                 emit("delete_skipped", reason="réplique déjà inactive et désactivée", replica=target["label"])
                 return 0
-            changed = stop_replica(target, [item for item in active if item != target])
+            changed = stop_replica(
+                target, [item for item in active if item != target], drain_seconds=0
+            )
         if changed:
             state.update({"high_streak": 0, "low_streak": 0, "last_action": now})
         save_state(state)
         return 0 if changed else 1
+
+    report = snapshot(active)
 
     if action == "force-up":
         disabled = set(state.get("disabled_replicas", []))
@@ -653,7 +664,7 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
             return 0
         target = max(active, key=lambda item: item["port"])
         remaining = [item for item in active if item != target]
-        changed = stop_replica(target, remaining)
+        changed = stop_replica(target, remaining, drain_seconds=0)
         if changed:
             disabled = set(state.get("disabled_replicas", []))
             disabled.add(str(target["label"]))

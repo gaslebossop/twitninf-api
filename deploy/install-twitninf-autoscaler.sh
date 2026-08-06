@@ -67,7 +67,7 @@ set_autoscaler_default AUTOSCALE_REPLICA_MEMORY_BUDGET_MB 1536
 set_autoscaler_default AUTOSCALE_MAX_SCALE_OUT_BATCH 1
 set_autoscaler_default AUTOSCALE_MIN_AVAILABLE_BEFORE_MB 4608
 set_autoscaler_default AUTOSCALE_MIN_AVAILABLE_AFTER_MB 3072
-set_autoscaler_default AUTOSCALE_MANUAL_LOCK_WAIT_SECONDS 150
+set_autoscaler_default AUTOSCALE_MANUAL_LOCK_WAIT_SECONDS 10
 set_autoscaler_default AUTOSCALE_MANUAL_SCALE_OUT_PAUSE_SECONDS 90
 
 if [[ ! -e /etc/nginx/twitninf-autoscale-upstreams.conf ]]; then

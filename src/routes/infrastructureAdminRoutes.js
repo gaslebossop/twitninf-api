@@ -20,7 +20,7 @@ const ACTIVE_JOB_STATES = new Set(['preparing', 'running', 'stopping']);
 const REPORT_DIRECTORY = path.resolve(__dirname, '../../reports/admin-load');
 const CURRENT_JOB_FILE = path.join(REPORT_DIRECTORY, 'current.json');
 const AUTOSCALER_CONTROL_FILE = path.join(REPORT_DIRECTORY, 'autoscaler-control.json');
-const AUTOSCALER_CONTROL_MAX_AGE_MS = 5 * 60 * 1000;
+const AUTOSCALER_CONTROL_MAX_AGE_MS = 90 * 1000;
 const SUPERVISOR_SCRIPT = path.resolve(__dirname, '../../scripts/adminLoadSimulation.js');
 const AUTOSCALER = '/usr/local/sbin/twitninf-autoscaler';
 const AUTOSCALER_UPSTREAMS = '/etc/nginx/twitninf-autoscale-upstreams.conf';
@@ -59,7 +59,13 @@ function currentAutoscalerControl() {
   const control = readJson(AUTOSCALER_CONTROL_FILE);
   if (!control || control.status !== 'running') return null;
   const age = Date.now() - new Date(control.started_at || 0).getTime();
-  if (age > AUTOSCALER_CONTROL_MAX_AGE_MS || !processExists(control.pid)) return null;
+  let zombie = false;
+  if (process.platform === 'linux') {
+    try {
+      zombie = fs.readFileSync(`/proc/${Number(control.pid)}/stat`, 'utf8').split(' ')[2] === 'Z';
+    } catch { /* le processus a disparu */ }
+  }
+  if (age > AUTOSCALER_CONTROL_MAX_AGE_MS || !processExists(control.pid) || zombie) return null;
   return control;
 }
 
