@@ -7,7 +7,8 @@ const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const axios = require('axios');
 const express = require('express');
-const { authenticateToken, requireAdminRole } = require('../middleware/authMiddleware');
+const { authenticateToken } = require('../middleware/authMiddleware');
+const User = require('../models/User');
 const { collectNodeMetrics } = require('../services/infrastructureMetricsService');
 const logger = require('../utils/logger');
 
@@ -38,7 +39,34 @@ const lastSystemStatus = { A: null, B: null };
 const lastSystemStatusAt = { A: 0, B: 0 };
 const systemStatusPromises = { A: null, B: null };
 
-router.use(authenticateToken, requireAdminRole);
+async function requireInfrastructureAdminRole(req, res, next) {
+  const normalizeRole = (role) => role === 'super_admin' ? 'superadmin' : role;
+  const allowed = new Set(['admin', 'superadmin']);
+  const signedRole = normalizeRole(req.user?.role);
+  try {
+    const user = req.user?.id
+      ? await User.findByPk(req.user.id, { attributes: ['id', 'role'] })
+      : null;
+    if (!user || !allowed.has(normalizeRole(user.role))) {
+      return res.status(403).json({ success: false, message: 'Acces administrateur requis' });
+    }
+    req.user = { ...req.user, id: user.id, role: normalizeRole(user.role) };
+    return next();
+  } catch (error) {
+    // Le cockpit doit rester capable de rallumer PostgreSQL apres un arret
+    // manuel. Le JWT est deja authentifie cryptographiquement juste avant ;
+    // son role signe n'est accepte qu'en secours quand la lecture DB echoue.
+    if (allowed.has(signedRole)) {
+      logger.error('[infrastructure] controle admin en mode secours JWT, base indisponible', {
+        admin_id: req.user?.id, error: error.message,
+      });
+      return next();
+    }
+    return res.status(503).json({ success: false, message: 'Verification administrateur indisponible' });
+  }
+}
+
+router.use(authenticateToken, requireInfrastructureAdminRole);
 
 function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
