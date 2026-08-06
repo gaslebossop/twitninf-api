@@ -3,6 +3,13 @@ const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 require('dotenv').config();
 
+const databaseUsername = process.env.DB_USER || 'admin';
+const databasePassword = process.env.DB_PASSWORD;
+const databaseWriteHost = process.env.DB_HOST || 'localhost';
+const databaseWritePort = parseInt(process.env.DB_PORT, 10) || 5432;
+const databaseReadHost = String(process.env.DB_ORM_READ_HOST || '').trim();
+const databaseReadPort = parseInt(process.env.DB_ORM_READ_PORT, 10) || 5432;
+
 const config = {
   // Configuration du serveur
   server: {
@@ -20,11 +27,26 @@ const config = {
     // Repli sur la boucle locale, pas sur l'IP d'un serveur : celle d'un ancien
     // hôte traînait ici, ce qui la publie et fait surtout pointer une install
     // mal configurée vers une base qui n'est pas la sienne.
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT, 10) || 5432,
+    host: databaseWriteHost,
+    port: databaseWritePort,
     database: process.env.DB_NAME || 'twitninf',
-    username: process.env.DB_USER || 'admin',
-    password: process.env.DB_PASSWORD,
+    username: databaseUsername,
+    password: databasePassword,
+    ...(databaseReadHost ? {
+      // Sur le web de B uniquement : les SELECT d'une requete GET/HEAD vont
+      // sur le standby local. Les mutations et les flux hors HTTP gardent le
+      // primaire courant via le proxy d'ecriture.
+      replication: {
+        write: {
+          host: databaseWriteHost, port: databaseWritePort,
+          username: databaseUsername, password: databasePassword,
+        },
+        read: [{
+          host: databaseReadHost, port: databaseReadPort,
+          username: databaseUsername, password: databasePassword,
+        }],
+      },
+    } : {}),
     dialect: 'postgres',
     pool: {
       max: parseInt(process.env.DB_POOL_MAX, 10) || 10,

@@ -1,6 +1,7 @@
 const { Sequelize } = require('sequelize');
 const config = require('../config/config');
 const logger = require('../utils/logger');
+const { requestAllowsReplica } = require('../database/requestReadRouting');
 const {
   runSubscriberTweetCreditBackfill,
 } = require('../services/subscriberTweetCreditBackfill');
@@ -69,6 +70,20 @@ const UsernameReservationModule = require('./UsernameReservation');
 
 // Créer l'instance Sequelize
 const sequelize = new Sequelize(config.database);
+
+// Sequelize choisit son pool juste avant d'obtenir la connexion. Sur le noeud
+// B, forcer les SELECT des POST/PUT/DELETE et des jobs hors HTTP sur le writer
+// elimine le piege create-then-read ; seuls GET/HEAD peuvent utiliser le
+// standby configure par DB_ORM_READ_HOST.
+if (config.database.replication) {
+  const getConnection = sequelize.connectionManager.getConnection.bind(sequelize.connectionManager);
+  sequelize.connectionManager.getConnection = (options = {}) => {
+    if (options.type === 'SELECT' && !requestAllowsReplica()) {
+      return getConnection({ ...options, type: 'WRITE', useMaster: true });
+    }
+    return getConnection(options);
+  };
+}
 
 // Initialiser tous les modèles
 User.initUserModel(sequelize);

@@ -42,6 +42,11 @@ Le **même code** tourne partout ; c'est `NODE_ROLE` qui décide du comportement
   évite la saturation observée sur B avec l'ancien partage 50/50. Le mode
   `consistent` ne remappe qu'une petite partie des clients quand C apparaît ou
   disparaît, ce qui protège les sessions socket.io actives.
+- **Lectures sous semi-surcharge** : après deux fenêtres où A dépasse 400 ms de
+  p95 ou 2 % d'erreurs, GET/HEAD passent temporairement à 65 % sur B. B route
+  alors les SELECT ORM vers son PostgreSQL local ; mutations, transactions et
+  lectures effectuées pendant un POST/PUT/DELETE restent sur le writer courant.
+  Douze cycles calmes (une minute) rétablissent le partage normal.
 - **Épinglé sur A** : `/storage/`, `/static/`, toutes les routes
   `/api/**/policiercongo*`, et les cinq points d'entrée qui reçoivent un fichier
   — `/api/users/me/avatar`, `/api/users/me/banner`, `/api/tweets/video`,
@@ -69,6 +74,24 @@ Le **même code** tourne partout ; c'est `NODE_ROLE` qui décide du comportement
 > **PolicierCongo ne s'exécute que sur A.** Nginx épingle son chat, V3, admin et
 > debug sur A. B porte `POLICIERCONGO_LOCAL_ENABLED=false`, refuse un appel
 > direct avec 503 et n'initialise ni moteur ni provider Codex.
+
+## Continuité PostgreSQL
+
+Les API utilisent `127.0.0.1:6432`, un HAProxy local qui n'accepte comme
+backend que le PostgreSQL actuellement en écriture. Lors d'un arrêt de la base
+A demandé depuis le cockpit, A est arrêté proprement puis B est promu ; les
+pools Sequelize se reconnectent donc à B sans modification d'environnement.
+Si A est redémarré pendant que B est writer, `pg_rewind` le rattache comme
+standby au lieu de créer deux primaires.
+
+Cette bascule couvre PostgreSQL A et évite le split-brain grâce à l'arrêt propre
+préalable. Elle ne prétend pas résoudre l'extinction physique de tout le VPS A :
+le TLS, Nginx et le DNS public pointent encore sur A, donc un vrai failover de
+machine exige un point d'entrée externe ou une IP flottante avec fencing.
+
+Le standby B dispose de 1 Go de `shared_buffers`, d'un
+`effective_cache_size` de 2,5 Go et préchauffe les tables principales avec
+`pg_prewarm` après son redémarrage.
 
 ## Autoscaling des C sur A
 

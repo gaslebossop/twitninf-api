@@ -2,7 +2,7 @@
 set -euo pipefail
 
 case "${SSH_ORIGINAL_COMMAND:-}" in
-  status|web-start|web-stop|web-restart|db-start|db-stop|db-restart)
+  status|web-start|web-stop|web-restart|db-start|db-stop|db-restart|db-promote)
     exec sudo -n /usr/local/sbin/twitninf-infra-control "$SSH_ORIGINAL_COMMAND"
     ;;
   *)

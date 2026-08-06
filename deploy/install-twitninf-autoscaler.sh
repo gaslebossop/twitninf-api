@@ -69,11 +69,21 @@ set_autoscaler_default AUTOSCALE_MIN_AVAILABLE_BEFORE_MB 4608
 set_autoscaler_default AUTOSCALE_MIN_AVAILABLE_AFTER_MB 3072
 set_autoscaler_default AUTOSCALE_MANUAL_LOCK_WAIT_SECONDS 10
 set_autoscaler_default AUTOSCALE_MANUAL_SCALE_OUT_PAUSE_SECONDS 90
+set_autoscaler_default AUTOSCALE_READ_BIAS_P95_SECONDS 0.4
+set_autoscaler_default AUTOSCALE_READ_BIAS_ERROR_RATE 0.02
+set_autoscaler_default AUTOSCALE_READ_BIAS_HIGH_STREAK 2
+set_autoscaler_default AUTOSCALE_READ_BIAS_LOW_STREAK 12
 
 if [[ ! -e /etc/nginx/twitninf-autoscale-upstreams.conf ]]; then
   printf '%s\n' '# Géré automatiquement par twitninf-autoscaler. Ne pas éditer.' \
     > /etc/nginx/twitninf-autoscale-upstreams.conf
   chmod 0644 /etc/nginx/twitninf-autoscale-upstreams.conf
+fi
+
+if [[ ! -e /etc/nginx/twitninf-read-routing.map ]]; then
+  printf '%s\n' '# Gere automatiquement par twitninf-autoscaler.' \
+    > /etc/nginx/twitninf-read-routing.map
+  chmod 0644 /etc/nginx/twitninf-read-routing.map
 fi
 
 if ! nginx -t; then

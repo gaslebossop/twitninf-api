@@ -6,7 +6,7 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 if [[ $# -ne 1 ]]; then
-  echo "usage: twitninf-infra-control {web|db}-{start|stop|restart}|status" >&2
+  echo "usage: twitninf-infra-control {web|db}-{start|stop|restart}|db-promote|status" >&2
   exit 2
 fi
 
@@ -22,6 +22,9 @@ PG_CLUSTER=${PG_CLUSTER:-17/main}
 PG_VERSION=${PG_CLUSTER%%/*}
 PG_NAME=${PG_CLUSTER#*/}
 PM2_BIN=${PM2_BIN:-/usr/bin/pm2}
+NODE_ID=${NODE_ID:-A}
+REMOTE_CONTROL_KEY=${REMOTE_CONTROL_KEY:-/home/debian/.ssh/twitninf-infra-control}
+REMOTE_CONTROL_HOST=${REMOTE_CONTROL_HOST:-debian@10.8.0.2}
 
 pm2_as_user() {
   runuser -u "$PM2_USER" -- env PM2_HOME="$PM2_HOME" "$PM2_BIN" "$@"
@@ -31,20 +34,78 @@ web_pid() {
   pm2_as_user pid "$WEB_PROCESS" 2>/dev/null | tail -n 1 | tr -d '[:space:]'
 }
 
+database_recovery_state() {
+  runuser -u postgres -- /usr/bin/psql -Atqc 'select pg_is_in_recovery()' 2>/dev/null || true
+}
+
+remote_b() {
+  runuser -u "$PM2_USER" -- /usr/bin/ssh \
+    -i "$REMOTE_CONTROL_KEY" \
+    -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=yes \
+    "$REMOTE_CONTROL_HOST" "$1"
+}
+
+promote_local_database() {
+  pg_ctlcluster "$PG_VERSION" "$PG_NAME" status >/dev/null 2>&1 || {
+    echo "PostgreSQL local est arrete" >&2
+    return 1
+  }
+  local recovery
+  recovery=$(database_recovery_state)
+  [[ "$recovery" == t ]] && pg_ctlcluster "$PG_VERSION" "$PG_NAME" promote
+  for _ in {1..20}; do
+    recovery=$(database_recovery_state)
+    [[ "$recovery" == f ]] && break
+    sleep 0.5
+  done
+  [[ "$recovery" == f ]] || { echo "promotion PostgreSQL impossible" >&2; return 1; }
+  runuser -u postgres -- /usr/bin/psql -v ON_ERROR_STOP=1 -Atqc \
+    "select pg_create_physical_replication_slot('vps_a') where not exists (select 1 from pg_replication_slots where slot_name='vps_a')" \
+    >/dev/null
+}
+
+rejoin_a_from_b() {
+  local data_dir=/var/lib/postgresql/17/main auto_conf recovery
+  auto_conf="$data_dir/postgresql.auto.conf"
+  pg_ctlcluster "$PG_VERSION" "$PG_NAME" status >/dev/null 2>&1 && {
+    echo "A doit etre arrete avant pg_rewind" >&2
+    return 1
+  }
+  runuser -u postgres -- /usr/lib/postgresql/17/bin/pg_rewind \
+    --target-pgdata="$data_dir" \
+    --source-server="host=10.8.0.2 port=5432 user=replicator dbname=postgres passfile=/var/lib/postgresql/.pgpass" \
+    --write-recovery-conf --progress
+  sed -i '/^[[:space:]]*primary_slot_name[[:space:]]*=/d' "$auto_conf"
+  printf "%s\n" "primary_slot_name = 'vps_a'" >> "$auto_conf"
+  chown postgres:postgres "$auto_conf"
+  pg_ctlcluster "$PG_VERSION" "$PG_NAME" start
+  for _ in {1..30}; do
+    recovery=$(database_recovery_state)
+    [[ "$recovery" == t ]] && return 0
+    sleep 0.5
+  done
+  echo "A n'a pas rejoint B comme standby" >&2
+  return 1
+}
+
 web_online=false
 pid=$(web_pid || true)
 if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
   web_online=true
 fi
 db_online=false
+db_in_recovery=null
 if pg_ctlcluster "$PG_VERSION" "$PG_NAME" status >/dev/null 2>&1; then
   db_online=true
+  recovery=$(database_recovery_state)
+  [[ "$recovery" == t ]] && db_in_recovery=true
+  [[ "$recovery" == f ]] && db_in_recovery=false
 fi
 
 case "$1" in
   status)
-    printf '{"web_online":%s,"db_online":%s,"web_process":"%s","pg_cluster":"%s"}\n' \
-      "$web_online" "$db_online" "$WEB_PROCESS" "$PG_CLUSTER"
+    printf '{"web_online":%s,"db_online":%s,"db_in_recovery":%s,"web_process":"%s","pg_cluster":"%s","node":"%s"}\n' \
+      "$web_online" "$db_online" "$db_in_recovery" "$WEB_PROCESS" "$PG_CLUSTER" "$NODE_ID"
     ;;
   web-start)
     pm2_as_user start "$WEB_PROCESS" --update-env >/dev/null
@@ -56,13 +117,40 @@ case "$1" in
     pm2_as_user restart "$WEB_PROCESS" --update-env >/dev/null
     ;;
   db-start)
-    pg_ctlcluster "$PG_VERSION" "$PG_NAME" start
+    if [[ "$NODE_ID" == A ]] && remote_b status | grep -q '"db_in_recovery":false'; then
+      rejoin_a_from_b
+    else
+      pg_ctlcluster "$PG_VERSION" "$PG_NAME" start
+    fi
     ;;
   db-stop)
-    pg_ctlcluster --force "$PG_VERSION" "$PG_NAME" stop
+    if [[ "$NODE_ID" == A && "$db_in_recovery" == false ]]; then
+      pg_ctlcluster --force "$PG_VERSION" "$PG_NAME" stop
+      if ! remote_b db-promote; then
+        pg_ctlcluster "$PG_VERSION" "$PG_NAME" start
+        echo "B non promu, A a ete restaure" >&2
+        exit 1
+      fi
+    else
+      pg_ctlcluster --force "$PG_VERSION" "$PG_NAME" stop
+    fi
     ;;
   db-restart)
-    pg_ctlcluster --force "$PG_VERSION" "$PG_NAME" restart
+    if [[ "$NODE_ID" == A && "$db_in_recovery" == false ]]; then
+      pg_ctlcluster --force "$PG_VERSION" "$PG_NAME" stop
+      if remote_b db-promote; then
+        rejoin_a_from_b
+      else
+        pg_ctlcluster "$PG_VERSION" "$PG_NAME" start
+        echo "B non promu, A a ete restaure" >&2
+        exit 1
+      fi
+    else
+      pg_ctlcluster --force "$PG_VERSION" "$PG_NAME" restart
+    fi
+    ;;
+  db-promote)
+    promote_local_database
     ;;
   *)
     echo "commande refusee" >&2

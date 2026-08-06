@@ -12,6 +12,13 @@ AUTOSCALE_HIGH_ERROR_RATE=0.05
 AUTOSCALE_HIGH_STREAK=1
 AUTOSCALE_OUT_COOLDOWN_SECONDS=5
 
+# Avant la surcharge franche, deux cycles a 400 ms / 2 % d'erreurs sur A
+# font passer GET/HEAD a 65 % sur B. Douze cycles calmes retirent le biais.
+AUTOSCALE_READ_BIAS_P95_SECONDS=0.4
+AUTOSCALE_READ_BIAS_ERROR_RATE=0.02
+AUTOSCALE_READ_BIAS_HIGH_STREAK=2
+AUTOSCALE_READ_BIAS_LOW_STREAK=12
+
 # Une réplique est retirée à la fois après 10 minutes stables ou sans trafic.
 AUTOSCALE_LOW_P95_SECONDS=0.3
 AUTOSCALE_LOW_ERROR_RATE=0.01

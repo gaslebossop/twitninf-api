@@ -299,23 +299,32 @@ function buildNodes(local, remote, autoscaler, systemA, systemB) {
   return nodes;
 }
 
-function buildServices(local, remote, nodes, systemA, systemB) {
+function buildServices(local, remote, nodes, systemA, systemB, autoscaler) {
   const webNodes = nodes.filter((node) => node.online).map((node) => node.id);
   const active = (value) => value === 'active';
   const databaseAOnline = systemA?.db_online ?? active(local?.services?.postgresql);
   const databaseBOnline = systemB?.db_online ?? active(remote?.services?.postgresql);
   return [
-    { id: 'web', name: 'API web', nodes: webNodes, detail: 'Trafic utilisateur reparti par Nginx' },
+    {
+      id: 'web', name: 'API web', nodes: webNodes,
+      detail: autoscaler?.read_bias_active
+        ? 'Semi-surcharge A : GET/HEAD privilegies a 65 % sur B'
+        : 'Trafic normal : 65 % A / 35 % B',
+    },
     { id: 'edge', name: 'Nginx / load balancer', nodes: active(local?.services?.nginx) ? ['A'] : [], detail: 'Point d entree public' },
     { id: 'worker', name: 'Worker + PolicierCongo', nodes: processFor(local, 'twitninf-worker', 3004)?.status === 'online' ? ['A'] : [], detail: 'Analyse semantique et tendances' },
     {
-      id: 'postgres-primary', name: 'PostgreSQL primaire', nodes: databaseAOnline ? ['A'] : [],
-      detail: 'Base d ecriture. Son arret rend les mutations indisponibles.',
+      id: 'postgres-a', name: 'PostgreSQL A', nodes: databaseAOnline ? ['A'] : [],
+      detail: databaseAOnline
+        ? (systemA?.db_in_recovery ? 'Replica de lecture suivant B' : 'Primaire d ecriture courant')
+        : 'Arrete. B est promu automatiquement si A etait primaire.',
       controllable: true, control_kind: 'database', control_node: 'A', online: databaseAOnline,
     },
     {
-      id: 'postgres-replica', name: 'PostgreSQL replica', nodes: databaseBOnline ? ['B'] : [],
-      detail: 'Replica de lecture sur B pour les calculs lourds.',
+      id: 'postgres-b', name: 'PostgreSQL B', nodes: databaseBOnline ? ['B'] : [],
+      detail: databaseBOnline
+        ? (systemB?.db_in_recovery ? 'Replica de lecture et cache chaud' : 'Primaire d ecriture courant apres bascule')
+        : 'Arrete',
       controllable: true, control_kind: 'database', control_node: 'B', online: databaseBOnline,
     },
     { id: 'redis', name: 'Redis', nodes: active(local?.services?.redis) ? ['A'] : [], detail: 'Cache et coordination du cluster' },
@@ -457,7 +466,7 @@ router.get('/status', async (_req, res) => {
       success: true,
       collected_at: new Date().toISOString(),
       nodes,
-      services: buildServices(local, remote, nodes, systemA, systemB),
+      services: buildServices(local, remote, nodes, systemA, systemB, autoscaler),
       cluster: {
         active_replicas: activeReplicas,
         max_replicas: Number(autoscaler?.max_replicas || DEFAULT_MAX_REPLICAS),
@@ -468,6 +477,7 @@ router.get('/status', async (_req, res) => {
         total_requests_30s: Number(autoscaler?.all?.requests || 0),
         p95_ms: Math.round(Number(autoscaler?.all?.p95_seconds || 0) * 100000) / 100,
         error_rate: Number(autoscaler?.all?.error_rate || 0),
+        read_bias_active: Boolean(autoscaler?.read_bias_active),
         a_online: Boolean(nodes.find((node) => node.id === 'A')?.online),
         b_online: Boolean(nodes.find((node) => node.id === 'B')?.online),
       },

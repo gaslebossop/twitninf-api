@@ -1,0 +1,20 @@
+[Unit]
+Description=TwitNinf PostgreSQL role health endpoint
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+EnvironmentFile=-/etc/default/twitninf-postgres-role-health
+ExecStart=/usr/local/sbin/twitninf-postgres-role-health
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

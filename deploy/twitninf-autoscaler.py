@@ -42,6 +42,12 @@ UPSTREAM_INCLUDE = Path(
         "/etc/nginx/twitninf-autoscale-upstreams.conf",
     )
 )
+READ_ROUTING_INCLUDE = Path(
+    os.environ.get(
+        "AUTOSCALE_READ_ROUTING_INCLUDE",
+        "/etc/nginx/twitninf-read-routing.map",
+    )
+)
 METRICS_LOG = Path(
     os.environ.get("AUTOSCALE_METRICS_LOG", "/var/log/nginx/twitninf-upstream.log")
 )
@@ -72,6 +78,10 @@ WINDOW_SECONDS = env_int("AUTOSCALE_WINDOW_SECONDS", 30)
 MIN_REQUESTS_PER_SIDE = env_int("AUTOSCALE_MIN_REQUESTS_PER_SIDE", 30)
 HIGH_P95_SECONDS = env_float("AUTOSCALE_HIGH_P95_SECONDS", 0.8)
 HIGH_ERROR_RATE = env_float("AUTOSCALE_HIGH_ERROR_RATE", 0.05)
+READ_BIAS_P95_SECONDS = env_float("AUTOSCALE_READ_BIAS_P95_SECONDS", 0.4)
+READ_BIAS_ERROR_RATE = env_float("AUTOSCALE_READ_BIAS_ERROR_RATE", 0.02)
+READ_BIAS_HIGH_STREAK = env_int("AUTOSCALE_READ_BIAS_HIGH_STREAK", 2)
+READ_BIAS_LOW_STREAK = env_int("AUTOSCALE_READ_BIAS_LOW_STREAK", 12)
 LOW_P95_SECONDS = env_float("AUTOSCALE_LOW_P95_SECONDS", 0.3)
 LOW_ERROR_RATE = env_float("AUTOSCALE_LOW_ERROR_RATE", 0.01)
 HIGH_STREAK_REQUIRED = env_int("AUTOSCALE_HIGH_STREAK", 1)
@@ -236,6 +246,42 @@ def apply_upstreams(replicas: list[dict[str, Any]]) -> bool:
         return False
 
     emit("upstreams_applied", replicas=[item["label"] for item in replicas])
+    return True
+
+
+def read_bias_content(enabled: bool) -> str:
+    lines = ["# Gere automatiquement par twitninf-autoscaler.\n"]
+    if enabled:
+        lines.extend(["GET twitninf_api_read;\n", "HEAD twitninf_api_read;\n"])
+    return "".join(lines)
+
+
+def read_bias_enabled() -> bool:
+    try:
+        return "twitninf_api_read" in READ_ROUTING_INCLUDE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+
+
+def apply_read_bias(enabled: bool) -> bool:
+    new_content = read_bias_content(enabled)
+    old_content = READ_ROUTING_INCLUDE.read_text(encoding="utf-8") if READ_ROUTING_INCLUDE.exists() else ""
+    if new_content == old_content:
+        return True
+    atomic_write(READ_ROUTING_INCLUDE, new_content)
+    tested = run(["/usr/sbin/nginx", "-t"], check=False)
+    if tested.returncode != 0:
+        atomic_write(READ_ROUTING_INCLUDE, old_content)
+        emit("read_bias_nginx_rejected", error=(tested.stderr or tested.stdout).strip())
+        return False
+    reloaded = run(["/usr/bin/systemctl", "reload", "nginx"], check=False)
+    if reloaded.returncode != 0:
+        atomic_write(READ_ROUTING_INCLUDE, old_content)
+        run(["/usr/sbin/nginx", "-t"], check=False)
+        run(["/usr/bin/systemctl", "reload", "nginx"], check=False)
+        emit("read_bias_reload_failed", error=(reloaded.stderr or reloaded.stdout).strip())
+        return False
+    emit("read_bias_changed", enabled=enabled)
     return True
 
 
@@ -506,6 +552,13 @@ def overloaded(summary: dict[str, Any], minimum: int) -> bool:
     )
 
 
+def semi_overloaded(summary: dict[str, Any], minimum: int) -> bool:
+    return summary["requests"] >= minimum and (
+        summary["p95_seconds"] >= READ_BIAS_P95_SECONDS
+        or summary["error_rate"] >= READ_BIAS_ERROR_RATE
+    )
+
+
 def load_state() -> dict[str, Any]:
     defaults = {
         "high_streak": 0,
@@ -513,6 +566,8 @@ def load_state() -> dict[str, Any]:
         "last_action": 0.0,
         "disabled_replicas": [],
         "scale_out_suppressed_until": 0.0,
+        "read_bias_high_streak": 0,
+        "read_bias_low_streak": 0,
     }
     try:
         loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -563,6 +618,7 @@ def snapshot(active: list[dict[str, Any]]) -> dict[str, Any]:
         "b": b_stats,
         "all": all_stats,
         "backends": backends,
+        "read_bias_active": read_bias_enabled(),
     }
 
 
@@ -680,6 +736,23 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
     a_high = overloaded(report["a"], MIN_REQUESTS_PER_SIDE)
     b_high = overloaded(report["b"], MIN_REQUESTS_PER_SIDE)
     overall_high = overloaded(report["all"], MIN_REQUESTS_PER_SIDE * 2)
+    a_semi_high = semi_overloaded(report["a"], MIN_REQUESTS_PER_SIDE)
+    wants_read_bias = a_semi_high and not b_high
+    if wants_read_bias:
+        state["read_bias_high_streak"] = int(state.get("read_bias_high_streak", 0)) + 1
+        state["read_bias_low_streak"] = 0
+    else:
+        state["read_bias_high_streak"] = 0
+        state["read_bias_low_streak"] = int(state.get("read_bias_low_streak", 0)) + 1
+    bias_active = read_bias_enabled()
+    if not bias_active and state["read_bias_high_streak"] >= READ_BIAS_HIGH_STREAK:
+        if apply_read_bias(True):
+            bias_active = True
+            state["read_bias_high_streak"] = 0
+    elif bias_active and state["read_bias_low_streak"] >= READ_BIAS_LOW_STREAK:
+        if apply_read_bias(False):
+            bias_active = False
+            state["read_bias_low_streak"] = 0
     # Ajouter un C soulage le cluster dès que le trafic global est en détresse,
     # même si A ou B n'a pas atteint seul le minimum d'échantillons.
     wants_scale_out = overall_high
@@ -742,6 +815,8 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
         a_overloaded=a_high,
         b_overloaded=b_high,
         overall_overloaded=overall_high,
+        a_semi_overloaded=a_semi_high,
+        read_bias_active=bias_active,
         high_streak=state["high_streak"],
         low_streak=state["low_streak"],
         changed=changed,

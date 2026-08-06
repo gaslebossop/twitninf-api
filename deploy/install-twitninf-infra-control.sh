@@ -24,11 +24,14 @@ install -o root -g root -m 0755 "$repo_dir/deploy/twitninf-infra-control" /usr/l
 install -o root -g root -m 0755 "$repo_dir/deploy/twitninf-remote-control" /usr/local/sbin/twitninf-remote-control
 
 cat > /etc/default/twitninf-infra-control <<EOF
+NODE_ID=${node^^}
 WEB_PROCESS=$web_process
 PM2_USER=debian
 PM2_HOME=/home/debian/.pm2
 PM2_BIN=/usr/bin/pm2
 PG_CLUSTER=17/main
+REMOTE_CONTROL_KEY=/home/debian/.ssh/twitninf-infra-control
+REMOTE_CONTROL_HOST=debian@10.8.0.2
 EOF
 chown root:root /etc/default/twitninf-infra-control
 chmod 0644 /etc/default/twitninf-infra-control

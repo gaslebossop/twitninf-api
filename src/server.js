@@ -157,6 +157,7 @@ const fraudService = require('./services/fraudDetectionService');
 const { blockBannedIp, checkApiRequest, isTrustedFirstPartyClient } = require('./middleware/fraudMiddleware');
 const transactionAuthorizationService = require('./services/transactionAuthorizationService');
 const { requestContextMiddleware } = require('./services/transactionAuthorizationService');
+const { requestReadRouting } = require('./database/requestReadRouting');
 
 // Créer l'application Express
 const app = express();
@@ -339,6 +340,7 @@ app.use(morgan('combined', {
 // Parser pour le corps des requêtes
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(requestReadRouting);
 // Capture a server-trusted, privacy-preserving context for every future wallet
 // mutation. The central ledger can then authorize calls without trusting route
 // bodies or requiring every controller to forward IP/device identifiers.
@@ -729,6 +731,9 @@ app.get('/api/health', async (req, res) => {
       instance: instanceId,
       policiercongo_local: POLICIERCONGO_LOCAL_ENABLED,
       database: dbStatus ? 'connected' : 'disconnected',
+      orm_read_replica: config.database.replication
+        ? { configured: true, host: process.env.DB_ORM_READ_HOST, mode: 'get_head_only' }
+        : { configured: false },
       // État de la réplique de lecture : `configured: false` = mono-serveur,
       // `reachable: false` = réplique déclarée mais injoignable (le service
       // tourne quand même, replié sur le primaire, mais il faut le savoir).
