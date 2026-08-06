@@ -63,7 +63,8 @@ Le **même code** tourne partout ; c'est `NODE_ROLE` qui décide du comportement
 
 > **Le worker écoute sur 3004**, pas 3001 : deux process ne peuvent pas se lier
 > au même port. Le port 3003 de A appartient à `fraud-dashboard`. Le port du
-> worker n'est pas exposé et ne sert qu'à `/api/health`.
+> worker n'est pas exposé directement ; Nginx y épingle seulement le cockpit
+> `/api/admin/infrastructure/` afin que celui-ci puisse rallumer API A ou B.
 
 > **PolicierCongo ne s'exécute que sur A.** Nginx épingle son chat, V3, admin et
 > debug sur A. B porte `POLICIERCONGO_LOCAL_ENABLED=false`, refuse un appel
@@ -106,6 +107,15 @@ Le backend du panneau n'accepte qu'une commande C à la fois. Son PID est
 persisté dans `reports/admin-load/autoscaler-control.json` ; les clics doublés
 ou concurrents reçoivent un HTTP 409 au lieu de s'empiler et de s'exécuter dans
 un ordre imprévisible. Le panneau désactive tous les boutons jusqu'à la fin.
+
+Le panneau pilote aussi directement les processus web A/B et PostgreSQL A/B,
+sans passer par le verrou de l'autoscaler. A exécute les commandes locales via
+`twitninf-infra-control`; B reçoit uniquement les sept commandes autorisées par
+une clé SSH dédiée et une forced-command. « Arrêter A/B » retire le processus
+API correspondant du trafic, mais n'éteint pas le système du VPS : Nginx et le
+worker de contrôle restent donc joignables pour le redémarrer. L'arrêt de la
+base primaire A exige une confirmation textuelle et rend les écritures
+indisponibles jusqu'à son redémarrage.
 
 Commandes opérateur sur A :
 

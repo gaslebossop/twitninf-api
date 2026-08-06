@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ${EUID} -ne 0 ]]; then
+  echo "twitninf-infra-control doit etre execute en root" >&2
+  exit 1
+fi
+if [[ $# -ne 1 ]]; then
+  echo "usage: twitninf-infra-control {web|db}-{start|stop|restart}|status" >&2
+  exit 2
+fi
+
+defaults=/etc/default/twitninf-infra-control
+[[ -r "$defaults" ]] || { echo "configuration absente: $defaults" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "$defaults"
+
+: "${WEB_PROCESS:?WEB_PROCESS manquant}"
+PM2_USER=${PM2_USER:-debian}
+PM2_HOME=${PM2_HOME:-/home/debian/.pm2}
+PG_CLUSTER=${PG_CLUSTER:-17/main}
+PG_VERSION=${PG_CLUSTER%%/*}
+PG_NAME=${PG_CLUSTER#*/}
+PM2_BIN=${PM2_BIN:-/usr/bin/pm2}
+
+pm2_as_user() {
+  runuser -u "$PM2_USER" -- env PM2_HOME="$PM2_HOME" "$PM2_BIN" "$@"
+}
+
+web_pid() {
+  pm2_as_user pid "$WEB_PROCESS" 2>/dev/null | tail -n 1 | tr -d '[:space:]'
+}
+
+web_online=false
+pid=$(web_pid || true)
+if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
+  web_online=true
+fi
+db_online=false
+if pg_ctlcluster "$PG_VERSION" "$PG_NAME" status >/dev/null 2>&1; then
+  db_online=true
+fi
+
+case "$1" in
+  status)
+    printf '{"web_online":%s,"db_online":%s,"web_process":"%s","pg_cluster":"%s"}\n' \
+      "$web_online" "$db_online" "$WEB_PROCESS" "$PG_CLUSTER"
+    ;;
+  web-start)
+    pm2_as_user start "$WEB_PROCESS" --update-env >/dev/null
+    ;;
+  web-stop)
+    pm2_as_user stop "$WEB_PROCESS" >/dev/null
+    ;;
+  web-restart)
+    pm2_as_user restart "$WEB_PROCESS" --update-env >/dev/null
+    ;;
+  db-start)
+    pg_ctlcluster "$PG_VERSION" "$PG_NAME" start
+    ;;
+  db-stop)
+    pg_ctlcluster --force "$PG_VERSION" "$PG_NAME" stop
+    ;;
+  db-restart)
+    pg_ctlcluster --force "$PG_VERSION" "$PG_NAME" restart
+    ;;
+  *)
+    echo "commande refusee" >&2
+    exit 2
+    ;;
+esac

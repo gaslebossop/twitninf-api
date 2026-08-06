@@ -20,14 +20,23 @@ const ACTIVE_JOB_STATES = new Set(['preparing', 'running', 'stopping']);
 const REPORT_DIRECTORY = path.resolve(__dirname, '../../reports/admin-load');
 const CURRENT_JOB_FILE = path.join(REPORT_DIRECTORY, 'current.json');
 const AUTOSCALER_CONTROL_FILE = path.join(REPORT_DIRECTORY, 'autoscaler-control.json');
+const SYSTEM_CONTROL_FILE = path.join(REPORT_DIRECTORY, 'system-control.json');
 const AUTOSCALER_CONTROL_MAX_AGE_MS = 90 * 1000;
+const SYSTEM_CONTROL_MAX_AGE_MS = 90 * 1000;
 const SUPERVISOR_SCRIPT = path.resolve(__dirname, '../../scripts/adminLoadSimulation.js');
 const AUTOSCALER = '/usr/local/sbin/twitninf-autoscaler';
+const INFRA_CONTROL = '/usr/local/sbin/twitninf-infra-control';
+const REMOTE_CONTROL_KEY = process.env.INFRASTRUCTURE_NODE_B_SSH_KEY || '/home/debian/.ssh/twitninf-infra-control';
+const REMOTE_CONTROL_HOST = process.env.INFRASTRUCTURE_NODE_B_SSH_HOST || 'debian@10.8.0.2';
 const AUTOSCALER_UPSTREAMS = '/etc/nginx/twitninf-autoscale-upstreams.conf';
 const AUTOSCALER_CACHE_MS = 1500;
+const SYSTEM_STATUS_CACHE_MS = 1500;
 let lastAutoscalerStatus = null;
 let lastAutoscalerStatusAt = 0;
 let autoscalerStatusPromise = null;
+const lastSystemStatus = { A: null, B: null };
+const lastSystemStatusAt = { A: 0, B: 0 };
+const systemStatusPromises = { A: null, B: null };
 
 router.use(authenticateToken, requireAdminRole);
 
@@ -67,6 +76,78 @@ function currentAutoscalerControl() {
   }
   if (age > AUTOSCALER_CONTROL_MAX_AGE_MS || !processExists(control.pid) || zombie) return null;
   return control;
+}
+
+function currentSystemControl() {
+  const control = readJson(SYSTEM_CONTROL_FILE);
+  if (!control || control.status !== 'running') return null;
+  const age = Date.now() - new Date(control.started_at || 0).getTime();
+  let zombie = false;
+  if (process.platform === 'linux') {
+    try {
+      zombie = fs.readFileSync(`/proc/${Number(control.pid)}/stat`, 'utf8').split(' ')[2] === 'Z';
+    } catch { /* le processus a disparu */ }
+  }
+  if (age > SYSTEM_CONTROL_MAX_AGE_MS || !processExists(control.pid) || zombie) return null;
+  return control;
+}
+
+function parseSystemStatus(output) {
+  const lines = String(output || '').trim().split(/\r?\n/).reverse();
+  for (const line of lines) {
+    try {
+      const payload = JSON.parse(line);
+      if (typeof payload.web_online === 'boolean' && typeof payload.db_online === 'boolean') return payload;
+    } catch { /* sortie sudo/ssh non JSON */ }
+  }
+  return null;
+}
+
+function systemCommand(node, command) {
+  if (node === 'A') return {
+    executable: '/usr/bin/sudo',
+    args: ['-n', INFRA_CONTROL, command],
+  };
+  return {
+    executable: '/usr/bin/ssh',
+    args: [
+      '-i', REMOTE_CONTROL_KEY,
+      '-o', 'BatchMode=yes',
+      '-o', 'ConnectTimeout=2',
+      '-o', 'StrictHostKeyChecking=yes',
+      REMOTE_CONTROL_HOST,
+      command,
+    ],
+  };
+}
+
+async function systemNodeStatus(node) {
+  if (process.platform !== 'linux') return null;
+  if (lastSystemStatus[node] && Date.now() - lastSystemStatusAt[node] < SYSTEM_STATUS_CACHE_MS) {
+    return lastSystemStatus[node];
+  }
+  if (systemStatusPromises[node]) return systemStatusPromises[node];
+  systemStatusPromises[node] = (async () => {
+    try {
+      const command = systemCommand(node, 'status');
+      const { stdout } = await execFileAsync(command.executable, command.args, {
+        timeout: 3500,
+        maxBuffer: 128 * 1024,
+      });
+      const status = parseSystemStatus(stdout);
+      if (status) {
+        lastSystemStatus[node] = status;
+        lastSystemStatusAt[node] = Date.now();
+      }
+      return status || lastSystemStatus[node];
+    } catch (error) {
+      logger.warn(`[infrastructure] statut systeme ${node} indisponible`, { error: error.message });
+      return lastSystemStatus[node];
+    } finally {
+      systemStatusPromises[node] = null;
+    }
+  })();
+  return systemStatusPromises[node];
 }
 
 function parseAutoscalerOutput(output) {
@@ -150,18 +231,22 @@ function configuredReplicas() {
   }
 }
 
-function buildNodes(local, remote, autoscaler) {
+function buildNodes(local, remote, autoscaler, systemA, systemB) {
   const active = new Set((autoscaler?.active_replicas || configuredReplicas()).map((value) => String(value).toUpperCase()));
+  const processA = processFor(local, 'twitninf-api', 3001);
+  const processB = processFor(remote, 'twitninf-api', 3001);
   const nodes = [
     {
-      id: 'A', label: 'VPS A', kind: 'principal', host: 'A', online: Boolean(local),
+      id: 'A', label: 'API A', kind: 'principal', host: 'A',
+      online: systemA?.web_online ?? processA?.status === 'online',
       cpu_percent: local?.cpu_percent ?? null, memory: local?.memory || null,
-      process: processFor(local, 'twitninf-api', 3001), traffic: trafficOf(autoscaler, 'A'),
+      process: processA, traffic: trafficOf(autoscaler, 'A'),
     },
     {
-      id: 'B', label: 'VPS B', kind: 'secondaire', host: 'B', online: Boolean(remote),
+      id: 'B', label: 'API B', kind: 'secondaire', host: 'B',
+      online: systemB?.web_online ?? processB?.status === 'online',
       cpu_percent: remote?.cpu_percent ?? null, memory: remote?.memory || null,
-      process: processFor(remote, 'twitninf-api', 3001), traffic: trafficOf(autoscaler, 'B'),
+      process: processB, traffic: trafficOf(autoscaler, 'B'),
     },
   ];
   const replicaIndexes = new Set([1, 2, 3]);
@@ -186,17 +271,25 @@ function buildNodes(local, remote, autoscaler) {
   return nodes;
 }
 
-function buildServices(local, remote, nodes) {
+function buildServices(local, remote, nodes, systemA, systemB) {
   const webNodes = nodes.filter((node) => node.online).map((node) => node.id);
   const active = (value) => value === 'active';
+  const databaseAOnline = systemA?.db_online ?? active(local?.services?.postgresql);
+  const databaseBOnline = systemB?.db_online ?? active(remote?.services?.postgresql);
   return [
     { id: 'web', name: 'API web', nodes: webNodes, detail: 'Trafic utilisateur reparti par Nginx' },
     { id: 'edge', name: 'Nginx / load balancer', nodes: active(local?.services?.nginx) ? ['A'] : [], detail: 'Point d entree public' },
     { id: 'worker', name: 'Worker + PolicierCongo', nodes: processFor(local, 'twitninf-worker', 3004)?.status === 'online' ? ['A'] : [], detail: 'Analyse semantique et tendances' },
-    { id: 'postgres', name: 'PostgreSQL', nodes: [
-      ...(active(local?.services?.postgresql) ? ['A (primaire)'] : []),
-      ...(active(remote?.services?.postgresql) ? ['B (replica)'] : []),
-    ], detail: 'Ecriture sur A, lectures lourdes possibles sur B' },
+    {
+      id: 'postgres-primary', name: 'PostgreSQL primaire', nodes: databaseAOnline ? ['A'] : [],
+      detail: 'Base d ecriture. Son arret rend les mutations indisponibles.',
+      controllable: true, control_kind: 'database', control_node: 'A', online: databaseAOnline,
+    },
+    {
+      id: 'postgres-replica', name: 'PostgreSQL replica', nodes: databaseBOnline ? ['B'] : [],
+      detail: 'Replica de lecture sur B pour les calculs lourds.',
+      controllable: true, control_kind: 'database', control_node: 'B', online: databaseBOnline,
+    },
     { id: 'redis', name: 'Redis', nodes: active(local?.services?.redis) ? ['A'] : [], detail: 'Cache et coordination du cluster' },
     { id: 'recommender', name: 'Recommandeur Rust', nodes: active(local?.services?.recommender) ? ['A'] : [], detail: 'Classement neural et tracking CTR' },
     { id: 'fraud', name: 'Detection fraude Rust', nodes: active(local?.services?.fraud_detector) || active(local?.services?.fraud_dashboard) ? ['A'] : [], detail: 'Detection temps reel et tableau de bord fraude' },
@@ -264,18 +357,79 @@ function rejectBusyControl(res, command) {
   });
 }
 
+function spawnSystemControl(node, target, action) {
+  const running = currentSystemControl();
+  if (running) return { accepted: false, control: running };
+
+  const commandName = `${target}-${action}`;
+  const command = systemCommand(node, commandName);
+  const child = spawn(command.executable, command.args, { detached: true, stdio: 'ignore' });
+  const control = {
+    id: crypto.randomUUID(), pid: child.pid, status: 'running',
+    node, target, action, started_at: new Date().toISOString(),
+  };
+  fs.mkdirSync(REPORT_DIRECTORY, { recursive: true });
+  writeJsonAtomic(SYSTEM_CONTROL_FILE, control);
+  const finish = (status, detail = {}) => {
+    const current = readJson(SYSTEM_CONTROL_FILE);
+    if (current?.id === control.id) {
+      writeJsonAtomic(SYSTEM_CONTROL_FILE, {
+        ...control, ...detail, status, finished_at: new Date().toISOString(),
+      });
+    }
+  };
+  child.once('error', (error) => {
+    finish('failed', { error: error.message });
+    logger.error('[infrastructure] commande systeme non lancee', {
+      node, target, action, error: error.message,
+    });
+  });
+  child.once('exit', (code, signal) => {
+    lastSystemStatusAt[node] = 0;
+    finish(code === 0 ? 'completed' : 'failed', { code, signal });
+  });
+  child.unref();
+  return { accepted: true, control };
+}
+
+function rejectBusySystemControl(res, command) {
+  const running = command.control;
+  return res.status(409).json({
+    success: false,
+    message: `Une commande ${running.action} sur ${running.target} ${running.node} est deja en cours`,
+    system_control: running,
+  });
+}
+
+function validateSystemAction(req, res, target) {
+  const node = String(req.params.id || '').toUpperCase();
+  const action = String(req.params.action || '').toLowerCase();
+  if (!['A', 'B'].includes(node) || !['start', 'stop', 'restart'].includes(action)) {
+    res.status(400).json({ success: false, message: 'Action ou serveur invalide' });
+    return null;
+  }
+  if (action !== 'start') {
+    const expected = `${action.toUpperCase()} ${target === 'db' ? 'DB' : 'NODE'} ${node}`;
+    if (String(req.body?.confirmation || '') !== expected) {
+      res.status(400).json({ success: false, message: `Tapez exactement ${expected}` });
+      return null;
+    }
+  }
+  return { node, action };
+}
+
 router.get('/status', async (_req, res) => {
   try {
-    const [local, remote, autoscaler] = await Promise.all([
-      collectNodeMetrics(), remoteNodeMetrics(), autoscalerStatus(),
+    const [local, remote, autoscaler, systemA, systemB] = await Promise.all([
+      collectNodeMetrics(), remoteNodeMetrics(), autoscalerStatus(), systemNodeStatus('A'), systemNodeStatus('B'),
     ]);
-    const nodes = buildNodes(local, remote, autoscaler);
+    const nodes = buildNodes(local, remote, autoscaler, systemA, systemB);
     const activeReplicas = nodes.filter((node) => node.kind === 'replica_elastique' && node.online).map((node) => node.id.toLowerCase());
     return res.json({
       success: true,
       collected_at: new Date().toISOString(),
       nodes,
-      services: buildServices(local, remote, nodes),
+      services: buildServices(local, remote, nodes, systemA, systemB),
       cluster: {
         active_replicas: activeReplicas,
         max_replicas: Number(autoscaler?.max_replicas || DEFAULT_MAX_REPLICAS),
@@ -286,16 +440,46 @@ router.get('/status', async (_req, res) => {
         total_requests_30s: Number(autoscaler?.all?.requests || 0),
         p95_ms: Math.round(Number(autoscaler?.all?.p95_seconds || 0) * 100000) / 100,
         error_rate: Number(autoscaler?.all?.error_rate || 0),
-        a_online: Boolean(local), b_online: Boolean(remote),
+        a_online: Boolean(nodes.find((node) => node.id === 'A')?.online),
+        b_online: Boolean(nodes.find((node) => node.id === 'B')?.online),
       },
       load_test: currentJob(),
       replica_control: currentAutoscalerControl(),
+      system_control: currentSystemControl(),
       limits: { max_users: 10000, max_duration_seconds: 300, min_interval_ms: 1000, max_estimated_rps: 1000 },
     });
   } catch (error) {
     logger.error('[infrastructure] lecture du cluster impossible', { error: error.stack || error.message });
     return res.status(503).json({ success: false, message: 'Etat du cluster indisponible' });
   }
+});
+
+router.post('/nodes/:id/:action', (req, res) => {
+  const validated = validateSystemAction(req, res, 'web');
+  if (!validated) return;
+  const command = spawnSystemControl(validated.node, 'web', validated.action);
+  if (!command.accepted) return rejectBusySystemControl(res, command);
+  logger.warn('[infrastructure] action API web', {
+    admin_id: req.user.id, node: validated.node, action: validated.action,
+  });
+  return res.status(202).json({
+    success: true, pid: command.control.pid,
+    message: `${validated.action} lance pour l API ${validated.node}`,
+  });
+});
+
+router.post('/databases/:id/:action', (req, res) => {
+  const validated = validateSystemAction(req, res, 'db');
+  if (!validated) return;
+  const command = spawnSystemControl(validated.node, 'db', validated.action);
+  if (!command.accepted) return rejectBusySystemControl(res, command);
+  logger.warn('[infrastructure] action PostgreSQL', {
+    admin_id: req.user.id, node: validated.node, action: validated.action,
+  });
+  return res.status(202).json({
+    success: true, pid: command.control.pid,
+    message: `${validated.action} lance pour PostgreSQL ${validated.node}`,
+  });
 });
 
 router.post('/load-tests', (req, res) => {

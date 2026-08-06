@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  status|web-start|web-stop|web-restart|db-start|db-stop|db-restart)
+    exec sudo -n /usr/local/sbin/twitninf-infra-control "$SSH_ORIGINAL_COMMAND"
+    ;;
+  *)
+    echo "commande distante refusee" >&2
+    exit 2
+    ;;
+esac
