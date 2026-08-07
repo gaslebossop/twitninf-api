@@ -1167,25 +1167,64 @@ async function startServer() {
     // de valeur. Si cette étape échoue, l'API ne démarre pas en mode fail-open.
     await transactionAuthorizationService.initialize();
 
-    // 📊 Initialiser les données comportementales
-    logger.info('📊 Initialisation des données comportementales...');
-    try {
-      await behaviorDataMigration.initializeOnStartup();
-      await behaviorDataLoader.initializeOnStartup();
-      logger.info('✅ Données comportementales initialisées avec succès');
-    } catch (error) {
-      logger.error('❌ Erreur initialisation données comportementales:', error);
-      // Ne pas arrêter le serveur, les données comportementales ne sont pas critiques
+    // 📊 Données comportementales : migration au worker, préchauffage au worker.
+    //
+    // Ces deux appels ne sont pas du même ordre malgré leur voisinage.
+    //
+    // `behaviorDataMigration` crée des tables, migre des lignes, écrit les
+    // préférences par défaut de tous les utilisateurs et purge l'ancien. C'est
+    // une migration, au même titre que `syncDatabase()` vingt lignes plus haut,
+    // et elle tombe donc sous la même règle : un seul process la joue. La
+    // laisser sur chaque instance web faisait converger N processus sur les
+    // mêmes CREATE TABLE et les mêmes écritures au démarrage.
+    //
+    // `behaviorDataLoader` ne fait qu'amorcer un cache : stats globales, puis
+    // les profils des 100 utilisateurs les plus actifs chargés en parallèle.
+    // Rien ici n'est nécessaire pour servir une requête — `loadUserBehaviorProfile`
+    // recharge à la demande avec son propre TTL, et c'est le seul chemin qu'emprunte
+    // le moteur de recommandation. Sur un C créé pendant une pointe, ce
+    // préchauffage ouvrait une centaine de requêtes sur un primaire déjà saturé,
+    // et retardait d'autant le moment où le C commençait enfin à soulager A.
+    // On garde donc le préchauffage sur le worker, et le chargement paresseux
+    // partout ailleurs.
+    if (runMigrations) {
+      logger.info('📊 Initialisation des données comportementales...');
+      try {
+        await behaviorDataMigration.initializeOnStartup();
+        await behaviorDataLoader.initializeOnStartup();
+        logger.info('✅ Données comportementales initialisées avec succès');
+      } catch (error) {
+        logger.error('❌ Erreur initialisation données comportementales:', error);
+        // Ne pas arrêter le serveur, les données comportementales ne sont pas critiques
+      }
+    } else {
+      logger.info(`⏭️ [role=${nodeRole}] Données comportementales non préchargées (réservées au worker, chargement à la demande).`);
     }
 
-    // 💰 Initialiser le système de cryptomonnaie virtuelle
-    logger.info('💰 Initialisation du système de cryptomonnaie virtuelle...');
-    try {
-      await initVirtualCurrency();
-      logger.info('✅ Système de cryptomonnaie virtuelle initialisé avec succès');
-    } catch (error) {
-      logger.error('❌ Erreur initialisation cryptomonnaie:', error);
-      // Ne pas arrêter le serveur, la cryptomonnaie n'est pas critique
+    // 💰 Amorçage de la cryptomonnaie virtuelle — worker uniquement.
+    //
+    // Malgré son nom d'initialisation, c'est un script de seed : il crée la
+    // devise NF si elle manque, puis parcourt **toute** la table `users` pour
+    // créer les portefeuilles absents. Le coût grandit avec le nombre de
+    // comptes et ne dépend en rien du trafic ; le rejouer sur chaque instance
+    // web et sur chaque C revenait à balayer les utilisateurs autant de fois
+    // qu'il y a de process, en concurrence sur les mêmes insertions.
+    //
+    // Aucun utilisateur ne se retrouve sans portefeuille pour autant : les deux
+    // chemins qui en lisent un le créent à la volée quand il manque
+    // (`virtualCurrencyController`, `premiumRoutes`). Le seed ne fait que
+    // rattraper l'existant en masse, ce qui est bien le travail du worker.
+    if (runMigrations) {
+      logger.info('💰 Initialisation du système de cryptomonnaie virtuelle...');
+      try {
+        await initVirtualCurrency();
+        logger.info('✅ Système de cryptomonnaie virtuelle initialisé avec succès');
+      } catch (error) {
+        logger.error('❌ Erreur initialisation cryptomonnaie:', error);
+        // Ne pas arrêter le serveur, la cryptomonnaie n'est pas critique
+      }
+    } else {
+      logger.info(`⏭️ [role=${nodeRole}] Amorçage cryptomonnaie ignoré (réservé au worker).`);
     }
 
     // ⏱ Tâches de fond de l'offre créateur.

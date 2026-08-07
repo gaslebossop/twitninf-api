@@ -43,10 +43,51 @@ Le **même code** tourne partout ; c'est `NODE_ROLE` qui décide du comportement
   `consistent` ne remappe qu'une petite partie des clients quand C apparaît ou
   disparaît, ce qui protège les sessions socket.io actives.
 - **Lectures sous semi-surcharge** : après deux fenêtres où A dépasse 400 ms de
-  p95 ou 2 % d'erreurs, GET/HEAD passent temporairement à 65 % sur B. B route
-  alors les SELECT ORM vers son PostgreSQL local ; mutations, transactions et
-  lectures effectuées pendant un POST/PUT/DELETE restent sur le writer courant.
+  p95 ou 2 % d'erreurs, GET/HEAD basculent sur le pool `twitninf_api_read`.
   Douze cycles calmes (une minute) rétablissent le partage normal.
+  Ce biais ne change que la **proportion** de trafic envoyée à B : depuis le
+  2026-08-07, B sert ses SELECT de GET/HEAD sur son PostgreSQL local **en
+  permanence**, pas seulement en surcharge (voir « Réplique PostgreSQL de
+  lecture »). Mutations, transactions et lectures effectuées pendant un
+  POST/PUT/DELETE restent sur le writer courant.
+
+### Le report de lecture ne fonctionnait pas (corrigé le 2026-08-07)
+
+Il était décrit ici, implémenté dans l'autoscaler… et **sans aucun effet en
+production**. La configuration Nginx vivante n'avait ni le `map $request_method`
+ni l'upstream `twitninf_api_read` : la version versionnée du dépôt n'avait
+jamais été posée sur la machine. L'autoscaler écrivait donc consciencieusement
+`/etc/nginx/twitninf-read-routing.map`, un fichier que **personne n'incluait**,
+et journalisait `read_bias_changed` sans que rien ne bouge.
+
+> **Leçon générale** : `nginx -t` valide une configuration, il ne dit pas
+> laquelle est servie. Vérifier avec `diff /etc/nginx/sites-available/… deploy/…`
+> avant de conclure qu'une fonctionnalité de routage est active. C'est le second
+> piège de ce type sur ce fichier (voir aussi le lien symbolique plus bas).
+
+Deux corrections en même temps que la pose :
+
+- **Les C sont désormais inclus dans le pool de lecture.** Ils en étaient
+  absents : activer le report de lecture les excluait du trafic GET/HEAD —
+  l'essentiel du trafic — au moment précis où l'autoscaler venait de les créer
+  pour absorber la pointe. Les deux mécanismes se neutralisaient.
+- **Poids revus** pour que B prenne réellement le relais : A-main passe de 7 à
+  **4**, B de 13 à **20**.
+
+Répartition mesurée sur 200 clients distincts (adresses source de loopback — le
+hash `$binary_remote_addr consistent` colle un client à un nœud, donc une seule
+IP ne prouve rien) :
+
+| Backend | Report éteint | Report actif |
+|---|---|---|
+| **B** | 11 % | **35 %** |
+| A-main | 25 % | 7 % |
+| C1 + C2 + C3 | 64 % | 58 % |
+
+Chaque requête déviée vers B est une requête que le PostgreSQL de A ne voit
+plus. **Un C, lui, ne soulage que le CPU de Node** : il interroge la même base
+que A. B est donc le seul levier qui soulage réellement le primaire, ce qui
+justifie qu'il soit privilégié dans ce pool et pas dans l'autre.
 - **Épinglé sur A** : `/storage/`, `/static/`, toutes les routes
   `/api/**/policiercongo*`, et les cinq points d'entrée qui reçoivent un fichier
   — `/api/users/me/avatar`, `/api/users/me/banner`, `/api/tweets/video`,
@@ -75,19 +116,34 @@ Le **même code** tourne partout ; c'est `NODE_ROLE` qui décide du comportement
 > debug sur A. B porte `POLICIERCONGO_LOCAL_ENABLED=false`, refuse un appel
 > direct avec 503 et n'initialise ni moteur ni provider Codex.
 
-## Continuité PostgreSQL
+## Continuité PostgreSQL — ⚠️ NON DÉPLOYÉE
 
-Les API utilisent `127.0.0.1:6432`, un HAProxy local qui n'accepte comme
-backend que le PostgreSQL actuellement en écriture. Lors d'un arrêt de la base
-A demandé depuis le cockpit, A est arrêté proprement puis B est promu ; les
-pools Sequelize se reconnectent donc à B sans modification d'environnement.
-Si A est redémarré pendant que B est writer, `pg_rewind` le rattache comme
-standby au lieu de créer deux primaires.
+> **Cette section décrivait un mécanisme qui n'existe pas sur les machines.**
+> Vérifié le 2026-08-07 : **rien n'écoute sur le port 6432**, ni sur A ni sur B.
+> Le HAProxy d'écriture n'a jamais été installé ; [deploy/install-twitninf-postgres-ha.sh](deploy/install-twitninf-postgres-ha.sh)
+> est présent dans le dépôt mais n'a pas été appliqué.
 
-Cette bascule couvre PostgreSQL A et évite le split-brain grâce à l'arrêt propre
-préalable. Elle ne prétend pas résoudre l'extinction physique de tout le VPS A :
-le TLS, Nginx et le DNS public pointent encore sur A, donc un vrai failover de
-machine exige un point d'entrée externe ou une IP flottante avec fencing.
+L'état réel : chaque API parle à PostgreSQL **en direct**, sans indirection.
+
+| Process | `DB_HOST` (écritures) |
+|---|---|
+| `twitninf-api` (A:3001) et `twitninf-api-worker` (A:3004) | `localhost` |
+| `twitninf-api-web` (B:3001) | `10.8.0.1` — **l'IP de A, en dur** |
+
+Conséquence à connaître avant de compter dessus : **si PostgreSQL A s'arrête, B
+s'arrête avec lui**, bien que son standby soit intact à 0,7 ms de là. Il n'y a
+aucun point de reconfiguration à basculer, donc le bouton « arrêter la base A »
+du cockpit ne peut pas promouvoir B de façon utile.
+
+Ce qu'il faudrait pour que la bascule existe vraiment :
+
+1. Installer le HAProxy local sur `127.0.0.1:6432` et faire pointer les deux
+   `.env` dessus — c'est ce qui rend la promotion de B invisible aux pools
+   Sequelize.
+2. Accepter que ça ne couvre que « PostgreSQL A s'arrête ». Le TLS, Nginx et le
+   DNS pointent toujours sur A : **l'extinction du VPS A reste une panne
+   totale**, quoi qu'on fasse côté base. Ça demanderait une IP flottante avec
+   fencing.
 
 Le standby B dispose de 1 Go de `shared_buffers`, d'un
 `effective_cache_size` de 2,5 Go et préchauffe les tables principales avec
@@ -156,6 +212,53 @@ Les seuils sont dans `/etc/default/twitninf-autoscaler`. Les fichiers sources
 sont `deploy/twitninf-autoscaler.py`, les unités systemd associées, le format de
 journal `deploy/nginx-twitninf-autoscale-log.conf` et
 `deploy/install-twitninf-autoscaler.sh`.
+
+### Ce qu'un C fait à son démarrage (allégé le 2026-08-07)
+
+L'autoscaler sonde `/api/health/live`, donc un C entre dans Nginx dès que le
+`listen()` est passé. Tout ce qui bloque **avant** ce `listen()` est du délai
+pur, subi au pire moment — pendant une surcharge.
+
+Trois initialisations s'y trouvaient, et aucune n'était le travail d'un nœud web :
+
+| Appel | Ce qu'il fait réellement |
+|---|---|
+| `behaviorDataMigration.initializeOnStartup()` | crée des tables, migre des lignes, écrit les préférences par défaut de tous les comptes — une migration |
+| `initVirtualCurrency()` | parcourt **toute** la table `users` et crée les portefeuilles manquants — un seed |
+| `transactionAuthorizationService.initialize()` | 4 `CREATE TABLE` + 6 `CREATE INDEX` — un DDL |
+
+À quoi s'ajoutait `behaviorDataLoader.initializeOnStartup()`, du préchauffage de
+cache qui chargeait les profils des 100 utilisateurs les plus actifs **en
+parallèle**. Autrement dit : chaque C créé pour soulager un primaire saturé
+commençait par lui envoyer une centaine de requêtes et des écritures
+concurrentes, avant de servir quoi que ce soit.
+
+Les trois premières sont désormais réservées au process qui porte déjà les
+migrations (`runMigrations`), et le préchauffage au worker. Les nœuds web
+gardent le chargement paresseux, qui a son propre TTL et qui est de toute façon
+le seul chemin emprunté par le moteur de recommandation.
+
+**La garantie fail-closed du registre de transactions est conservée** : un nœud
+web ne construit plus le schéma, il le *constate* via `_assertSchema()` — une
+lecture de `to_regclass` qui échoue franchement si une table manque. L'API
+refuse toujours de démarrer sans registre durable ; seul le coût a disparu.
+Corollaire : **le worker doit avoir démarré au moins une fois** pour qu'un nœud
+web puisse démarrer sur une base neuve.
+
+Mesures sur A, `/api/health/live` :
+
+| | Avant (boots du 25/07, 4 relevés concordants) | Après (3 relevés) |
+|---|---|---|
+| Bloc comportemental | 8 s | sauté |
+| Amorçage cryptomonnaie | 2 s | sauté |
+| **Total bloquant avant `listen()`** | **~10 s** | **~1,4 s** |
+
+Le worker, lui, joue toujours la séquence complète (11 s au boot du 2026-08-07) —
+c'est voulu, c'est son rôle.
+
+> ⚠️ Le « ~40 s » cité plus bas pour le déploiement n'a jamais été le délai d'un
+> C : il correspond à `/api/health` **complet**, qui attend le modèle
+> d'embeddings chargé *après* le `listen()`. L'autoscaler n'attend pas ça.
 
 > Ce mécanisme absorbe des pointes dans la limite des 6 vCPU et de la RAM de A ;
 > il ne transforme pas un seul VPS en capacité infinie. Le canari 10 000 VU a
@@ -250,10 +353,98 @@ dans Redis (les deux nœuds sont abonnés → diffusion inter-nœuds active), cl
 - Une panne de la réplique replie automatiquement ces lectures sur A. La santé
   et le retard de rejeu sont exposés dans `/api/health.read_replica`.
 
+### Le web de B lit sur son standby local (depuis le 2026-08-07)
+
+Avant cette date, la réplique était **saine mais branchée sur rien** : elle
+n'avait aucun consommateur en dehors des trois services de veille du worker,
+qui sont du batch. `DB_ORM_READ_HOST` n'était défini nulle part, donc B
+envoyait **100 % de ses SELECT à travers WireGuard vers le primaire de A**. B
+absorbait 35 % du trafic HTTP sans soulager la base d'un seul octet — c'était
+la cause du « la réplique ne sert à rien » constaté à l'usage.
+
+B porte désormais `DB_ORM_READ_HOST=127.0.0.1` / `DB_ORM_READ_PORT=5432`. Le
+routage était déjà écrit et n'attendait que cette variable :
+
+- [config/config.js](src/config/config.js) n'ajoute le bloc `replication` de
+  Sequelize que si `DB_ORM_READ_HOST` est renseigné — donc A n'est pas affecté.
+- [database/requestReadRouting.js](src/database/requestReadRouting.js) marque la
+  requête HTTP en cours dans un `AsyncLocalStorage`, et
+  [models/index.js](src/models/index.js) force sur le writer tout `SELECT` qui
+  n'appartient pas à un GET/HEAD.
+
+> **C'est ce garde-fou qui rend l'option sûre.** Le mode `replication` nu de
+> Sequelize enverrait sur le standby *tous* les SELECT hors transaction, y
+> compris les « je crée puis je relis pour renvoyer l'objet » — la réplication
+> étant asynchrone, chacun deviendrait un bug silencieux. **Ne jamais définir
+> `DB_ORM_READ_HOST` sur un nœud dont le code n'a pas ce middleware monté.**
+
+Vérification faite au déploiement : 40 GET sur B ont fait progresser
+`pg_stat_database.tup_returned` du standby local de **+41 584 lignes**, et le
+standby porte des connexions applicatives permanentes (pool de lecture). Avant
+la bascule, ce compteur ne bougeait pas pour du trafic API.
+
+Le risque résiduel est la lecture périmée : un client collé à B qui poste puis
+recharge lit son standby local. Le retard de rejeu mesuré est de **0 octet**,
+donc marginal en pratique — mais c'est le point à surveiller si des « mon tweet
+n'apparaît pas » remontent.
+
+### Ce qui limite réellement B — ce n'est ni son CPU ni sa base
+
+Relevé pendant une vraie surcharge (benchmark `TwitninfClusterCapacity`,
+~130 rps sur le parc, 2026-08-07 01:24–01:29) :
+
+| | B | A |
+|---|---|---|
+| Charge / vCPU | **0,96 sur 2** | 4,61 sur 6 |
+| CPU du process Node | **0,37 cœur** | 0,88 cœur (process principal) |
+| PostgreSQL local | 2,4 % CPU, 1 requête active | — |
+| Connexions du pool | **9 sur 100** | 26 sur 100 |
+| p95 | 5,8 s | 7,7 s |
+
+B affichait le p95 le plus mauvais du parc à certains moments **tout en
+n'utilisant que 0,37 cœur et 9 connexions**. Il n'était donc ni limité par son
+CPU, ni par sa base, ni par son pool : **il attendait**. Ses dépendances vivent
+toutes sur A — Redis (`REDIS_HOST=10.8.0.1`) et le recommandeur Rust
+(`RUST_RECOMMENDER_URL=http://10.8.0.1:3002`) — et A était saturé.
+
+Deux conséquences pratiques :
+
+- **Augmenter le pool de B ne sert à rien** tant qu'il en utilise 9 sur 100. Et
+  `pool.max` de Sequelize s'applique aussi à son pool d'**écriture vers A** :
+  l'augmenter mangerait le budget de connexions du primaire sans contrepartie.
+- **Lui envoyer plus de lectures est gagnant des deux côtés** : ça soulage A, et
+  comme la lenteur de B est héritée de la saturation de A, B s'améliore aussi.
+
+Piste non traitée : B garderait un cache local (Redis local pour les clés de
+lecture pure) au lieu de traverser WireGuard vers un Redis déjà sous pression.
+Ça casserait le rate-limit partagé et la diffusion socket.io s'il était utilisé
+tel quel — à cadrer avant de s'y lancer.
+
+### Journalisation des requêtes lentes (standby de B)
+
+`log_min_duration_statement = 1s` est actif sur le standby depuis le
+2026-08-07 (posé par `ALTER SYSTEM` + `pg_reload_conf()`, sans redémarrage).
+Il n'y a **pas** de `pg_stat_statements` sur ce serveur — l'installer demande
+`shared_preload_libraries` et donc un redémarrage de PostgreSQL. En attendant,
+les requêtes de plus d'une seconde vues par B atterrissent dans le journal
+PostgreSQL, ce qui donne de quoi optimiser sur des données réelles plutôt qu'au
+jugé. Les relire après une campagne de charge :
+
+```bash
+sudo journalctl -u postgresql@17-main --since '1 hour ago' | grep 'duration:'
+```
+
 ## Ce qui n'est pas fait
 
-- **Pas de bascule automatique.** Si A tombe, B sert encore le trafic API mais
-  ne peut pas promouvoir seul la réplique ni servir les médias de A.
+- **Pas de bascule PostgreSQL du tout.** Pas seulement « pas automatique » : le
+  HAProxy `127.0.0.1:6432` décrit plus haut n'existe pas sur les machines, et
+  B pointe l'IP de A en dur. Si la base de A s'arrête, B s'arrête avec elle.
+  C'est le chantier (d) — voir « Continuité PostgreSQL ».
+- **Pas de pool chaud pour les C.** Leur démarrage est passé de ~10 s à ~1,4 s,
+  mais s'y ajoutent toujours la fenêtre de mesure de 30 s et le démarrage
+  strictement séquentiel. Garder C1/C2 démarrés hors upstream Nginx réduirait le
+  scale-out à un rechargement Nginx (< 1 s), au prix d'environ 2 Go de RAM
+  immobilisés sur A.
 - **Pas de stockage objet.** Les médias restent sur le disque de A.
 
 ## Dette repérée pendant le déploiement

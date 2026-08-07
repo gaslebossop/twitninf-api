@@ -3,6 +3,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { v4: uuidv4 } = require('uuid');
 const { QueryTypes } = require('sequelize');
 const { sequelize } = require('../database');
+const { runMigrations } = require('../config/role');
 const fraudService = require('./fraudDetectionService');
 const logger = require('../utils/logger');
 
@@ -100,14 +101,55 @@ class TransactionAuthorizationService {
     this._initialization = null;
   }
 
+  /**
+   * Le registre doit exister avant le moindre mouvement de valeur — mais
+   * « exister » et « le créer » ne sont pas le même travail.
+   *
+   * Le DDL ci-dessous (quatre tables, six index) est une migration : jouée par
+   * chaque instance web et par chaque réplique C au démarrage, elle faisait
+   * converger N processus sur les mêmes CREATE TABLE / ALTER TABLE, et pesait
+   * plusieurs secondes avant que le process n'accepte sa première requête.
+   * Elle revient donc au process qui porte déjà les migrations.
+   *
+   * Les autres nœuds ne sautent pas la vérification pour autant : ils
+   * *constatent* le schéma au lieu de le construire. C'est une seule lecture du
+   * catalogue, et elle échoue si une table manque — la propriété qui compte
+   * (pas de démarrage en fail-open) est conservée, seul le coût disparaît.
+   */
   async initialize() {
     if (!this._initialization) {
-      this._initialization = this._ensureSchema().catch((error) => {
+      const prepare = runMigrations
+        ? () => this._ensureSchema()
+        : () => this._assertSchema();
+      this._initialization = prepare().catch((error) => {
         this._initialization = null;
         throw error;
       });
     }
     return this._initialization;
+  }
+
+  async _assertSchema() {
+    const [rows] = await sequelize.query(`
+      SELECT
+        to_regclass('public.wallet_risk_profiles')            AS profiles,
+        to_regclass('public.transaction_risk_authorizations') AS authorizations,
+        to_regclass('public.transaction_risk_events')         AS events
+    `);
+    const found = Array.isArray(rows) ? rows[0] : rows;
+    const missing = Object.entries(found || {})
+      .filter(([, oid]) => !oid)
+      .map(([name]) => name);
+
+    if (missing.length) {
+      // Volontairement fatal : sans registre durable, toute autorisation de
+      // transaction serait rendue sans trace ni protection anti-rejeu.
+      throw new Error(
+        `[transaction-risk] Schéma d'autorisation absent (${missing.join(', ')}). `
+        + 'Le process worker doit avoir démarré au moins une fois pour le créer.'
+      );
+    }
+    logger.info('[transaction-risk] Durable authorization schema verified');
   }
 
   async _ensureSchema() {
