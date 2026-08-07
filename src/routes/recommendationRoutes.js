@@ -8,6 +8,7 @@ const { Op, fn, col, literal } = require('sequelize');
 const { ultraSafeClean } = require('../utils/circularRefCleaner');
 const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
 const paidContentService = require('../services/paidContentService');
+const { withFeedCache } = require('../services/feedCache');
 const { targetingService } = require('../../../targeting');
 
 // ═══════════════════════════════════════════════════════════════════
@@ -527,14 +528,29 @@ router.get('/', authMiddleware.authenticateToken, async (req, res) => {
     const parsedLimit = Math.min(parseInt(limit) || 10, 10);
     const parsedOffset = parseInt(offset) || 0;
 
-    const { tweets, poolSize } = await getSimilarityRecommendations(userId, parsedLimit, parsedOffset, '/api/recommendations');
+    // Le masquage des contenus payants est DANS le producteur, pas après : la
+    // charge mise en cache doit déjà être masquée pour ce lecteur précis. La
+    // clé porte son identifiant, donc elle ne sera jamais servie à un autre.
+    // `maskTweetsOrFail` répond lui-même quand il refuse ; dans ce cas on ne
+    // cache rien et on laisse sa réponse partir.
+    let refusedByPaidContent = false;
+    const { payload } = await withFeedCache(
+      { scope: 'reco', userId, params: { limit: parsedLimit, offset: parsedOffset } },
+      async () => {
+        const { tweets, poolSize } = await getSimilarityRecommendations(userId, parsedLimit, parsedOffset, '/api/recommendations');
+        if (!(await paidContentService.maskTweetsOrFail(tweets, userId, res))) {
+          refusedByPaidContent = true;
+          return null;
+        }
+        return {
+          success: true,
+          data: formatResponse(tweets, parsedLimit, parsedOffset, 'similarity_v2_base', poolSize),
+        };
+      }
+    );
 
-    if (!(await paidContentService.maskTweetsOrFail(tweets, userId, res))) return;
-
-    return res.json({
-      success: true,
-      data: formatResponse(tweets, parsedLimit, parsedOffset, 'similarity_v2_base', poolSize),
-    });
+    if (refusedByPaidContent) return;
+    return res.json(payload);
   } catch (error) {
     logger.error('❌ Erreur Route Recommandations:', error);
     try {

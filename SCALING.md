@@ -530,6 +530,58 @@ jugé. Les relire après une campagne de charge :
 sudo journalctl -u postgresql@17-main --since '1 hour ago' | grep 'duration:'
 ```
 
+## Capacité mesurée, et une piste écartée par la mesure
+
+Courbe à paliers relevée le 2026-08-07 (`clusterLoadBenchmark`, 1 000 comptes
+synthétiques, 5 s de pause entre deux actions, départ à zéro réplique C) :
+
+| Utilisateurs simultanés | Débit | p50 | p95 | Erreurs |
+|---|---|---|---|---|
+| 100 | 20,1 rps | 46 ms | 102 ms | 0 % |
+| 250 | 49,6 rps | 48 ms | 139 ms | 0 % |
+| 500 | **98,5 rps** | 92 ms | **513 ms** | 0 % |
+| 1000 | 121 rps | 2 757 ms | 7 828 ms | 0,5 % |
+
+**Le débit tenable est d'environ 98 rps**, et le mur se situe entre 500 et
+1 000 utilisateurs simultanés. Au-delà, l'effondrement est brutal.
+
+### Le cache de feed partagé était une mauvaise piste
+
+L'hypothèse : les moteurs de recommandation cachaient en mémoire de process,
+donc cinq caches tièdes au lieu d'un chaud. Mutualiser dans Redis semblait
+promettre un facteur 5 à 20. **La mesure dit l'inverse.**
+
+| Utilisateurs | Sans cache | Avec cache |
+|---|---|---|
+| 100 | 20,1 rps · p95 102 ms | 20,1 rps · p95 166 ms |
+| 250 | 49,6 rps · p95 139 ms | 48,9 rps · p95 614 ms |
+| 500 | 98,5 rps · p95 513 ms · 0 % | **46,0 rps · p95 10 001 ms · 21 %** |
+
+Taux de hit relevé : **34 %**. La cause est structurelle, pas un réglage. Une
+réponse de feed est **personnelle**, et un utilisateur ne redemande pas la même
+page assez souvent pour qu'un TTL de 30 s serve à quelque chose. Les deux tiers
+de requêtes restantes paient alors un aller-retour Redis, un `JSON.stringify`
+sur des instances Sequelize imbriquées, puis une écriture en trois commandes.
+On ajoute du coût à 66 % du trafic pour en économiser sur 34 %.
+
+Le module `src/services/feedCache.js` est conservé, testé, et **désactivé par
+défaut** (`FEED_CACHE_ENABLED=true` pour le réactiver en connaissance de cause).
+
+### Ce que ces mesures éliminent
+
+- **PostgreSQL n'est le goulot sur aucun des deux nœuds.** Avec
+  `log_min_duration_statement = 1s` actif sur les deux : **zéro** requête lente
+  sur le standby de B, **8** sur le primaire de A pour toute une soirée de
+  tests de charge. Optimiser du SQL ne rapporterait rien.
+- **Cacher les réponses ne marche pas** — mesuré ci-dessus.
+
+Reste donc la couche applicative Node elle-même. La prochaine étape utile est
+un profilage CPU d'un process web sous charge (`--cpu-prof` ou `0x`), pas une
+nouvelle hypothèse. Et le cache qui aurait du sens n'est pas celui des réponses
+mais celui des **objets partagés** entre utilisateurs : hydratation des tweets
+par identifiant, profils d'auteurs, compteurs d'engagement — 775 tweets pour
+des milliers de lecteurs, la réutilisation y est massive.
+
 ## Ce qui n'est pas fait
 
 - **Pas de bascule PostgreSQL du tout.** Pas seulement « pas automatique » : le

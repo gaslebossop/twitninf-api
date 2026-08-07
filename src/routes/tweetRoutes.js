@@ -7,6 +7,7 @@ const path = require('path');
 const { Tweet, TweetLike, TweetRetweet, User, Notification } = require('../models');
 const { Op } = require('sequelize');
 const { sequelize } = require('../database');
+const { feedCacheRoute } = require('../services/feedCache');
 const { processPendingTweet } = require('../services/geminiService');
 const semanticSimilarityService = require('../services/semanticSimilarityService');
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
@@ -147,7 +148,13 @@ router.get('/', [
   query('type').optional().isIn(['all', 'tweets', 'replies', 'retweets', 'quotes', 'video']).withMessage('Type de tweet invalide'),
   query('sort').optional().isIn(['latest', 'popular', 'trending', 'recommended', 'personalized', 'ultra_recommended', 'similarity']).withMessage('Tri invalide'),
   handleValidationErrors
-], authenticateToken, async (req, res) => {
+], authenticateToken,
+// Le cache vient APRÈS `authenticateToken` : la clé a besoin de `req.user.id`,
+// et surtout une réponse de timeline dépend de qui la demande (comptes privés,
+// blocages, contenus payants). Sans utilisateur identifié, le middleware se
+// retire de lui-même.
+feedCacheRoute('tweets', ['limit', 'offset', 'type', 'sort', 'algorithm', 'context']),
+async (req, res) => {
   try {
     const {
       limit = 100,
@@ -627,7 +634,7 @@ router.get('/:id', [
   authenticateToken,
   param('id').isString().notEmpty().withMessage('ID de tweet invalide'),
   handleValidationErrors
-], async (req, res) => {
+], feedCacheRoute('tweet', ['id']), async (req, res) => {
   try {
     const { id } = req.params;
 

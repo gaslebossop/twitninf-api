@@ -15,6 +15,7 @@ const logger = require('../utils/logger');
 const { spaceOutReplies } = require('../utils/feedShape');
 const rustClient = require('../services/rustRecommenderClient');
 const paidContentService = require('../services/paidContentService');
+const { withFeedCache } = require('../services/feedCache');
 const { sequelize } = require('../database');
 const { QueryTypes } = require('sequelize');
 const redis = require('redis');
@@ -375,41 +376,60 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
   const limitInt = Math.min(parseInt(limit) || 50, 200);
   const offsetInt = parseInt(offset) || 0;
 
+  // Les expériences ne sont activées que pour le client Windows : deux clients
+  // différents ne doivent donc PAS partager une réponse cachée, sinon
+  // l'affectation aux expériences fuit de l'un à l'autre. D'où sa présence dans
+  // la clé.
+  const enableExperiments = req.headers['x-twitninf-client'] === 'windows-electron';
+
   try {
-    const result = await rustClient.getRecommendations(userId, {
-      mode,
-      limit: limitInt,
-      offset: offsetInt,
-      enableExperiments: req.headers['x-twitninf-client'] === 'windows-electron',
-    });
-
-    logger.info(`[NeuralRank] user=${userId} mode=${mode} count=${result.count} latency=${result.latencyMs}ms cache=${result.cacheHit}`);
-
-    // Hydrater les IDs en tweets complets
-    const tweets = await fetchTweetsByIds(result.tweetIds, userId, result.experiments);
-
-    // Contenus payants : ce fil est construit à partir d'IDs classés par le
-    // service Rust, qui ne sait rien des verrous. Le masquage se fait donc ici,
-    // juste avant l'envoi, comme sur toutes les autres listes.
-    if (!(await paidContentService.maskTweetsOrFail(tweets, userId, res))) return;
-
-    return res.json({
-      success: true,
-      engine: 'rust-neural-rank',
-      data: {
-        recommendations: tweets,
-        count: tweets.length,
-        algorithm: result.algorithm,
-        latency_ms: result.latencyMs,
-        cache_hit: result.cacheHit,
-        pagination: {
+    let refusedByPaidContent = false;
+    const { payload } = await withFeedCache(
+      { scope: 'neural', userId, params: { mode, limit: limitInt, offset: offsetInt, exp: enableExperiments ? 1 : 0 } },
+      async () => {
+        const result = await rustClient.getRecommendations(userId, {
+          mode,
           limit: limitInt,
           offset: offsetInt,
-          hasMore: result.count >= limitInt,
-          total: result.count,
-        },
-      },
-    });
+          enableExperiments,
+        });
+
+        logger.info(`[NeuralRank] user=${userId} mode=${mode} count=${result.count} latency=${result.latencyMs}ms cache=${result.cacheHit}`);
+
+        // Hydrater les IDs en tweets complets
+        const tweets = await fetchTweetsByIds(result.tweetIds, userId, result.experiments);
+
+        // Contenus payants : ce fil est construit à partir d'IDs classés par le
+        // service Rust, qui ne sait rien des verrous. Le masquage se fait donc ici,
+        // juste avant l'envoi, comme sur toutes les autres listes — et surtout
+        // AVANT la mise en cache, pour qu'une charge cachée soit déjà masquée.
+        if (!(await paidContentService.maskTweetsOrFail(tweets, userId, res))) {
+          refusedByPaidContent = true;
+          return null;
+        }
+
+        return {
+          success: true,
+          engine: 'rust-neural-rank',
+          data: {
+            recommendations: tweets,
+            count: tweets.length,
+            algorithm: result.algorithm,
+            latency_ms: result.latencyMs,
+            cache_hit: result.cacheHit,
+            pagination: {
+              limit: limitInt,
+              offset: offsetInt,
+              hasMore: result.count >= limitInt,
+              total: result.count,
+            },
+          },
+        };
+      }
+    );
+
+    if (refusedByPaidContent) return;
+    return res.json(payload);
   } catch (err) {
     logger.warn(`[NeuralRank] Rust service unavailable (${err.message}), using JS fallback`);
 

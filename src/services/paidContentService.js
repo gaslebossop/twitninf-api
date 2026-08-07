@@ -280,6 +280,18 @@ async function purchase({ buyerId, paidContentId, autoConvert = false, allowedCu
       payout_transaction_id: payoutTxId,
     }, { transaction: t });
 
+    // Les réponses de feed déjà mises en cache pour cet acheteur portent le
+    // masquage d'AVANT l'achat. Sans cette invalidation, il paierait puis
+    // attendrait l'expiration du cache avant de voir ce qu'il vient d'acheter —
+    // le genre de latence qu'un utilisateur lit comme « on m'a pris mon argent ».
+    // Après le commit seulement : avant, une lecture concurrente remettrait en
+    // cache l'état verrouillé.
+    t.afterCommit(() => {
+      require('./feedCache')
+        .invalidateUserFeed(buyerId)
+        .catch(() => { /* le cache n'est pas critique, l'achat est déjà acté */ });
+    });
+
     await lock.update({
       purchases_count: lock.purchases_count + 1,
       gross_twc: roundTWC(toAmount(lock.gross_twc) + price),

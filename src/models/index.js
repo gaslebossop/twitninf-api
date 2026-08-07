@@ -1682,6 +1682,37 @@ async function closeConnection() {
   }
 }
 
+/**
+ * 🗃️ Invalidation du cache de feed à la publication.
+ *
+ * Un hook de modèle plutôt qu'un appel dans les routes : `Tweet.create` est
+ * appelé depuis au moins cinq endroits de `tweetRoutes.js` (tweet simple,
+ * vidéo, fils, réponses, PolicierCongo). Les instrumenter un par un, c'est
+ * garantir d'en oublier un aujourd'hui ou d'en rater un nouveau demain.
+ *
+ * Seul l'auteur est invalidé. Les fils de ses abonnés restent périmés jusqu'au
+ * TTL, ce qui est assumé : quelques dizaines de secondes de retard sur le fil
+ * des autres est le prix du cache, alors que ne pas voir son propre tweet
+ * juste après l'avoir publié passe pour un bug.
+ *
+ * `afterCommit` est indispensable quand il y a une transaction : invalider
+ * avant le commit rouvrirait une fenêtre où une lecture concurrente remet en
+ * cache l'état d'AVANT la publication, et le cache resterait faux jusqu'au TTL.
+ */
+Tweet.addHook('afterCreate', (tweet, options) => {
+  const authorId = tweet?.user_id;
+  if (!authorId) return;
+  // Chargement paresseux : `feedCache` ne dépend pas des modèles, mais on évite
+  // de figer l'ordre des `require` au chargement de ce fichier.
+  const purge = () => {
+    require('../services/feedCache')
+      .invalidateUserFeed(authorId)
+      .catch((error) => logger.warn(`[feedCache] Invalidation après publication en échec: ${error.message}`));
+  };
+  if (options?.transaction) options.transaction.afterCommit(purge);
+  else purge();
+});
+
 module.exports = {
   sequelize,
   User,

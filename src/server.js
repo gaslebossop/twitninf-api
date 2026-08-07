@@ -739,6 +739,10 @@ app.get('/api/health', async (req, res) => {
       // tourne quand même, replié sur le primaire, mais il faut le savoir).
       // `lag_seconds` est le retard de réplication réel.
       read_replica: await require('./database/readReplica').checkRead(),
+      // Cache de feed partagé : `hit_rate` est la seule façon de vérifier qu'il
+      // sert vraiment, au lieu de le supposer. Les compteurs sont propres au
+      // process, donc à lire nœud par nœud.
+      feed_cache: require('./services/feedCache').getStats(),
       redis: redisStatus,
       transaction_authorization: fraudService.isReady() ? 'ready' : 'fail_closed',
       memory: process.memoryUsage(),
