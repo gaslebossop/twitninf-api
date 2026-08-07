@@ -379,7 +379,12 @@ def wait_until_replicas_ready(
             else:
                 first_ready_at.pop(label, None)
         if len(ready) < len(replicas):
-            time.sleep(1)
+            # Sondage a 250 ms et non a 1 s. Un C repond a /api/health/live en
+            # ~1,6 s : a 1 s de granularite, on perdait jusqu'a une seconde a
+            # le constater, puis la meme granularite s'appliquait a chaque pas
+            # du warmup. La sonde ne touche ni PostgreSQL ni Redis, elle ne
+            # coute donc rien au noeud qui demarre.
+            time.sleep(0.25)
     return ready
 
 
@@ -844,17 +849,23 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
     if changed:
         state.update({"high_streak": 0, "low_streak": 0, "last_action": now})
     save_state(state)
+    # `snapshot()` place deja `read_bias_active` dans le rapport, mais il l'a lu
+    # AVANT que ce cycle ne decide de l'activer ou de le couper. C'est la valeur
+    # d'apres la decision qui interesse le lecteur, donc elle ecrase celle du
+    # rapport — en l'ecrivant dans le dictionnaire plutot qu'en la passant en
+    # plus, sans quoi Python leve `got multiple values for keyword argument`.
+    payload = dict(report)
+    payload["read_bias_active"] = bias_active
     emit(
         "evaluated",
         a_overloaded=a_high,
         b_overloaded=b_high,
         overall_overloaded=overall_high,
         a_semi_overloaded=a_semi_high,
-        read_bias_active=bias_active,
         high_streak=state["high_streak"],
         low_streak=state["low_streak"],
         changed=changed,
-        **report,
+        **payload,
     )
     return 0
 

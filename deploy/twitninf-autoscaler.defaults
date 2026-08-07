@@ -4,8 +4,16 @@
 # 32 est une garde de ports/processus; la vraie limite est calculée avec la RAM.
 AUTOSCALE_MAX_REPLICAS=32
 AUTOSCALE_REPLICA_MEMORY_BUDGET_MB=1536
-AUTOSCALE_MAX_SCALE_OUT_BATCH=1
-AUTOSCALE_WINDOW_SECONDS=30
+# Reactivite (revue le 2026-08-07). Un C est pret en ~1,4 s depuis que les
+# migrations et le prechauffage ont ete retires du demarrage des noeuds web :
+# on peut donc reagir plus vite sans risquer d'ecrouler A en lancant des Node
+# lourds qui mettaient 10 s a servir.
+#   fenetre 30 s -> 15 s : moitie moins de latence de detection (3 mesures
+#   restent prises, le timer tourne toutes les 5 s).
+#   lot 1 -> 2 : uniquement sur le chemin « catastrophique » (>=10 % d'erreurs
+#   ou p95 >= 2 s), la montee normale reste strictement un C a la fois.
+AUTOSCALE_MAX_SCALE_OUT_BATCH=2
+AUTOSCALE_WINDOW_SECONDS=15
 AUTOSCALE_MIN_REQUESTS_PER_SIDE=30
 AUTOSCALE_HIGH_P95_SECONDS=0.8
 AUTOSCALE_HIGH_ERROR_RATE=0.05
@@ -27,17 +35,24 @@ AUTOSCALE_READ_BIAS_LOW_STREAK=12
 AUTOSCALE_READ_BIAS_B_P95_RATIO=0.9
 AUTOSCALE_READ_BIAS_B_ERROR_MARGIN=0.01
 
-# Une réplique est retirée à la fois après 10 minutes stables ou sans trafic.
+# Retrait : une replique a la fois, apres 3 minutes calmes (36 cycles de 5 s)
+# au lieu de 10, puis une toutes les 2 minutes au lieu de 10. Redemarrer un C
+# coutant desormais ~1,4 s, garder trois C inutiles pendant une demi-heure
+# coute plus cher (4,5 Go) que de les relancer si la charge revient.
 AUTOSCALE_LOW_P95_SECONDS=0.3
 AUTOSCALE_LOW_ERROR_RATE=0.01
-AUTOSCALE_LOW_STREAK=120
-AUTOSCALE_IN_COOLDOWN_SECONDS=600
+AUTOSCALE_LOW_STREAK=36
+AUTOSCALE_IN_COOLDOWN_SECONDS=120
 
 # A doit conserver une marge pour le worker, PostgreSQL, Redis et Nginx.
 AUTOSCALE_MIN_AVAILABLE_BEFORE_MB=4608
 AUTOSCALE_MIN_AVAILABLE_AFTER_MB=3072
 AUTOSCALE_START_TIMEOUT_SECONDS=75
-AUTOSCALE_WARMUP_SECONDS=3
+# 1 s au lieu de 3 : avec un sondage a 250 ms, c'est deja quatre reponses
+# consecutives de /api/health/live avant d'entrer dans Nginx. Le warmup long
+# datait de l'epoque ou un C mettait ~10 s a demarrer et pouvait repondre puis
+# retomber ; il en met 1,6 aujourd'hui.
+AUTOSCALE_WARMUP_SECONDS=1
 AUTOSCALE_DRAIN_SECONDS=15
 AUTOSCALE_MANUAL_LOCK_WAIT_SECONDS=10
 AUTOSCALE_MANUAL_SCALE_OUT_PAUSE_SECONDS=90

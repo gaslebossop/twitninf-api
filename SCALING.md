@@ -232,7 +232,45 @@ source de vérité : les processus PM2 orphelins sont supprimés et le dump PM2
 est resauvegardé, ce qui empêche leur retour aléatoire après un déploiement.
 PolicierCongo reste le seul worker sur A:3004 pendant tout le cycle.
 
-Un C arrêté manuellement reste désactivé, même si les mesures des 30 secondes
+### Réactivité (revue le 2026-08-07)
+
+| Réglage | Avant | Après | Effet |
+|---|---|---|---|
+| `AUTOSCALE_WINDOW_SECONDS` | 30 | **15** | moitié moins de latence de détection |
+| `AUTOSCALE_MAX_SCALE_OUT_BATCH` | 1 | **2** | uniquement sur le chemin catastrophique |
+| `AUTOSCALE_WARMUP_SECONDS` | 3 | **1** | 4 réponses consécutives suffisent |
+| Intervalle de sondage | 1 s | **250 ms** | on constate la disponibilité tout de suite |
+| `AUTOSCALE_LOW_STREAK` | 120 (10 min) | **36 (3 min)** | retrait plus rapide |
+| `AUTOSCALE_IN_COOLDOWN_SECONDS` | 600 | **120** | un retrait toutes les 2 min |
+
+**Création d'un C mesurée : 20,5 s → 3,0 s.** Le process lui-même répond à
+`/api/health/live` en 1,6 s ; le reste était du sondage à gros grain et un
+warmup calibré pour l'époque où un C mettait ~10 s à démarrer.
+
+> Le plancher restant, ce sont les invocations du CLI `pm2` (`delete`, `start`,
+> `save`), qui paient chacune un démarrage de Node. C'est là qu'il faudrait
+> creuser pour descendre encore.
+
+### Piège : `disabled_replicas` bloque tout, en silence
+
+Un C arrêté manuellement est ajouté à `disabled_replicas` dans
+`/var/lib/twitninf-autoscaler/state.json` et **n'en sort jamais tout seul**.
+Le 2026-08-07, C4 à C32 y étaient tous — 29 entrées — et C1/C2/C3 tournaient :
+la liste des candidats était donc vide, et l'autoscaler « ne faisait plus
+rien » sans la moindre erreur. Le bouton du panneau Windows renvoyait un
+succès (`code: 0`) pour la même raison : la commande s'exécutait, mais n'avait
+aucun C à démarrer.
+
+À vérifier en premier quand plus aucun C n'apparaît :
+
+```bash
+sudo /usr/local/sbin/twitninf-autoscaler --status | python3 -m json.tool | grep -A2 disabled
+```
+
+Pour tout réhabiliter sans démarrer les process, vider la liste dans
+`state.json` (sauvegarder le fichier d'abord).
+
+Un C arrêté manuellement reste désactivé, même si les mesures des 15 secondes
 précédentes sont encore hautes. L'autoscaler peut choisir un autre numéro ; le
 bouton **Démarrer** réactive explicitement le C arrêté.
 Tout arrêt manuel suspend aussi les scale-out automatiques pendant 90 secondes,
