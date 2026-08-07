@@ -82,6 +82,9 @@ READ_BIAS_P95_SECONDS = env_float("AUTOSCALE_READ_BIAS_P95_SECONDS", 0.4)
 READ_BIAS_ERROR_RATE = env_float("AUTOSCALE_READ_BIAS_ERROR_RATE", 0.02)
 READ_BIAS_HIGH_STREAK = env_int("AUTOSCALE_READ_BIAS_HIGH_STREAK", 2)
 READ_BIAS_LOW_STREAK = env_int("AUTOSCALE_READ_BIAS_LOW_STREAK", 12)
+# Comparaison B vs A, pas seuil absolu — voir `b_can_absorb_reads`.
+READ_BIAS_B_P95_RATIO = env_float("AUTOSCALE_READ_BIAS_B_P95_RATIO", 0.9)
+READ_BIAS_B_ERROR_MARGIN = env_float("AUTOSCALE_READ_BIAS_B_ERROR_MARGIN", 0.01)
 LOW_P95_SECONDS = env_float("AUTOSCALE_LOW_P95_SECONDS", 0.3)
 LOW_ERROR_RATE = env_float("AUTOSCALE_LOW_ERROR_RATE", 0.01)
 HIGH_STREAK_REQUIRED = env_int("AUTOSCALE_HIGH_STREAK", 1)
@@ -559,6 +562,35 @@ def semi_overloaded(summary: dict[str, Any], minimum: int) -> bool:
     )
 
 
+def b_can_absorb_reads(a: dict[str, Any], b: dict[str, Any], minimum: int) -> bool:
+    """B est-il en meilleur etat que A, donc capable d'en prendre davantage ?
+
+    Le garde-fou d'origine etait `not overloaded(b)` — un seuil ABSOLU, le meme
+    que pour A. Sous une vraie surcharge, B franchit ce seuil en meme temps que
+    A, tout simplement parce que ses dependances (Redis, recommandeur Rust)
+    vivent sur A : quand A sature, B ralentit par ricochet. Le report de lecture
+    etait donc neutralise exactement quand il servait a quelque chose.
+
+    Releve du 2026-08-07 (1 000 VU) pendant lequel il ne s'est jamais declenche :
+
+        A : p95 7,4-9,9 s, jusqu'a 4,8 % d'erreurs
+        B : p95 3,6-5,3 s, 0 % d'erreurs
+
+    B etait deux fois plus rapide que A et sans une seule erreur, et pourtant
+    juge « surcharge ». La bonne question n'est pas « B va-t-il bien ? » mais
+    « B va-t-il mieux que A ? » : deplacer des lectures d'un noeud vers un noeud
+    moins bon serait absurde, les deplacer vers un noeud meilleur reste utile
+    meme si aucun des deux n'est confortable.
+    """
+    if b["requests"] < minimum:
+        # Trop peu d'echantillons pour comparer honnetement : on s'abstient.
+        return False
+    if b["error_rate"] > a["error_rate"] + READ_BIAS_B_ERROR_MARGIN:
+        # B casse plus que A : lui envoyer plus de trafic aggraverait le total.
+        return False
+    return b["p95_seconds"] <= a["p95_seconds"] * READ_BIAS_B_P95_RATIO
+
+
 def load_state() -> dict[str, Any]:
     defaults = {
         "high_streak": 0,
@@ -737,7 +769,9 @@ def autoscale(action: str, replica_label: str | None = None) -> int:
     b_high = overloaded(report["b"], MIN_REQUESTS_PER_SIDE)
     overall_high = overloaded(report["all"], MIN_REQUESTS_PER_SIDE * 2)
     a_semi_high = semi_overloaded(report["a"], MIN_REQUESTS_PER_SIDE)
-    wants_read_bias = a_semi_high and not b_high
+    wants_read_bias = a_semi_high and b_can_absorb_reads(
+        report["a"], report["b"], MIN_REQUESTS_PER_SIDE
+    )
     if wants_read_bias:
         state["read_bias_high_streak"] = int(state.get("read_bias_high_streak", 0)) + 1
         state["read_bias_low_streak"] = 0

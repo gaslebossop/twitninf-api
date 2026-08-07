@@ -88,6 +88,64 @@ Chaque requête déviée vers B est une requête que le PostgreSQL de A ne voit
 plus. **Un C, lui, ne soulage que le CPU de Node** : il interroge la même base
 que A. B est donc le seul levier qui soulage réellement le primaire, ce qui
 justifie qu'il soit privilégié dans ce pool et pas dans l'autre.
+
+### Le garde-fou sur B était un seuil absolu — il ne pouvait jamais céder
+
+Même une fois la configuration Nginx posée, le report ne se déclenchait
+toujours pas sous charge réelle. La condition était :
+
+```python
+wants_read_bias = a_semi_high and not b_high   # b_high = seuil ABSOLU
+```
+
+Or B franchit ce seuil absolu en même temps que A, parce que ses dépendances
+(Redis, recommandeur Rust) vivent sur A : quand A sature, B ralentit par
+ricochet. Relevé du run de 1 000 VU du 2026-08-07 01:38, pendant lequel le
+report ne s'est jamais activé :
+
+| | p95 | erreurs |
+|---|---|---|
+| A | 7,4 – 9,9 s | jusqu'à 4,8 % |
+| **B** | **3,6 – 5,3 s** | **0 %** |
+
+B était deux fois plus rapide que A et sans une seule erreur, et pourtant jugé
+« surchargé ». Le mécanisme censé secourir A était neutralisé précisément
+quand A allait mal.
+
+Remplacé par une **comparaison** (`b_can_absorb_reads`) : la bonne question
+n'est pas « B va-t-il bien ? » mais « B va-t-il mieux que A ? ». B doit être au
+moins 10 % plus rapide que A (`AUTOSCALE_READ_BIAS_B_P95_RATIO`) et ne pas
+casser plus que lui d'un point (`AUTOSCALE_READ_BIAS_B_ERROR_MARGIN`), avec un
+minimum d'échantillons. Déplacer des lectures vers un nœud moins bon serait
+absurde ; vers un nœud meilleur, ça reste utile même si aucun des deux n'est
+confortable.
+
+Vérifié end-to-end sur un run de 1 000 VU (02:00) : le report s'est activé à
+02:00:43 et éteint à 02:02:14 avec la fin de la charge. Répartition relevée
+dans le journal Nginx, fenêtrée sur ces deux périodes :
+
+| Backend | Report éteint | Report actif |
+|---|---|---|
+| **A (process principal)** | **28,8 %** | **12,4 %** |
+| B | 19,7 % | 16,7 % |
+| C1 / C2 / C3 | ~25 % chacun | ~23,6 % chacun |
+
+**A est soulagé de plus de la moitié de sa part** — c'est l'objectif. Mais B
+n'atteint que 16,7 % au lieu des ~32 % que ses poids visent.
+
+> **Piste identifiée, non corrigée : `worker_shutdown_timeout` n'est pas défini
+> dans `nginx.conf`.** Après un `reload`, les anciens workers survivent tant que
+> des connexions client restent ouvertes — et un générateur de charge maintient
+> les siennes pendant tout le run. Une part des requêtes a donc continué d'être
+> routée par la configuration d'*avant* l'activation du report, ce qui tire la
+> répartition observée vers les anciens poids. Poser
+> `worker_shutdown_timeout 30s;` bornerait ce délai, **mais couperait aussi les
+> connexions socket.io de plus de 30 s à chaque rechargement** : à arbitrer,
+> pas à appliquer à la légère.
+
+> Rappel de cadrage : ce mécanisme **déplace** de la charge, il n'en crée pas.
+> Au même run, les cinq nœuds étaient à 10 s de p95 et 12 % d'erreurs pour
+> ~112 rps. Router mieux ne remplace pas de la capacité manquante.
 - **Épinglé sur A** : `/storage/`, `/static/`, toutes les routes
   `/api/**/policiercongo*`, et les cinq points d'entrée qui reçoivent un fichier
   — `/api/users/me/avatar`, `/api/users/me/banner`, `/api/tweets/video`,

@@ -73,6 +73,8 @@ set_autoscaler_default AUTOSCALE_READ_BIAS_P95_SECONDS 0.4
 set_autoscaler_default AUTOSCALE_READ_BIAS_ERROR_RATE 0.02
 set_autoscaler_default AUTOSCALE_READ_BIAS_HIGH_STREAK 2
 set_autoscaler_default AUTOSCALE_READ_BIAS_LOW_STREAK 12
+set_autoscaler_default AUTOSCALE_READ_BIAS_B_P95_RATIO 0.9
+set_autoscaler_default AUTOSCALE_READ_BIAS_B_ERROR_MARGIN 0.01
 
 if [[ ! -e /etc/nginx/twitninf-autoscale-upstreams.conf ]]; then
   printf '%s\n' '# Géré automatiquement par twitninf-autoscaler. Ne pas éditer.' \
