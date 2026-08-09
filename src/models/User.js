@@ -221,7 +221,25 @@ const userSchema = {
     type: DataTypes.DATE,
     allowNull: true
   },
-  
+
+  // Consentement RGPD. `consent_version` porte la version du socle acceptee :
+  // une version differente de celle en vigueur vaut « jamais accepte », donc la
+  // question est reposee. La preuve detaillee vit dans user_consent_records.
+  consent_version: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+    defaultValue: null
+  },
+  consent_accepted_at: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  consent_preferences: {
+    type: DataTypes.JSONB,
+    allowNull: false,
+    defaultValue: {}
+  },
+
   // Statuts
   verified: {
     type: DataTypes.BOOLEAN,

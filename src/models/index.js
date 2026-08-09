@@ -39,6 +39,7 @@ const OAuthCodeModule = require('./OAuthCode');
 const OAuthTokenModule = require('./OAuthToken');
 const SessionModule = require('./Session');
 const UserLocationEventModule = require('./UserLocationEvent');
+const UserConsentRecordModule = require('./UserConsentRecord');
 const BotReputation = require('./BotReputation');
 const Conversation = require('./Conversation');
 const ConversationParticipant = require('./ConversationParticipant');
@@ -135,6 +136,7 @@ const OAuthCode = OAuthCodeModule(sequelize);
 const OAuthToken = OAuthTokenModule(sequelize);
 const Session = SessionModule(sequelize);
 const UserLocationEvent = UserLocationEventModule(sequelize);
+const UserConsentRecord = UserConsentRecordModule(sequelize);
 BotReputation.initBotReputationModel(sequelize);
 Conversation.initConversationModel(sequelize);
 ConversationParticipant.initConversationParticipantModel(sequelize);
@@ -788,6 +790,16 @@ User.hasMany(UserLocationEvent, {
   onDelete: 'CASCADE'
 });
 UserLocationEvent.belongsTo(User, {
+  foreignKey: 'user_id',
+  as: 'user'
+});
+
+User.hasMany(UserConsentRecord, {
+  foreignKey: 'user_id',
+  as: 'consentRecords',
+  onDelete: 'CASCADE'
+});
+UserConsentRecord.belongsTo(User, {
   foreignKey: 'user_id',
   as: 'user'
 });
@@ -1753,6 +1765,7 @@ module.exports = {
   OAuthToken,
   Session,
   UserLocationEvent,
+  UserConsentRecord,
   Conversation,
   ConversationParticipant,
   Message,

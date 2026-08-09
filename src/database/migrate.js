@@ -268,6 +268,40 @@ async function runMigrations() {
         ON user_location_events (country_code, region);
     `);
 
+    // Consentement RGPD : etat courant sur users pour pouvoir decider en une
+    // requete s'il faut reposer la question, et journal append-only qui
+    // constitue la PREUVE du consentement (art. 7.1 : c'est au responsable de
+    // traitement de demontrer l'accord). On n'ecrase jamais une ligne du
+    // journal : un retrait s'ajoute, il n'effface pas l'accord precedent.
+    await sequelize.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS consent_version VARCHAR(20) NULL,
+        ADD COLUMN IF NOT EXISTS consent_accepted_at TIMESTAMPTZ NULL,
+        ADD COLUMN IF NOT EXISTS consent_preferences JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+      CREATE TABLE IF NOT EXISTS user_consent_records (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        consent_version VARCHAR(20) NOT NULL,
+        purpose VARCHAR(40) NOT NULL,
+        granted BOOLEAN NOT NULL,
+        required BOOLEAN NOT NULL,
+        source VARCHAR(24) NOT NULL,
+        platform VARCHAR(32) NULL,
+        app_version VARCHAR(32) NULL,
+        -- Empreinte HMAC, jamais l'adresse en clair : la preuve d'origine est
+        -- conservee sans stocker une donnee de plus que necessaire.
+        ip_fingerprint VARCHAR(64) NULL,
+        user_agent VARCHAR(255) NULL,
+        recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_user_consent_records_user_recorded
+        ON user_consent_records (user_id, recorded_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_user_consent_records_purpose
+        ON user_consent_records (purpose, granted);
+    `);
+
     await sequelize.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS algorithmic_visibility_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0;
     `);

@@ -408,6 +408,10 @@ app.use('/api', exceptHealth(blockBannedIp));
 // ── Fraude : analyse asynchrone de chaque requête API (background, non-bloquant)
 app.use('/api', exceptHealth(checkApiRequest));
 
+// Documents contractuels, hors /api : accessibles sans compte ni jeton, car il
+// faut pouvoir les lire AVANT d'accepter quoi que ce soit.
+app.use('/legal', require('./routes/legalRoutes'));
+
 // Routes API - Version complète avec toutes les fonctionnalités
 app.use('/api/auth', authRoutes);
 

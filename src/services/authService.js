@@ -6,6 +6,7 @@ const User = require('../models/User');
 const config = require('../config/config');
 const logger = require('../utils/logger');
 const BanService = require('./banService');
+const consentConfig = require('../config/consent');
 const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
 
 // Durée de vie d'une session inactive. Chaque rotation la fait glisser :
@@ -22,6 +23,26 @@ function getUserLocationEventModel() {
   return require('../models').UserLocationEvent;
 }
 
+function getUserConsentRecordModel() {
+  return require('../models').UserConsentRecord;
+}
+
+/**
+ * Empreinte de l'adresse IP pour le journal de consentement.
+ *
+ * Une HMAC avec le secret du serveur, et non un simple SHA-256 : l'espace des
+ * adresses IPv4 est assez petit pour etre entierement pre-calcule, donc un
+ * hachage sans cle se re-identifie trivialement et ne serait pas une mesure de
+ * protection.
+ */
+function hashIpForConsent(ip) {
+  const key = process.env.FRAUD_DATA_HASH_KEY
+    || process.env.JWT_SECRET
+    || process.env.SESSION_SECRET
+    || 'local-development-consent-key';
+  return crypto.createHmac('sha256', key).update(`consent-ip:${String(ip).trim()}`).digest('hex');
+}
+
 /** Champs strictement reserves au proprietaire du compte. */
 function getOwnerPrivateProfile(user) {
   return {
@@ -31,6 +52,13 @@ function getOwnerPrivateProfile(user) {
     demographics_validated_at: user.demographics_validated_at || null,
     location_consent_status: user.location_consent_status || 'undetermined',
     location_consent_updated_at: user.location_consent_updated_at || null,
+    consent_version: user.consent_version || null,
+    consent_accepted_at: user.consent_accepted_at || null,
+    consent_preferences: user.consent_preferences || {},
+    // Calcule par le serveur : le client n'a pas a comparer des versions
+    // lui-meme, sinon une vieille application afficherait un etat faux.
+    consent_required_version: consentConfig.CONSENT_VERSION,
+    needs_consent: consentConfig.needsConsent(user),
   };
 }
 
@@ -484,7 +512,8 @@ class AuthService {
           'stats', 'created_at', 'last_activity', 'is_active',
           'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
           'preferred_language', 'declared_age', 'birth_day', 'birth_month',
-          'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at'
+          'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at',
+          'consent_version', 'consent_accepted_at', 'consent_preferences'
         ]
       });
       if (!user || !user.is_active) {
@@ -508,7 +537,8 @@ class AuthService {
           'stats', 'created_at', 'last_activity', 'is_active',
           'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
           'preferred_language', 'declared_age', 'birth_day', 'birth_month',
-          'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at'
+          'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at',
+          'consent_version', 'consent_accepted_at', 'consent_preferences'
         ]
       });
 
@@ -521,7 +551,8 @@ class AuthService {
           'stats', 'created_at', 'last_activity', 'is_active',
           'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
           'preferred_language', 'declared_age', 'birth_day', 'birth_month',
-          'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at'
+          'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at',
+          'consent_version', 'consent_accepted_at', 'consent_preferences'
         ]
       });
 
@@ -680,6 +711,133 @@ class AuthService {
         recorded: created,
         captured_at: event.captured_at,
         permission_status: permissionStatus,
+      },
+    };
+  }
+
+  /**
+   * Socle en vigueur + etat du compte. Le client construit son ecran a partir
+   * de cette reponse uniquement : aucun libelle de finalite n'est code en dur
+   * dans les applications, sinon un texte corrige ici resterait faux chez les
+   * personnes qui n'ont pas mis a jour.
+   */
+  async getConsentState(userId) {
+    const user = await User.findByPk(userId, {
+      attributes: ['id', 'is_active', 'consent_version', 'consent_accepted_at', 'consent_preferences'],
+    });
+    if (!user || !user.is_active) throw new Error('Utilisateur non trouve');
+
+    return {
+      success: true,
+      data: {
+        ...consentConfig.consentManifest(),
+        accepted_version: user.consent_version || null,
+        accepted_at: user.consent_accepted_at || null,
+        preferences: {
+          ...consentConfig.defaultOptionalPreferences(),
+          ...(user.consent_preferences || {}),
+        },
+        needs_consent: consentConfig.needsConsent(user),
+      },
+    };
+  }
+
+  /**
+   * Enregistre un accord, ou une modification des choix optionnels.
+   *
+   * Trois garde-fous qui portent la conformite :
+   *
+   * 1. La version est imposee par le serveur. Un client qui renvoie une
+   *    version differente de celle en vigueur est refuse : accepter un socle
+   *    perime laisserait croire le compte a jour alors qu'il ne l'est pas.
+   * 2. Les finalites requises doivent TOUTES etre accordees. Elles reposent sur
+   *    l'execution du contrat, pas sur un consentement : sans elles il n'y a
+   *    pas de service a fournir.
+   * 3. Chaque finalite, accordee ou refusee, produit une ligne de journal. Un
+   *    refus est une information aussi importante qu'un accord — c'est lui qui
+   *    prouve qu'on n'a pas traite les donnees sans droit.
+   */
+  async recordConsent(userId, payload, context = {}) {
+    const UserConsentRecord = getUserConsentRecordModel();
+    const version = String(payload?.version || '');
+    const source = consentConfig.CONSENT_SOURCES.includes(payload?.source)
+      ? payload.source
+      : 'startup_gate';
+    const answers = payload?.accepted && typeof payload.accepted === 'object' ? payload.accepted : null;
+
+    if (version !== consentConfig.CONSENT_VERSION) {
+      throw new Error('Version de consentement invalide');
+    }
+    if (!answers) {
+      throw new Error('Reponses de consentement invalides');
+    }
+
+    const user = await User.findByPk(userId);
+    if (!user || !user.is_active) throw new Error('Utilisateur non trouve');
+
+    // `settings` ne sert qu'a revenir sur les choix optionnels : le socle
+    // contractuel y est deja acquis et n'a pas a etre renvoye.
+    const revisingOptionalOnly = source === 'settings' && !!user.consent_accepted_at;
+    if (!revisingOptionalOnly) {
+      const missing = consentConfig.REQUIRED_KEYS.filter((key) => answers[key] !== true);
+      if (missing.length > 0) {
+        const error = new Error('Le socle obligatoire doit etre accepte');
+        error.missingRequired = missing;
+        throw error;
+      }
+    }
+
+    const preferences = consentConfig.OPTIONAL_KEYS.reduce((acc, key) => ({
+      ...acc,
+      // Une cle absente vaut refus, jamais accord tacite.
+      [key]: answers[key] === true,
+    }), {});
+
+    const trim = (value, max) => (value == null ? null : String(value).trim().slice(0, max) || null);
+    const recordedAt = new Date();
+    const journal = [
+      ...(revisingOptionalOnly ? [] : consentConfig.REQUIRED_KEYS.map((key) => ({
+        purpose: key,
+        granted: true,
+        required: true,
+      }))),
+      ...consentConfig.OPTIONAL_KEYS.map((key) => ({
+        purpose: key,
+        granted: preferences[key],
+        required: false,
+      })),
+    ].map((entry) => ({
+      ...entry,
+      user_id: userId,
+      consent_version: consentConfig.CONSENT_VERSION,
+      source,
+      platform: trim(context.platform, 32),
+      app_version: trim(context.appVersion, 32),
+      ip_fingerprint: context.ip ? hashIpForConsent(context.ip) : null,
+      user_agent: trim(context.userAgent, 255),
+      recorded_at: recordedAt,
+    }));
+
+    await UserConsentRecord.bulkCreate(journal);
+
+    await user.update({
+      consent_version: consentConfig.CONSENT_VERSION,
+      // Conserve la date du PREMIER accord au socle courant : revenir sur une
+      // option ne doit pas donner l'impression d'un nouveau consentement.
+      consent_accepted_at: revisingOptionalOnly && user.consent_accepted_at
+        ? user.consent_accepted_at
+        : recordedAt,
+      consent_preferences: preferences,
+    });
+
+    return {
+      success: true,
+      message: revisingOptionalOnly ? 'Choix enregistres' : 'Consentement enregistre',
+      data: {
+        version: consentConfig.CONSENT_VERSION,
+        accepted_at: user.consent_accepted_at,
+        preferences,
+        needs_consent: false,
       },
     };
   }

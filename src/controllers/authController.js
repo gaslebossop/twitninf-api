@@ -331,6 +331,56 @@ class AuthController {
     }
   }
 
+  async getConsentState(req, res) {
+    try {
+      const result = await authService.getConsentState(req.user.id);
+      res.status(200).json(result);
+    } catch (error) {
+      logger.error('Erreur dans getConsentState:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors de la lecture du consentement',
+      });
+    }
+  }
+
+  async recordConsent(req, res) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Consentement invalide',
+          errors: errors.array(),
+        });
+      }
+
+      const result = await authService.recordConsent(
+        req.user.id,
+        req.body,
+        sessionContextFrom(req),
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      // Le socle refuse n'est pas une erreur serveur : le client doit pouvoir
+      // afficher precisement ce qui manque.
+      if (error.missingRequired) {
+        return res.status(422).json({
+          success: false,
+          message: error.message,
+          missingRequired: error.missingRequired,
+        });
+      }
+
+      logger.error('Erreur dans recordConsent:', error);
+      const invalid = error.message.includes('invalide');
+      res.status(invalid ? 400 : 500).json({
+        success: false,
+        message: invalid ? error.message : 'Erreur lors de l\'enregistrement du consentement',
+      });
+    }
+  }
+
   async recordSessionLocation(req, res) {
     try {
       const errors = validationResult(req);

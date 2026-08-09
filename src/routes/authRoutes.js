@@ -11,6 +11,7 @@ const {
   checkPlatform
 } = require('../middleware/authMiddleware');
 const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
+const { ALL_KEYS: CONSENT_KEYS, CONSENT_SOURCES } = require('../config/consent');
 const { checkLogin, reportLoginOutcome } = require('../middleware/fraudMiddleware');
 
 const router = express.Router();
@@ -122,6 +123,33 @@ const demographicsValidation = [
   body('birthMonth')
     .isInt({ min: 1, max: 12 })
     .withMessage('Mois de naissance invalide'),
+];
+
+const consentValidation = [
+  body('version')
+    .isString()
+    .trim()
+    .isLength({ min: 1, max: 20 })
+    .withMessage('Version de consentement invalide'),
+  body('source')
+    .optional()
+    .isIn(CONSENT_SOURCES)
+    .withMessage('Source de consentement invalide'),
+  body('accepted')
+    .isObject()
+    .withMessage('Reponses de consentement invalides'),
+  // Chaque reponse doit etre un booleen explicite : une chaine vide ou un
+  // `null` ne doit jamais pouvoir passer pour un accord.
+  body('accepted').custom((value) => {
+    const keys = Object.keys(value || {});
+    if (keys.some((key) => !CONSENT_KEYS.includes(key))) {
+      throw new Error('Finalite de consentement inconnue');
+    }
+    if (keys.some((key) => typeof value[key] !== 'boolean')) {
+      throw new Error('Chaque reponse doit etre un booleen');
+    }
+    return true;
+  }),
 ];
 
 const sessionLocationValidation = [
@@ -270,6 +298,11 @@ router.get('/profile', authController.getProfile); // Route alternative
 router.put('/profile', updateProfileValidation, authController.updateProfile);
 router.put('/demographics', demographicsValidation, authController.updateDemographics);
 router.post('/session-location', sessionLocationValidation, authController.recordSessionLocation);
+// Consentement RGPD : le meme endpoint sert l'acceptation initiale et le
+// retrait ulterieur d'une option, pour que retirer soit aussi simple que
+// donner (art. 7.3).
+router.get('/consent', authController.getConsentState);
+router.post('/consent', consentValidation, authController.recordConsent);
 router.put('/change-password', changePasswordValidation, authController.changePassword);
 router.get('/verify-auth', authController.verifyAuth);
 
