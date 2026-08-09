@@ -1140,6 +1140,11 @@ async function ensureUsersProfileCustomizationColumn() {
     await sequelize.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_customization JSONB NOT NULL DEFAULT '{}'::jsonb;
     `);
+    // Habillage mis de côté à l'expiration de l'abonnement, rendu au
+    // réabonnement. Nullable : NULL = rien en attente.
+    await sequelize.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_customization_archive JSONB NULL;
+    `);
   } catch (e) {
     logger.error('[schema] ensureUsersProfileCustomizationColumn:', e.message);
     throw e;

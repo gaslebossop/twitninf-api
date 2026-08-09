@@ -151,6 +151,32 @@ function hasPaidCustomization(current, { verified = false } = {}) {
   return meaningful.some(([key, value]) => kept[key] !== value);
 }
 
+/**
+ * Habillage à mettre de côté quand le compte repasse en gratuit.
+ *
+ * On archive la personnalisation complète telle qu'elle était, sans la trier :
+ * c'est au réabonnement qu'on la repasse au filtre du palier retrouvé. Un
+ * ancien Pro qui revient en Plus récupère ainsi ce que Plus autorise, et pas
+ * plus.
+ *
+ * @returns {object|null} null s'il n'y a rien qui vaille la peine d'être gardé
+ */
+function archiveForDowngrade(current, { verified = false } = {}) {
+  if (!hasPaidCustomization(current, { verified })) return null;
+  return { ...current };
+}
+
+/**
+ * Habillage rendu au réabonnement, repassé au filtre du palier acheté.
+ *
+ * @returns {object|null} null si rien n'était en attente
+ */
+function restoreFromArchive(archive, tier, { verified = false } = {}) {
+  if (!archive || typeof archive !== 'object') return null;
+  const restored = sanitizeCustomization(archive, tier, { verified });
+  return Object.keys(restored).length ? restored : null;
+}
+
 module.exports = {
   PROFILE_BANNER_STYLES,
   PROFILE_AVATAR_DECORATIONS,
@@ -165,4 +191,6 @@ module.exports = {
   customizationTier,
   freeTierCustomization,
   hasPaidCustomization,
+  archiveForDowngrade,
+  restoreFromArchive,
 };

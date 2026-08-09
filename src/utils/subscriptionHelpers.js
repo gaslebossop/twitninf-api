@@ -2,6 +2,8 @@ const { TIER, tierRank, DEFAULT_DURATION_DAYS } = require('../constants/subscrip
 const {
   freeTierCustomization,
   hasPaidCustomization,
+  archiveForDowngrade,
+  restoreFromArchive,
   CERTIFIED_NAME_EFFECT,
 } = require('./profileCustomization');
 
@@ -29,12 +31,15 @@ async function maybeExpireSubscription(user, dbTransaction) {
   const customizationLoaded = user.profile_customization !== undefined
     && user.verified !== undefined;
   if (customizationLoaded && hasPaidCustomization(user.profile_customization, { verified: !!user.verified })) {
-    user.profile_customization = freeTierCustomization(user.profile_customization, {
-      verified: !!user.verified,
-    });
+    const verified = !!user.verified;
+    // L'habillage est mis de côté avant d'être retiré : il revient tel quel au
+    // réabonnement, sans que la personne ait à tout refaire.
+    user.profile_customization_archive = archiveForDowngrade(user.profile_customization, { verified });
+    user.profile_customization = freeTierCustomization(user.profile_customization, { verified });
     // JSONB muté par assignation : sans ce `changed`, Sequelize repart parfois
     // sans rien écrire.
     user.changed('profile_customization', true);
+    user.changed('profile_customization_archive', true);
   }
 
   await user.save(dbTransaction ? { transaction: dbTransaction } : {});
@@ -89,6 +94,10 @@ async function expireDueSubscriptions(sequelize) {
     `UPDATE users
         SET subscription_tier = :freeTier,
             premium = false,
+            profile_customization_archive = CASE
+              WHEN profile_customization <> '{}'::jsonb THEN profile_customization
+              ELSE profile_customization_archive
+            END,
             profile_customization = CASE
               WHEN verified IS TRUE
                AND profile_customization->>'name_effect' = :certifiedEffect
@@ -108,7 +117,8 @@ async function expireDueSubscriptions(sequelize) {
   // gratuit ; ce balayage y ramène ceux qui l'ont gardé.
   const [, cleanup] = await sequelize.query(
     `UPDATE users
-        SET profile_customization = CASE
+        SET profile_customization_archive = profile_customization,
+            profile_customization = CASE
               WHEN verified IS TRUE
                AND profile_customization->>'name_effect' = :certifiedEffect
               THEN jsonb_build_object('name_effect', :certifiedEffect)

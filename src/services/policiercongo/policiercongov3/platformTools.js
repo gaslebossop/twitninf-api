@@ -24,6 +24,7 @@ const {
   creditsAfterSubscriptionPurchase,
 } = require('../../../constants/tweetGeneration');
 const { maybeExpireSubscription, isSubscriptionActive, computeNewExpiry } = require('../../../utils/subscriptionHelpers');
+const { hasPaidCustomization, restoreFromArchive } = require('../../../utils/profileCustomization');
 
 const UUID = { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' };
 const CONTENT = { type: 'string', maxLength: 600 };
@@ -746,10 +747,23 @@ async function buyPremiumSubscription(models, { tier = TIER.PLUS } = {}) {
       ? (user.subscription_expires_at ? new Date(user.subscription_expires_at) : computeNewExpiry(user, durationDays))
       : computeNewExpiry(user, durationDays);
 
+    // Même règle que pour n'importe quel compte : l'habillage mis de côté à la
+    // dernière expiration revient, filtré par le palier acheté.
+    const restoredCustomization = hasPaidCustomization(user.profile_customization, {
+      verified: !!user.verified,
+    })
+      ? null
+      : restoreFromArchive(user.profile_customization_archive, selectedTier, {
+        verified: !!user.verified,
+      });
+
     await user.update({
       subscription_tier: selectedTier,
       subscription_expires_at: nextExpiry,
       tweet_generation_credits: creditsAfterSubscriptionPurchase(user.tweet_generation_credits),
+      ...(restoredCustomization
+        ? { profile_customization: restoredCustomization, profile_customization_archive: null }
+        : {}),
       updated_at: new Date()
     }, { transaction });
 

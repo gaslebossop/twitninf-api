@@ -15,6 +15,10 @@ const {
   DEFAULT_DURATION_DAYS,
   TIER,
 } = require('../subscriptionHelpers');
+const {
+  archiveForDowngrade,
+  restoreFromArchive,
+} = require('../profileCustomization');
 
 const DAY_MS = 86400000;
 
@@ -148,6 +152,19 @@ describe('maybeExpireSubscription', () => {
     expect(user.profile_customization).toEqual({});
   });
 
+  test('met l\'habillage de côté au lieu de le perdre', async () => {
+    const user = fakeUser({
+      subscription_tier: TIER.PRO,
+      premium: true,
+      subscription_expires_at: new Date(Date.now() - DAY_MS),
+      verified: false,
+      profile_customization: { ...HABILLAGE_PAYANT },
+    });
+
+    await maybeExpireSubscription(user);
+    expect(user.profile_customization_archive).toEqual(HABILLAGE_PAYANT);
+  });
+
   test('un compte certifié garde son effet de nom « Certifié »', async () => {
     // Cet effet suit le badge de vérification, pas l'abonnement.
     const user = fakeUser({
@@ -174,5 +191,49 @@ describe('maybeExpireSubscription', () => {
     await maybeExpireSubscription(user);
     expect(user.profile_customization).toBeUndefined();
     expect(user.premium).toBe(false);
+  });
+});
+
+describe('archive et restitution de l’habillage', () => {
+  const HABILLAGE_PRO = {
+    accent_color: '#ff00aa',
+    banner_style: 'mesh',
+    avatar_decoration: 'crown',
+    name_font: 'techno',
+    name_effect: 'shimmer',
+    profile_effect: 'embers',
+    name_size: 'giant',
+    profile_title: 'Boss',
+    about_me: 'salut',
+  };
+
+  test('un réabonnement Pro rend l’habillage tel quel', () => {
+    const archive = archiveForDowngrade(HABILLAGE_PRO, { verified: false });
+    expect(restoreFromArchive(archive, TIER.PRO, { verified: false })).toEqual(HABILLAGE_PRO);
+  });
+
+  test('un ancien Pro qui reprend Plus ne récupère que ce que Plus autorise', () => {
+    const archive = archiveForDowngrade(HABILLAGE_PRO, { verified: false });
+    const rendu = restoreFromArchive(archive, TIER.PLUS, { verified: false });
+
+    // Couleurs, bannière et textes : compris dans Plus.
+    expect(rendu.accent_color).toBe('#ff00aa');
+    expect(rendu.banner_style).toBe('mesh');
+    expect(rendu.profile_title).toBe('Boss');
+    // Décorations et habillages animés : exclusifs à Pro.
+    expect(rendu.avatar_decoration).toBe('none');
+    expect(rendu.name_font).toBe('system');
+    expect(rendu.name_effect).toBe('none');
+    expect(rendu.profile_effect).toBe('none');
+  });
+
+  test('rien à archiver quand il n’y a pas d’habillage payant', () => {
+    expect(archiveForDowngrade({}, { verified: false })).toBeNull();
+    expect(archiveForDowngrade({ name_effect: 'certified' }, { verified: true })).toBeNull();
+  });
+
+  test('une archive absente ne restitue rien', () => {
+    expect(restoreFromArchive(null, TIER.PRO, { verified: false })).toBeNull();
+    expect(restoreFromArchive({}, TIER.PRO, { verified: false })).toBeNull();
   });
 });

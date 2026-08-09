@@ -425,7 +425,23 @@ const userSchema = {
     allowNull: false,
     defaultValue: {}
   },
-  
+
+  /**
+   * Habillage payant mis de côté quand l'abonnement expire, restauré tel quel
+   * au réabonnement.
+   *
+   * Colonne à part, et non une clé de `profile_customization` : cette dernière
+   * part dans toutes les charges utiles d'auteur (fil, messages, recherche), et
+   * y glisser une archive la ferait voyager partout pour rien. Aucune route ne
+   * l'expose — elle ne figure dans aucune liste d'`attributes`.
+   */
+  profile_customization_archive: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: null
+  },
+
+
   // Nouveau champ pour détecter l'application iOS native
   is_ios_native: {
     type: DataTypes.BOOLEAN,

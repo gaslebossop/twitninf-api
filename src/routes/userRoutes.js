@@ -52,6 +52,8 @@ const {
   PROFILE_TITLE_MAX,
   sanitizeCustomization,
   customizationTier,
+  hasPaidCustomization,
+  restoreFromArchive,
 } = require('../utils/profileCustomization');
 
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
@@ -277,6 +279,16 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
       nextExpiry = computeNewExpiry(user, durationDays);
     }
 
+    // L'habillage mis de côté à la dernière expiration revient, repassé au
+    // filtre du palier acheté : un ancien Pro qui reprend Plus récupère ce que
+    // Plus autorise, pas davantage. Une personnalisation en cours (renouvellement,
+    // montée en gamme) n'est jamais écrasée.
+    const restoredCustomization = hasPaidCustomization(user.profile_customization, {
+      verified: !!user.verified,
+    })
+      ? null
+      : restoreFromArchive(user.profile_customization_archive, tier, { verified: !!user.verified });
+
     await user.update(
       {
         subscription_tier: tier,
@@ -284,6 +296,9 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
         // Chaque paiement confirmé recharge le générateur, y compris un
         // renouvellement ou un passage Plus → Pro.
         tweet_generation_credits: creditsAfterSubscriptionPurchase(user.tweet_generation_credits),
+        ...(restoredCustomization
+          ? { profile_customization: restoredCustomization, profile_customization_archive: null }
+          : {}),
         updated_at: new Date()
       },
       { transaction }
@@ -1634,6 +1649,12 @@ router.put('/me/profile-customization', [authenticateToken, denySuspended], asyn
     // `changed`, Sequelize ne détecte pas toujours la modification et le save
     // repart sans rien écrire.
     user.changed('profile_customization', true);
+    // Un abonné qui refait son habillage rend l'archive caduque : la garder
+    // ressusciterait ses anciens réglages à la prochaine expiration.
+    if (tier !== TIER.FREE && user.profile_customization_archive) {
+      user.profile_customization_archive = null;
+      user.changed('profile_customization_archive', true);
+    }
     await user.save();
 
     return res.json({
