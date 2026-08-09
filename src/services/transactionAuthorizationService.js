@@ -22,6 +22,17 @@ const NON_OVERRIDABLE_MANUAL_REVIEW_REASONS = new Set([
   'coordinated_laundering_ring',
 ]);
 const AUTO_IDEMPOTENCY_BUCKET_MS = 5000;
+// Un portefeuille RESTRICTED refuse toute dépense. Sans horizon, une seule
+// décision limite bloquait le compte pour toujours, et chaque nouvelle
+// tentative empirait le score : tout le monde finissait en revue permanente.
+// La restriction expire donc d'elle-même si aucune décision bloquante ne la
+// renouvelle. FROZEN, lui, reste manuel — c'est le seul état définitif.
+const RESTRICTION_TTL = "INTERVAL '72 hours'";
+const RESTRICTION_IS_ACTIVE = `(
+  wallet_risk_profiles.risk_state = 'RESTRICTED'
+  AND wallet_risk_profiles.restricted_at IS NOT NULL
+  AND wallet_risk_profiles.restricted_at > NOW() - ${RESTRICTION_TTL}
+)`;
 
 class TransactionRiskError extends Error {
   constructor(message, code, httpStatus = 403, details = {}) {
@@ -407,8 +418,8 @@ class TransactionAuthorizationService {
         )
         ON CONFLICT (user_id) DO UPDATE SET
           risk_state = CASE
-            WHEN wallet_risk_profiles.risk_state IN ('RESTRICTED', 'FROZEN')
-              THEN wallet_risk_profiles.risk_state
+            WHEN wallet_risk_profiles.risk_state = 'FROZEN' THEN 'FROZEN'
+            WHEN ${RESTRICTION_IS_ACTIVE} THEN 'RESTRICTED'
             ELSE 'MONITOR'
           END,
           rolling_score = GREATEST(wallet_risk_profiles.rolling_score, 55),
@@ -594,7 +605,13 @@ class TransactionAuthorizationService {
           WHERE user_id = :userId AND event_type = 'MANUAL_CLEAR'
         )
         SELECT
-          COALESCE(risk_state, 'CLEAR') AS state,
+          CASE
+            WHEN COALESCE(risk_state, 'CLEAR') = 'RESTRICTED'
+              AND COALESCE(restricted_at, '-infinity'::timestamptz)
+                  <= NOW() - ${RESTRICTION_TTL}
+              THEN 'MONITOR'
+            ELSE COALESCE(risk_state, 'CLEAR')
+          END AS state,
           COALESCE(rolling_score, 0)::float8 AS rolling_score,
           COALESCE(manual_trust_until > NOW(), FALSE) AS manual_trust_active,
           (
@@ -629,7 +646,15 @@ class TransactionAuthorizationService {
         WITH recipient AS (
           SELECT
             GREATEST(0, EXTRACT(EPOCH FROM (NOW() - u.created_at)) / 86400.0) AS age_days,
-            COALESCE(p.risk_state IN ('RESTRICTED', 'FROZEN'), FALSE) AS restricted
+            COALESCE(
+              p.risk_state = 'FROZEN'
+              OR (
+                p.risk_state = 'RESTRICTED'
+                AND COALESCE(p.restricted_at, '-infinity'::timestamptz)
+                    > NOW() - ${RESTRICTION_TTL}
+              ),
+              FALSE
+            ) AS restricted
           FROM users u
           LEFT JOIN wallet_risk_profiles p ON p.user_id = u.id
           WHERE u.id = :counterpartyUserId
@@ -814,7 +839,7 @@ class TransactionAuthorizationService {
     const actionMatchesDecision = (
       (decision.decision === 'APPROVE' && decision.wallet_action === 'NONE')
       || (decision.decision === 'MONITOR' && ['NONE', 'MONITOR'].includes(decision.wallet_action))
-      || (decision.decision === 'REVIEW' && decision.wallet_action === 'RESTRICT')
+      || (decision.decision === 'REVIEW' && ['MONITOR', 'RESTRICT'].includes(decision.wallet_action))
       || (decision.decision === 'DECLINE' && ['RESTRICT', 'FREEZE'].includes(decision.wallet_action))
     );
     const score = Number(decision.risk_score);
@@ -1053,7 +1078,7 @@ class TransactionAuthorizationService {
             WHEN wallet_risk_profiles.risk_state = 'FROZEN' THEN 'FROZEN'
             WHEN EXCLUDED.risk_state = 'FROZEN' THEN 'FROZEN'
             WHEN EXCLUDED.risk_state = 'RESTRICTED' THEN 'RESTRICTED'
-            WHEN wallet_risk_profiles.risk_state = 'RESTRICTED' THEN 'RESTRICTED'
+            WHEN ${RESTRICTION_IS_ACTIVE} THEN 'RESTRICTED'
             ELSE EXCLUDED.risk_state
           END,
           rolling_score = (wallet_risk_profiles.rolling_score * 0.72) + (EXCLUDED.rolling_score * 0.28),
@@ -1063,8 +1088,19 @@ class TransactionAuthorizationService {
             + CASE WHEN :decision = 'DECLINE' THEN 1 ELSE 0 END,
           review_count = wallet_risk_profiles.review_count
             + CASE WHEN :decision = 'REVIEW' THEN 1 ELSE 0 END,
-          review_required = wallet_risk_profiles.review_required OR EXCLUDED.review_required,
-          restricted_at = COALESCE(wallet_risk_profiles.restricted_at, EXCLUDED.restricted_at),
+          review_required = CASE
+            WHEN wallet_risk_profiles.risk_state = 'FROZEN'
+              OR EXCLUDED.risk_state IN ('FROZEN', 'RESTRICTED') THEN TRUE
+            WHEN ${RESTRICTION_IS_ACTIVE} THEN TRUE
+            ELSE FALSE
+          END,
+          restricted_at = CASE
+            WHEN EXCLUDED.risk_state IN ('RESTRICTED', 'FROZEN') THEN NOW()
+            WHEN wallet_risk_profiles.risk_state = 'FROZEN'
+              THEN wallet_risk_profiles.restricted_at
+            WHEN ${RESTRICTION_IS_ACTIVE} THEN wallet_risk_profiles.restricted_at
+            ELSE NULL
+          END,
           frozen_at = COALESCE(wallet_risk_profiles.frozen_at, EXCLUDED.frozen_at),
           updated_at = NOW()
       `, {
