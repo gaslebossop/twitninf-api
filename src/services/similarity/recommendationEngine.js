@@ -876,12 +876,22 @@ class SimilarityRecommendationEngine {
   async onNewTweet(tweetId, userId, content, mediaUrls = [], parentTweetId = null, originalTweetId = null, tweetType = 'tweet') {
     if (isSpamOrTest(content)) return;
 
-    let vec = await semanticSimilarityService.indexTweet({ id: tweetId, content, parent_tweet_id: parentTweetId });
+    // ⚠️ indexTweet() renvoie un Array JS ordinaire (Array.from(output.data) côté
+    // embedder E5), alors que VectorStore travaille en Float32Array : sans cette
+    // conversion, vec.buffer est undefined et c'est save() qui casse, pas l'insert.
+    const rawVec = await semanticSimilarityService.indexTweet({ id: tweetId, content, parent_tweet_id: parentTweetId });
     const hasMedia = Array.isArray(mediaUrls) && mediaUrls.length > 0;
+
+    let vec = null;
+    if (rawVec && rawVec.length === DIMS) {
+      vec = rawVec instanceof Float32Array ? rawVec : Float32Array.from(rawVec);
+    } else if (rawVec && rawVec.length) {
+      console.warn(`⚠️ [Similarity V2] Embedding de dimension ${rawVec.length} pour ${tweetId} (attendu ${DIMS}), ignoré`);
+    }
 
     if (!vec) {
       if (hasMedia || tweetType === 'video') {
-        vec = new Float32Array(768);
+        vec = createVec(); // vecteur nul de dimension DIMS
       } else {
         return;
       }

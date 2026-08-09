@@ -305,8 +305,20 @@ class VectorStore {
    * @param {Float32Array} vec - doit être normalisé
    */
   upsert(id, vec) {
+    // Le format binaire de save() suppose un Float32Array de DIMS floats.
+    // On refuse ici tout ce qui ne l'est pas : sinon l'erreur ne surgit qu'à la
+    // sauvegarde, où elle fait échouer l'index entier sans désigner le coupable.
+    if (!(vec instanceof Float32Array) || vec.length !== DIMS) {
+      console.warn(
+        `⚠️ [VectorStore:${this.name}] upsert(${id}) refusé : ` +
+        `attendu Float32Array(${DIMS}), reçu ${vec && vec.constructor ? vec.constructor.name : typeof vec}` +
+        `(${vec && vec.length !== undefined ? vec.length : '?'})`
+      );
+      return false;
+    }
     this.index.set(id, vec);
     this.stats.inserts++;
+    return true;
   }
 
   /**
