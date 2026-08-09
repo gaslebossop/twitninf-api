@@ -115,7 +115,6 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
       });
     }
 
-    const duration = req.body.duration;
     const userId = req.user.id;
     const NewEconomyService = require('../services/newEconomyService');
 
@@ -165,7 +164,10 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
     let price = pricing[tier].nf;
     let priceEur = pricing[tier].eur;
     let itemId = `subscription_${tier}_${DEFAULT_DURATION_DAYS}d`;
-    const durationDays = Math.max(1, parseInt(duration, 10) || DEFAULT_DURATION_DAYS);
+    // La durée n'est PAS négociable par le client. Elle l'était via
+    // `req.body.duration` sans plafond : un appel direct achetait des années
+    // d'abonnement au prix de la période standard.
+    const durationDays = DEFAULT_DURATION_DAYS;
     let description = `Abonnement ${tier === TIER.PLUS ? 'Plus' : 'Pro'} (${durationDays} j.)`;
 
     if (active && user.subscription_tier === TIER.PLUS && tier === TIER.PRO) {

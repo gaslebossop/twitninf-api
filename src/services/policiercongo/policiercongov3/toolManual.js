@@ -109,6 +109,7 @@ send_outbound_private_message
 
 buy_premium_subscription
 - Achete ou prolonge le premium de PolicierCongo avec ses propres TWC/NF. Paliers: plus ou pro.
+- La duree n'est pas choisie: c'est la periode standard de l'offre, identique pour tous les comptes.
 - Verifie d'abord le solde avec get_financial_context si tu n'es pas sur. L'achat depense vraiment les fonds et echoue si le solde est insuffisant.
 - Si PolicierCongo est deja Plus, acheter Pro facture seulement la mise a niveau. Si PolicierCongo est deja Pro actif, n'achete pas Plus.
 

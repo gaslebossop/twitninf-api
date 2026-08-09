@@ -690,13 +690,15 @@ async function unfollowUser(models, targetUser) {
   return { success: true, action: 'UNFOLLOW', target: publicUser(targetUser) };
 }
 
-async function buyPremiumSubscription(models, { tier = TIER.PLUS, duration_days = DEFAULT_DURATION_DAYS } = {}) {
+async function buyPremiumSubscription(models, { tier = TIER.PLUS } = {}) {
   const selectedTier = [TIER.PLUS, TIER.PRO].includes(String(tier).toLowerCase())
     ? String(tier).toLowerCase()
     : null;
   if (!selectedTier) throw new Error('Palier invalide: utilise plus ou pro');
 
-  const durationDays = Math.max(1, Math.min(365, parseInt(duration_days, 10) || DEFAULT_DURATION_DAYS));
+  // Durée imposée par l'offre, comme pour n'importe quel compte : le modèle
+  // agentique choisissait auparavant jusqu'à 365 jours au prix d'une période.
+  const durationDays = DEFAULT_DURATION_DAYS;
   const transaction = await models.sequelize.transaction();
   try {
     const user = await models.User.findByPk(POLICE_ACCOUNT_ID, { transaction, lock: true });
@@ -1166,13 +1168,12 @@ function registerPlatformTools(registry, { models, memory, config, providerRoute
   action('request_withdrawal', TOOL_RISK.SENSITIVE, 'Collecte immédiatement toutes les récompenses de monétisation en attente (vues/likes/RT/réponses sur tes tweets) et les crédite à ton portefeuille. Vérifie le montant en attente avec get_financial_context avant d\'appeler ce tool si besoin.', object({ reason: { type: 'string' } }, []), args => ({ action: 'REQUEST_WITHDRAWAL', reason: args.reason, details: args }));
   register({
     name: 'buy_premium_subscription', risk: TOOL_RISK.SENSITIVE, idempotent: false,
-    description: 'Achete ou prolonge un abonnement Plus/Pro pour le compte PolicierCongo en depensant ses TWC/NF. Utilise get_financial_context avant si le solde est incertain.',
+    description: `Achete ou prolonge un abonnement Plus/Pro pour le compte PolicierCongo en depensant ses TWC/NF. La duree est fixe (${DEFAULT_DURATION_DAYS} jours), comme pour tout le monde. Utilise get_financial_context avant si le solde est incertain.`,
     inputSchema: object({
       tier: { type: 'string', enum: ['plus', 'pro'] },
-      duration_days: { type: 'integer', minimum: 1, maximum: 365 },
       reason: { type: 'string', maxLength: 500 }
     }, ['tier', 'reason']),
-    handler: async ({ tier, duration_days }) => buyPremiumSubscription(models, { tier, duration_days })
+    handler: async ({ tier }) => buyPremiumSubscription(models, { tier })
   });
   register({
     name: 'play_casino_wheel', risk: TOOL_RISK.SENSITIVE, idempotent: false,

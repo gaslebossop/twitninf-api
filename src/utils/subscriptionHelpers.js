@@ -1,4 +1,4 @@
-const { TIER, tierRank } = require('../constants/subscriptionTiers');
+const { TIER, tierRank, DEFAULT_DURATION_DAYS } = require('../constants/subscriptionTiers');
 
 /**
  * Si la date d'expiration est dépassée, repasse l'utilisateur en gratuit.
@@ -23,16 +23,49 @@ function isSubscriptionActive(user) {
 
 /**
  * Calcule la nouvelle date de fin : prolonge depuis la fin actuelle si encore active, sinon depuis maintenant.
+ *
+ * Le repli est `DEFAULT_DURATION_DAYS`, jamais une durée plus généreuse : une
+ * valeur absente ou illisible ne doit pas offrir un mois d'abonnement.
  */
 function computeNewExpiry(user, durationDays) {
   const now = new Date();
-  const days = Math.max(1, parseInt(durationDays, 10) || 30);
+  const days = Math.max(1, parseInt(durationDays, 10) || DEFAULT_DURATION_DAYS);
   let base = now;
-  if (user.subscription_expires_at) {
+  // On ne prolonge que depuis un abonnement RÉELLEMENT actif. Une date de fin
+  // future sur un compte repassé en gratuit (coupure administrative) n'est plus
+  // du temps acquis : la reprendre comme base rendrait la coupure sans effet au
+  // premier rachat.
+  if (isSubscriptionActive(user) && user.subscription_expires_at) {
     const cur = new Date(user.subscription_expires_at);
     if (cur > base) base = cur;
   }
   return new Date(base.getTime() + days * 86400000);
+}
+
+/**
+ * Repasse en gratuit TOUS les abonnements dont la date de fin est passée.
+ *
+ * `maybeExpireSubscription` est paresseux : il ne s'exécute que si le compte
+ * concerné touche une route qui le vérifie. Sans ce balayage, un abonné expiré
+ * garde `premium = true` en base — donc son badge, son fil et ses avantages
+ * d'affichage — indéfiniment tant qu'il ne revient pas. Le balayage est fait en
+ * une seule requête pour ne pas charger des milliers d'instances.
+ *
+ * @param {object} sequelize instance Sequelize
+ * @returns {Promise<number>} nombre de comptes repassés en gratuit
+ */
+async function expireDueSubscriptions(sequelize) {
+  const [, result] = await sequelize.query(
+    `UPDATE users
+        SET subscription_tier = :freeTier,
+            premium = false,
+            updated_at = NOW()
+      WHERE subscription_tier <> :freeTier
+        AND subscription_expires_at IS NOT NULL
+        AND subscription_expires_at <= NOW()`,
+    { replacements: { freeTier: TIER.FREE } }
+  );
+  return typeof result?.rowCount === 'number' ? result.rowCount : (result || 0);
 }
 
 function normalizePurchasableTier(raw) {
@@ -43,9 +76,11 @@ function normalizePurchasableTier(raw) {
 
 module.exports = {
   maybeExpireSubscription,
+  expireDueSubscriptions,
   isSubscriptionActive,
   computeNewExpiry,
   normalizePurchasableTier,
   tierRank,
   TIER,
+  DEFAULT_DURATION_DAYS,
 };

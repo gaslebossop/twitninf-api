@@ -958,6 +958,23 @@ function setupCronJobs() {
     }
   });
 
+  // Fin des abonnements échus (toutes les heures, à la demie)
+  //
+  // L'expiration paresseuse ne se déclenche que si l'abonné revient sur une
+  // route qui la vérifie : sans ce balayage, un compte échu garde son badge et
+  // ses avantages d'affichage pour tous les autres utilisateurs.
+  cron.schedule('30 * * * *', async () => {
+    try {
+      const { expireDueSubscriptions } = require('./utils/subscriptionHelpers');
+      const expiredCount = await expireDueSubscriptions(sequelize);
+      if (expiredCount > 0) {
+        logger.info(`⏳ [Cron] ${expiredCount} abonnement(s) échu(s) repassé(s) en gratuit`);
+      }
+    } catch (error) {
+      logger.error('❌ [Cron] Erreur expiration des abonnements:', error);
+    }
+  });
+
   // Synchronisation de la similarité utilisateur (Tous les jours à 4h du matin)
   cron.schedule('0 4 * * *', async () => {
     try {
