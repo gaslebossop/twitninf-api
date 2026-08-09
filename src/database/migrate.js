@@ -303,6 +303,11 @@ async function runMigrations() {
     `);
 
     await sequelize.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS follow_onboarding_completed_at TIMESTAMPTZ NULL;
+    `);
+
+    await sequelize.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS algorithmic_visibility_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0;
     `);
 

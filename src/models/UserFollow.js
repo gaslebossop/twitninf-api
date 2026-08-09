@@ -148,6 +148,80 @@ class UserFollow extends Model {
     });
   }
 
+  /**
+   * Comptes les plus influents, pour l'ecran d'abonnements de l'inscription.
+   *
+   * Volontairement different de `getFollowSuggestions`, qui s'appuie sur le
+   * graphe : un compte cree il y a dix secondes n'a aucun graphe. On classe
+   * donc par influence brute.
+   *
+   * Le filtre d'activite recente n'est pas cosmetique. La table `users`
+   * contient plusieurs milliers de comptes issus de rafales de creation
+   * scriptees, non marques `is_data_test` : sans cette porte, l'ecran
+   * proposerait des coquilles vides et les trois abonnements imposes
+   * n'alimenteraient rien du tout. Seuls les comptes ayant publie recemment
+   * peuvent remplir un fil.
+   */
+  static async getInfluentialSuggestions(userId, limit = 12, activityDays = 30) {
+    const rows = await this.sequelize.query(`
+      WITH candidats AS (
+        SELECT
+          u.id, u.username, u.full_name, u.avatar, u.bio,
+          u.verified, u.premium, u.profile_customization,
+          (SELECT COUNT(*) FROM user_follows f
+            WHERE f.following_id = u.id AND f.status = 'active') AS followers,
+          (SELECT COUNT(*) FROM tweets t
+            WHERE t.user_id = u.id
+              AND t.created_at >= NOW() - (:activityDays * INTERVAL '1 day')) AS tweets_recents,
+          (SELECT COUNT(*) FROM tweet_likes l
+             JOIN tweets t2 ON t2.id = l.tweet_id
+            WHERE t2.user_id = u.id
+              AND l.created_at >= NOW() - (:activityDays * INTERVAL '1 day')) AS likes_recus
+        FROM users u
+        WHERE u.is_active = TRUE
+          AND u.is_suspended = FALSE
+          -- Un compte prive a demande a n'etre visible que de ses abonnes :
+          -- le pousser a des inconnus est exactement ce qu'il a refuse.
+          AND u.is_private_account = FALSE
+          AND u.id <> :userId
+          AND NOT EXISTS (
+            SELECT 1 FROM user_follows f2
+             WHERE f2.follower_id = :userId AND f2.following_id = u.id
+          )
+      )
+      SELECT *,
+        -- Logarithmes : sans eux le compte le plus suivi ecrase tout le
+        -- classement et l'ecran propose toujours les trois memes personnes.
+        (LN(1 + followers) * 2.0 + LN(1 + likes_recus) + LN(1 + tweets_recents) * 0.5)
+          AS influence
+      FROM candidats
+      -- Barre minimale : publier un peu ET avoir suscité au moins une
+      -- reaction. Sans elle, la liste descend vite sur des comptes a deux
+      -- tweets et zero lecteur, qu'on imposerait a chaque nouvelle personne.
+      WHERE tweets_recents >= :minTweets
+        AND (likes_recus >= 1 OR followers >= 2)
+      ORDER BY influence DESC, followers DESC
+      LIMIT :limit
+    `, {
+      type: this.sequelize.QueryTypes.SELECT,
+      replacements: { userId, limit, activityDays, minTweets: 3 },
+    });
+
+    return rows.map((row) => ({
+      id: row.id,
+      username: row.username,
+      full_name: row.full_name,
+      avatar: row.avatar,
+      bio: row.bio,
+      verified: row.verified,
+      premium: row.premium,
+      profile_customization: row.profile_customization,
+      followers: Number(row.followers),
+      recent_tweets: Number(row.tweets_recents),
+      recent_likes: Number(row.likes_recus),
+    }));
+  }
+
   // Méthode statique pour obtenir les utilisateurs mutuellement suivis
   static async getMutualFollowers(userId, otherUserId) {
     const [userFollowing, otherFollowing] = await Promise.all([

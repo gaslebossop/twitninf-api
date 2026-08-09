@@ -13,6 +13,8 @@ const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
 // une session utilisée régulièrement ne se coupe donc jamais.
 const SESSION_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 jours
 
+const { MIN_ONBOARDING_FOLLOWS } = require('../config/onboarding');
+
 // Chargé paresseusement : models/index initialise l'ensemble des modèles et
 // dépend indirectement d'autres services.
 function getSessionModel() {
@@ -59,6 +61,9 @@ function getOwnerPrivateProfile(user) {
     // lui-meme, sinon une vieille application afficherait un etat faux.
     consent_required_version: consentConfig.CONSENT_VERSION,
     needs_consent: consentConfig.needsConsent(user),
+    follow_onboarding_completed_at: user.follow_onboarding_completed_at || null,
+    needs_follow_onboarding: !user.follow_onboarding_completed_at,
+    follow_onboarding_minimum: MIN_ONBOARDING_FOLLOWS,
   };
 }
 
@@ -513,7 +518,8 @@ class AuthService {
           'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
           'preferred_language', 'declared_age', 'birth_day', 'birth_month',
           'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at',
-          'consent_version', 'consent_accepted_at', 'consent_preferences'
+          'consent_version', 'consent_accepted_at', 'consent_preferences',
+          'follow_onboarding_completed_at'
         ]
       });
       if (!user || !user.is_active) {
@@ -538,7 +544,8 @@ class AuthService {
           'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
           'preferred_language', 'declared_age', 'birth_day', 'birth_month',
           'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at',
-          'consent_version', 'consent_accepted_at', 'consent_preferences'
+          'consent_version', 'consent_accepted_at', 'consent_preferences',
+          'follow_onboarding_completed_at'
         ]
       });
 
@@ -552,7 +559,8 @@ class AuthService {
           'is_suspended', 'ban_count', 'suspension_reason', 'suspended_until',
           'preferred_language', 'declared_age', 'birth_day', 'birth_month',
           'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at',
-          'consent_version', 'consent_accepted_at', 'consent_preferences'
+          'consent_version', 'consent_accepted_at', 'consent_preferences',
+          'follow_onboarding_completed_at'
         ]
       });
 

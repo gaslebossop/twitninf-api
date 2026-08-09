@@ -240,6 +240,13 @@ const userSchema = {
     defaultValue: {}
   },
 
+  // Étape d'abonnements de l'inscription. Renseignée une fois pour toutes :
+  // se désabonner ensuite ne fait pas réapparaître l'écran.
+  follow_onboarding_completed_at: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+
   // Statuts
   verified: {
     type: DataTypes.BOOLEAN,

@@ -1,5 +1,5 @@
 const express = require('express');
-const { param, query, validationResult } = require('express-validator');
+const { body, param, query, validationResult } = require('express-validator');
 const router = express.Router();
 
 // Import des modèles et services
@@ -23,6 +23,9 @@ const {
 const logger = require('../utils/logger');
 const ctrTracker = require('../services/ctrTracker');
 const transactionAuthorizationService = require('../services/transactionAuthorizationService');
+// Même valeur que `follow_onboarding_minimum` renvoyé dans le profil : l'écran
+// d'inscription et la validation serveur doivent exiger le même nombre.
+const { MIN_ONBOARDING_FOLLOWS: ONBOARDING_MIN_FOLLOWS } = require('../config/onboarding');
 const {
   TIER,
   TIER_PRICES_EUR,
@@ -337,6 +340,124 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
 // ========================================
 // ROUTES PUBLIQUES (sans authentification)
 // ========================================
+
+/**
+ * GET /api/users/onboarding/suggestions
+ * Comptes les plus influents, pour l'écran d'abonnements de l'inscription.
+ *
+ * Distinct de /suggestions, qui s'appuie sur le graphe social : à l'inscription
+ * il n'y a pas de graphe.
+ */
+router.get('/onboarding/suggestions', [
+  authenticateToken,
+  denySuspended,
+  query('limit').optional().isInt({ min: 3, max: 30 }),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 12;
+    const suggestions = await UserFollow.getInfluentialSuggestions(req.user.id, limit);
+
+    res.json({
+      success: true,
+      data: {
+        suggestions,
+        minimum_follows: ONBOARDING_MIN_FOLLOWS,
+      }
+    });
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des suggestions d\'inscription:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * POST /api/users/onboarding/follows
+ * Enregistre les abonnements choisis à l'inscription et clôt l'étape.
+ *
+ * Un seul appel plutôt que N appels à /:id/follow suivis d'un marqueur : sinon
+ * une coupure réseau au milieu laisse un compte à moitié abonné et l'écran
+ * revient en boucle.
+ */
+router.post('/onboarding/follows', [
+  authenticateToken,
+  denySuspended,
+  body('userIds')
+    .isArray({ min: ONBOARDING_MIN_FOLLOWS, max: 30 })
+    .withMessage(`Choisis au moins ${ONBOARDING_MIN_FOLLOWS} comptes`),
+  body('userIds.*').isUUID().withMessage('Identifiant de compte invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const followerId = req.user.id;
+    const requested = [...new Set(req.body.userIds.map(String))].filter((id) => id !== followerId);
+
+    if (requested.length < ONBOARDING_MIN_FOLLOWS) {
+      return res.status(400).json({
+        success: false,
+        message: `Choisis au moins ${ONBOARDING_MIN_FOLLOWS} comptes différents`,
+      });
+    }
+
+    // Seules les cibles réellement suivables comptent : un compte supprimé,
+    // suspendu ou privé glissé dans la liste ne doit pas valider l'étape.
+    const targets = await User.findAll({
+      where: {
+        id: { [Op.in]: requested },
+        is_active: true,
+        is_suspended: false,
+        is_private_account: false,
+      },
+      attributes: ['id'],
+    });
+
+    if (targets.length < ONBOARDING_MIN_FOLLOWS) {
+      return res.status(400).json({
+        success: false,
+        message: `Choisis au moins ${ONBOARDING_MIN_FOLLOWS} comptes disponibles`,
+      });
+    }
+
+    const existing = await UserFollow.findAll({
+      where: { follower_id: followerId, following_id: { [Op.in]: targets.map((t) => t.id) } },
+      attributes: ['following_id'],
+    });
+    const alreadyFollowed = new Set(existing.map((f) => f.following_id));
+
+    const created = [];
+    for (const target of targets) {
+      if (alreadyFollowed.has(target.id)) continue;
+      // Séquentiel et non Promise.all : les hooks du modèle incrémentent les
+      // compteurs `stats` des deux comptes, et les paralléliser sur la même
+      // ligne ferait perdre des incréments.
+      await UserFollow.create({
+        follower_id: followerId,
+        following_id: target.id,
+        status: 'active',
+        metadata: { source: 'onboarding', device: req.headers['user-agent'] || 'unknown' },
+      });
+      created.push(target.id);
+    }
+
+    await User.update(
+      { follow_onboarding_completed_at: new Date() },
+      { where: { id: followerId } }
+    );
+
+    res.json({
+      success: true,
+      message: 'Abonnements enregistrés',
+      data: {
+        followed: created,
+        total_followed: alreadyFollowed.size + created.length,
+        needs_follow_onboarding: false,
+      }
+    });
+  } catch (error) {
+    logger.error('Erreur lors des abonnements d\'inscription:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
 
 /**
  * GET /api/users/suggestions

@@ -66,6 +66,19 @@ async function runAutoMigration() {
       logger.warn('⚠️ consentement RGPD:', e.message);
     }
 
+    // Étape d'abonnements de l'inscription. Une colonne dédiée plutôt qu'un
+    // simple `following_count >= 3` : quelqu'un qui se désabonne ensuite ne
+    // doit pas se voir reposer l'écran d'inscription des mois plus tard.
+    try {
+      await sequelize.query(`
+        ALTER TABLE users
+          ADD COLUMN IF NOT EXISTS follow_onboarding_completed_at TIMESTAMPTZ NULL;
+      `);
+      logger.info('✅ Colonne follow_onboarding_completed_at vérifiée');
+    } catch (e) {
+      logger.warn('⚠️ follow_onboarding_completed_at:', e.message);
+    }
+
     try {
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS feed_hashtag_rules (
