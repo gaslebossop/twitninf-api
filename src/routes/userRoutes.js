@@ -41,6 +41,19 @@ const {
   normalizePurchasableTier,
 } = require('../utils/subscriptionHelpers');
 
+const {
+  PROFILE_BANNER_STYLES,
+  PROFILE_AVATAR_DECORATIONS,
+  PROFILE_THEME_INTENSITIES,
+  PROFILE_NAME_FONTS,
+  PROFILE_NAME_EFFECTS,
+  PROFILE_NAME_SIZES,
+  PROFILE_EFFECTS,
+  PROFILE_TITLE_MAX,
+  sanitizeCustomization,
+  customizationTier,
+} = require('../utils/profileCustomization');
+
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
 const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
 
@@ -1537,106 +1550,9 @@ router.post('/purchase-premium', [
 
 /* ── Personnalisation de profil premium (façon Discord) ─────────────────── */
 
-/** Palettes proposées : on ne stocke que des couleurs validées, jamais du CSS libre. */
-const PROFILE_BANNER_STYLES = ['none', 'gradient', 'glow', 'mesh', 'stripes'];
-const PROFILE_AVATAR_DECORATIONS = ['none', 'ring', 'crown', 'petals', 'circuit', 'flames', 'stars'];
-/** Force du thème de profil : le même dégradé, plus ou moins poussé. */
-const PROFILE_THEME_INTENSITIES = ['soft', 'normal', 'vivid'];
-/**
- * Nom affiché : police + traitement animé (palier Pro).
- * Le vocabulaire des polices est celui que le client mobile sait déjà résoudre
- * (`utils/profileDisplayNamePrefs`) — il était jusqu'ici stocké sur l'appareil,
- * donc invisible pour les visiteurs.
- */
-// Liste fermée : une valeur absente d'ici est silencieusement ignorée à
-// l'enregistrement (voir plus bas), sans erreur renvoyée au client. Elle doit
-// donc rester alignée mot pour mot sur `NameFont` côté app
-// (services/profileCustomizationService) et sur `DisplayNameFontId`
-// (utils/profileDisplayNamePrefs).
-const PROFILE_NAME_FONTS = [
-  'system', 'display', 'editorial', 'serif', 'mono', 'compact',
-  // Dix familles ajoutées, embarquées en Bold réel côté app.
-  'geometric', 'rounded', 'elegant', 'soft', 'friendly',
-  'classic', 'grotesque', 'techno', 'handwritten', 'roman',
-];
-const PROFILE_NAME_EFFECTS = ['none', 'gradient', 'shimmer', 'glow', 'certified'];
-/** Taille du pseudo affiché sur le profil (palier Pro, comme police/effet). */
-const PROFILE_NAME_SIZES = ['normal', 'large', 'xlarge', 'huge', 'giant'];
-
-/**
- * « Certifié » ne se paie pas : il reprend la couleur du badge de vérification
- * et ne s'ouvre qu'aux comptes `verified`. C'est le seul habillage adossé à la
- * certification plutôt qu'au palier d'abonnement — un compte Pro non certifié
- * n'y a pas droit, un compte certifié gratuit y a droit.
- */
-const CERTIFIED_NAME_EFFECT = 'certified';
-/** Ambiance animée peinte EN FOND du profil, jamais par-dessus (palier Pro). */
-const PROFILE_EFFECTS = ['none', 'sparkles', 'embers', 'bubbles', 'snow'];
-/** Titre libre affiché sous le pseudo — court, sinon il concurrence la bio. */
-const PROFILE_TITLE_MAX = 40;
-const HEX_COLOR = /^#[0-9a-f]{6}$/i;
-
-/** Palier minimum pour personnaliser : Plus. Pro débloque les décorations. */
-function customizationTier(user) {
-  const tier = String(user?.subscription_tier || TIER.FREE);
-  if (tier === TIER.PRO || tier === TIER.PLUS) return tier;
-  // `premium` est l'ancien drapeau : il vaut Pro pour les comptes historiques.
-  return user?.premium ? TIER.PRO : TIER.FREE;
-}
-
-function sanitizeCustomization(input, tier, { verified = false } = {}) {
-  const source = input && typeof input === 'object' ? input : {};
-  const output = {};
-  // Un compte certifié gratuit passe la porte de la route pour son seul effet
-  // de nom : tout le reste reste payant, d'où ce garde-fou champ par champ.
-  const paid = tier !== TIER.FREE;
-
-  if (paid && typeof source.accent_color === 'string' && HEX_COLOR.test(source.accent_color.trim())) {
-    output.accent_color = source.accent_color.trim().toLowerCase();
-  }
-  if (paid && typeof source.secondary_color === 'string' && HEX_COLOR.test(source.secondary_color.trim())) {
-    output.secondary_color = source.secondary_color.trim().toLowerCase();
-  }
-  if (paid && PROFILE_BANNER_STYLES.includes(source.banner_style)) {
-    output.banner_style = source.banner_style;
-  }
-  if (paid && PROFILE_THEME_INTENSITIES.includes(source.theme_intensity)) {
-    output.theme_intensity = source.theme_intensity;
-  }
-  // Les décorations d'avatar sont l'avantage exclusif du palier Pro.
-  if (PROFILE_AVATAR_DECORATIONS.includes(source.avatar_decoration)) {
-    output.avatar_decoration = tier === TIER.PRO ? source.avatar_decoration : 'none';
-  }
-  // Même règle pour les deux habillages animés arrivés ensuite : ils sont la
-  // contrepartie visible du palier Pro, un compte Plus les voit mais ne les
-  // enregistre pas.
-  if (PROFILE_NAME_FONTS.includes(source.name_font)) {
-    output.name_font = tier === TIER.PRO ? source.name_font : 'system';
-  }
-  if (PROFILE_NAME_EFFECTS.includes(source.name_effect)) {
-    // Deux droits différents selon l'effet : « Certifié » suit le badge, les
-    // autres suivent le palier payant.
-    const allowed = source.name_effect === CERTIFIED_NAME_EFFECT
-      ? verified
-      : tier === TIER.PRO;
-    output.name_effect = allowed ? source.name_effect : 'none';
-  }
-  if (PROFILE_EFFECTS.includes(source.profile_effect)) {
-    output.profile_effect = tier === TIER.PRO ? source.profile_effect : 'none';
-  }
-  if (PROFILE_NAME_SIZES.includes(source.name_size)) {
-    output.name_size = tier === TIER.PRO ? source.name_size : 'normal';
-  }
-  if (paid && typeof source.profile_title === 'string') {
-    const title = source.profile_title.trim().replace(/\s+/g, ' ').slice(0, PROFILE_TITLE_MAX);
-    if (title) output.profile_title = title;
-  }
-  if (paid && typeof source.about_me === 'string') {
-    const about = source.about_me.trim().slice(0, 300);
-    if (about) output.about_me = about;
-  }
-  return output;
-}
+// Règles, listes fermées et neutralisation : voir `utils/profileCustomization`.
+// Elles servent aussi à l'expiration d'abonnement, qui doit retirer exactement
+// ce que l'enregistrement réserve aux paliers payants.
 
 /**
  * GET /api/users/me/profile-customization
@@ -1645,9 +1561,16 @@ function sanitizeCustomization(input, tier, { verified = false } = {}) {
 router.get('/me/profile-customization', authenticateToken, async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id, {
-      attributes: ['id', 'premium', 'subscription_tier', 'verified', 'verification_style', 'profile_customization']
+      attributes: [
+        'id', 'premium', 'subscription_tier', 'subscription_expires_at',
+        'verified', 'verification_style', 'profile_customization'
+      ]
     });
     if (!user) return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+
+    // Un abonnement échu doit tomber ici aussi : sans ça, l'écran resterait
+    // ouvert à l'édition jusqu'au prochain passage du balayage horaire.
+    await maybeExpireSubscription(user);
 
     const tier = customizationTier(user);
     return res.json({
@@ -1686,6 +1609,10 @@ router.put('/me/profile-customization', [authenticateToken, denySuspended], asyn
   try {
     const user = await User.findByPk(req.user.id);
     if (!user) return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+
+    // Idem : on ne veut pas qu'un abonnement échu depuis quelques minutes
+    // enregistre encore un habillage payant.
+    await maybeExpireSubscription(user);
 
     const tier = customizationTier(user);
     // La certification ouvre à elle seule l'effet de nom « Certifié » : un compte

@@ -966,9 +966,12 @@ function setupCronJobs() {
   cron.schedule('30 * * * *', async () => {
     try {
       const { expireDueSubscriptions } = require('./utils/subscriptionHelpers');
-      const expiredCount = await expireDueSubscriptions(sequelize);
-      if (expiredCount > 0) {
-        logger.info(`⏳ [Cron] ${expiredCount} abonnement(s) échu(s) repassé(s) en gratuit`);
+      const { expired, cleaned } = await expireDueSubscriptions(sequelize);
+      if (expired > 0) {
+        logger.info(`⏳ [Cron] ${expired} abonnement(s) échu(s) repassé(s) en gratuit`);
+      }
+      if (cleaned > 0) {
+        logger.info(`🧹 [Cron] ${cleaned} habillage(s) payant(s) retiré(s) d'un compte gratuit`);
       }
     } catch (error) {
       logger.error('❌ [Cron] Erreur expiration des abonnements:', error);

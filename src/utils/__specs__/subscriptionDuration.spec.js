@@ -87,10 +87,25 @@ describe('isSubscriptionActive', () => {
 });
 
 describe('maybeExpireSubscription', () => {
-  /** Faux modèle Sequelize : seul `save` nous intéresse ici. */
+  /** Faux modèle Sequelize : `save` et `changed` suffisent ici. */
   function fakeUser(fields) {
-    return { ...fields, saved: false, async save() { this.saved = true; } };
+    return {
+      ...fields,
+      saved: false,
+      async save() { this.saved = true; },
+      changed() {},
+    };
   }
+
+  const HABILLAGE_PAYANT = {
+    accent_color: '#ff00aa',
+    banner_style: 'mesh',
+    avatar_decoration: 'crown',
+    name_font: 'techno',
+    name_effect: 'shimmer',
+    profile_effect: 'embers',
+    profile_title: 'Boss',
+  };
 
   test('repasse en gratuit ET retire le drapeau premium', async () => {
     const user = fakeUser({
@@ -110,10 +125,54 @@ describe('maybeExpireSubscription', () => {
       subscription_tier: TIER.PRO,
       premium: true,
       subscription_expires_at: new Date(Date.now() + DAY_MS),
+      verified: false,
+      profile_customization: { ...HABILLAGE_PAYANT },
     });
 
     await expect(maybeExpireSubscription(user)).resolves.toBe(false);
     expect(user.premium).toBe(true);
     expect(user.saved).toBe(false);
+    expect(user.profile_customization).toEqual(HABILLAGE_PAYANT);
+  });
+
+  test('retire l\'habillage payant, qui sinon reste visible à vie', async () => {
+    const user = fakeUser({
+      subscription_tier: TIER.PRO,
+      premium: true,
+      subscription_expires_at: new Date(Date.now() - DAY_MS),
+      verified: false,
+      profile_customization: { ...HABILLAGE_PAYANT },
+    });
+
+    await maybeExpireSubscription(user);
+    expect(user.profile_customization).toEqual({});
+  });
+
+  test('un compte certifié garde son effet de nom « Certifié »', async () => {
+    // Cet effet suit le badge de vérification, pas l'abonnement.
+    const user = fakeUser({
+      subscription_tier: TIER.PRO,
+      premium: true,
+      subscription_expires_at: new Date(Date.now() - DAY_MS),
+      verified: true,
+      profile_customization: { ...HABILLAGE_PAYANT, name_effect: 'certified' },
+    });
+
+    await maybeExpireSubscription(user);
+    expect(user.profile_customization).toEqual({ name_effect: 'certified' });
+  });
+
+  test('n\'écrase pas une personnalisation qui n\'a pas été chargée', async () => {
+    // authMiddleware ne charge que les colonnes d'abonnement : écrire ici
+    // remplacerait par {} un habillage qu'on n'a jamais lu.
+    const user = fakeUser({
+      subscription_tier: TIER.PRO,
+      premium: true,
+      subscription_expires_at: new Date(Date.now() - DAY_MS),
+    });
+
+    await maybeExpireSubscription(user);
+    expect(user.profile_customization).toBeUndefined();
+    expect(user.premium).toBe(false);
   });
 });
