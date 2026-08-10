@@ -93,6 +93,7 @@ const casinoRoutes = require('./routes/casinoRoutes');
 const tweetMonetizationRoutes = require('./routes/tweetMonetizationRoutes');
 const eventRoutes = require('./routes/events');
 const functionalEventRoutes = require('./routes/functionalEventRoutes');
+const featureFlagRoutes = require('./routes/featureFlagRoutes');
 const themePresetRoutes = require('./routes/themePresets');
 const progressiveRecommendationRoutes = require('./routes/progressiveRecommendationRoutes');
 const userStatsRoutes = require('./routes/userStatsRoutes');
@@ -453,6 +454,9 @@ app.use('/api/tweet-monetization', tweetMonetizationRoutes);
 app.use('/api/events', eventRoutes);
 
 app.use('/api/functional-events', functionalEventRoutes);
+
+// Drapeaux de fonctionnalité — déploiement progressif et ciblage par attributs
+app.use('/api/feature-flags', featureFlagRoutes);
 
 app.use('/api/theme-presets', themePresetRoutes);
 
@@ -1541,6 +1545,10 @@ async function startServer() {
     // donc PolicierCongo ne tourne qu'en un exemplaire par construction.
     if (isWorker) {
       setupCronJobs();
+      // Montée automatique des paliers de déploiement, pour la même raison :
+      // sur deux instances, un drapeau armé monterait de deux crans par
+      // intervalle au lieu d'un.
+      require('./services/featureFlagAutoRollout').startScheduler();
     } else {
       logger.info(`⏭️ [role=${nodeRole}] Tâches cron non planifiées (réservées au worker).`);
     }

@@ -27,6 +27,7 @@ const UserWallet = require('./UserWallet');
 const Transaction = require('./Transaction');
 const Event = require('./Event');
 const FunctionalEvent = require('./FunctionalEvent');
+const FeatureFlagModule = require('./FeatureFlag');
 const VerificationRequest = require('./VerificationRequest');
 const Advertisement = require('./Advertisement');
 const AdCampaign = require('./AdCampaign');
@@ -123,6 +124,9 @@ const VerificationRequestModel = VerificationRequest(sequelize);
 // Initialiser le modèle d'événements
 const EventModel = Event(sequelize);
 const FunctionalEventModel = FunctionalEvent(sequelize);
+
+// Drapeaux de fonctionnalité — déploiement progressif et ciblage par attributs
+const FeatureFlag = FeatureFlagModule(sequelize);
 
 // Initialiser les modèles publicitaires
 const AdvertisementModel = Advertisement(sequelize);
@@ -480,10 +484,14 @@ FunctionalEventModel.belongsTo(User, {
   as: 'creator'
 });
 
-FunctionalEventModel.belongsTo(User, { 
-  foreignKey: 'updated_by', 
+FunctionalEventModel.belongsTo(User, {
+  foreignKey: 'updated_by',
   as: 'updater'
 });
+
+// Associations pour les drapeaux de fonctionnalité
+FeatureFlag.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+FeatureFlag.belongsTo(User, { foreignKey: 'updated_by', as: 'updater' });
 
 // Associations pour les demandes de vérification
 User.hasMany(VerificationRequestModel, { 
@@ -1752,6 +1760,7 @@ module.exports = {
   Transaction: TransactionModel,
   Event: EventModel,
   FunctionalEvent: FunctionalEventModel,
+  FeatureFlag,
   VerificationRequest: VerificationRequestModel,
   BotReputation,
   Advertisement: AdvertisementModel,
