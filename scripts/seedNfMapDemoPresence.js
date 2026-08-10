@@ -63,17 +63,27 @@ const TEST_PREFIX = 'nfmaptest_';
  * les rend reconnaissables à l'œil, et le mot de passe stocké n'est pas un
  * haché valide : personne ne peut ouvrir de session avec, pas même par erreur.
  */
+const DEMO_NAMES = [
+  'Lina', 'Yanis', 'Sofia', 'Malik', 'Emma', 'Noah', 'Ines', 'Adam',
+  'Jade', 'Rayan', 'Louna', 'Ilyes', 'Maya', 'Nael', 'Sarah', 'Amir',
+  'Chloe', 'Ethan', 'Nour', 'Liam', 'Alia', 'Gabriel', 'Yasmine', 'Enzo',
+];
+
 async function createTestAccounts(count) {
   const created = [];
   for (let index = 0; index < count; index += 1) {
-    const username = `${TEST_PREFIX}${Date.now().toString(36)}${index}`.slice(0, 30);
+    // Des prenoms distincts plutot que « Test » repete : les marqueurs
+    // portent le pseudo, et vingt epingles identiques ne permettent de
+    // verifier ni la lisibilite, ni le regroupement, ni la selection.
+    const firstName = DEMO_NAMES[index % DEMO_NAMES.length];
+    const username = `${firstName.toLowerCase()}_demo${index}`.slice(0, 30);
 
     const [row] = await sequelize.query(
       `INSERT INTO users (id, username, full_name, password, platform, is_data_test, is_active, created_at, updated_at)
        VALUES (uuid_generate_v4(), :username, :fullName, 'compte-de-test-non-connectable', 'android', TRUE, TRUE, NOW(), NOW())
        ON CONFLICT (username) DO NOTHING
        RETURNING id, username`,
-      { replacements: { username, fullName: `Test carte ${index + 1}` }, type: QueryTypes.SELECT }
+      { replacements: { username, fullName: firstName }, type: QueryTypes.SELECT }
     );
     if (row) created.push(row);
   }
@@ -82,8 +92,10 @@ async function createTestAccounts(count) {
 
 /** Supprime les comptes fabriqués ici. Présences et abonnements suivent en cascade. */
 async function purge() {
+  // `is_data_test` est le critere sur : les pseudos de demonstration portent
+  // desormais des prenoms, et se fier au prefixe en laisserait derriere.
   const [, meta] = await sequelize.query(
-    `DELETE FROM users WHERE is_data_test = TRUE AND username LIKE '${TEST_PREFIX}%'`
+    `DELETE FROM users WHERE is_data_test = TRUE`
   );
   console.log(`🧹 ${meta?.rowCount || 0} compte(s) de démonstration supprimé(s).`);
 }
@@ -164,7 +176,7 @@ async function main() {
       `INSERT INTO nf_map_presence
          (user_id, sharing_mode, audience, latitude, longitude, place_label, shared_at, expires_at, created_at, updated_at)
        VALUES
-         (:userId, :mode, 'connections', :latitude, :longitude, 'Position de test',
+         (:userId, :mode, 'connections', :latitude, :longitude, NULL,
           NOW(), NOW() + INTERVAL '8 hours', NOW(), NOW())
        ON CONFLICT (user_id) DO UPDATE SET
          sharing_mode = EXCLUDED.sharing_mode,
