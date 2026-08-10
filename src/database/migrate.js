@@ -357,6 +357,51 @@ async function runMigrations() {
         WHERE auto_rollout IS NOT NULL AND archived_at IS NULL;
     `);
 
+    // Carte NF : position PARTAGEE, et rien d'autre.
+    //
+    // Volontairement separee de `user_location_events`, qui enregistre des
+    // captures techniques a d'autres fins. Publier ces captures sur une carte
+    // montrerait la position de gens qui n'ont jamais accepte de la publier.
+    // Ici, une ligne n'existe que si son proprietaire l'a demandee, elle ne
+    // contient que ce qu'il accepte de montrer, et elle expire toute seule.
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS nf_map_presence (
+        user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        sharing_mode VARCHAR(16) NOT NULL DEFAULT 'ghost',
+        audience VARCHAR(16) NOT NULL DEFAULT 'mutuals',
+        latitude NUMERIC(9,6) NULL,
+        longitude NUMERIC(9,6) NULL,
+        place_label VARCHAR(120) NULL,
+        shared_at TIMESTAMPTZ NULL,
+        expires_at TIMESTAMPTZ NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      ALTER TABLE nf_map_presence
+        DROP CONSTRAINT IF EXISTS nf_map_presence_sharing_mode_check;
+      ALTER TABLE nf_map_presence
+        ADD CONSTRAINT nf_map_presence_sharing_mode_check
+        CHECK (sharing_mode IN ('ghost', 'city', 'precise'));
+
+      ALTER TABLE nf_map_presence
+        DROP CONSTRAINT IF EXISTS nf_map_presence_audience_check;
+      ALTER TABLE nf_map_presence
+        ADD CONSTRAINT nf_map_presence_audience_check
+        CHECK (audience IN ('mutuals', 'followers'));
+
+      -- La seule requete chaude : « qui est visible dans ce rectangle ». Index
+      -- partiel, parce que les lignes en mode fantome n'ont pas de position et
+      -- ne doivent jamais etre parcourues.
+      CREATE INDEX IF NOT EXISTS idx_nf_map_presence_visible
+        ON nf_map_presence (latitude, longitude)
+        WHERE sharing_mode <> 'ghost' AND latitude IS NOT NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_nf_map_presence_expiry
+        ON nf_map_presence (expires_at)
+        WHERE expires_at IS NOT NULL;
+    `);
+
     await sequelize.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS algorithmic_visibility_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0;
     `);

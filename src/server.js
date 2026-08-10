@@ -94,6 +94,7 @@ const tweetMonetizationRoutes = require('./routes/tweetMonetizationRoutes');
 const eventRoutes = require('./routes/events');
 const functionalEventRoutes = require('./routes/functionalEventRoutes');
 const featureFlagRoutes = require('./routes/featureFlagRoutes');
+const nfMapRoutes = require('./routes/nfMapRoutes');
 const themePresetRoutes = require('./routes/themePresets');
 const progressiveRecommendationRoutes = require('./routes/progressiveRecommendationRoutes');
 const userStatsRoutes = require('./routes/userStatsRoutes');
@@ -457,6 +458,9 @@ app.use('/api/functional-events', functionalEventRoutes);
 
 // Drapeaux de fonctionnalité — déploiement progressif et ciblage par attributs
 app.use('/api/feature-flags', featureFlagRoutes);
+
+// Carte NF — présence partagée, entièrement sous drapeau `fil.cartenf`
+app.use('/api/nf-map', nfMapRoutes);
 
 app.use('/api/theme-presets', themePresetRoutes);
 
@@ -873,6 +877,24 @@ app.use((error, req, res, next) => {
 
 // Tâches cron pour la maintenance
 function setupCronJobs() {
+  /**
+   * Carte NF : effacement des positions expirées, tous les quarts d'heure.
+   *
+   * La requête de lecture filtre déjà sur `expires_at`, donc rien de périmé
+   * n'est jamais montré. Cette purge sert à autre chose : à ce que la position
+   * ne RESTE PAS en base une fois passée. Sans elle, la table deviendrait
+   * l'historique des déplacements de ceux qui ont activé le partage — ce que
+   * personne n'a accepté en l'activant.
+   */
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const cleared = await require('./services/nfMapService').purgeExpired(sequelize);
+      if (cleared > 0) logger.info(`[nfMap] ${cleared} position(s) expirée(s) effacée(s)`);
+    } catch (error) {
+      logger.error('[nfMap] purge des positions impossible:', error.message);
+    }
+  });
+
   // Nettoyage des sessions expirées (toutes les heures)
   cron.schedule('0 * * * *', async () => {
     try {
