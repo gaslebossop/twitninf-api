@@ -47,6 +47,23 @@ function sanitizeRule(rule, index) {
     };
   });
 
+  // Un segment porte SOIT un pourcentage figé, SOIT un multiplicateur du
+  // palier global (« boost »). Les deux ensemble n'auraient pas de sens : on
+  // ne saurait pas lequel décide.
+  if (rule.boost !== undefined && rule.boost !== null) {
+    const boost = Number(rule.boost);
+    if (!Number.isFinite(boost) || boost <= 0 || boost > 10) {
+      throw new Error(`Segment #${index + 1} : le boost doit être compris entre 0 et 10`);
+    }
+    return {
+      id: rule.id || `seg_${index + 1}`,
+      label: rule.label || null,
+      boost,
+      variant: rule.variant || null,
+      conditions: cleanConditions,
+    };
+  }
+
   const percentage = rule.percentage === undefined || rule.percentage === null
     ? 100
     : Number(rule.percentage);

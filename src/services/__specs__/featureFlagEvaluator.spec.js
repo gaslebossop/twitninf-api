@@ -206,3 +206,73 @@ describe('variantes', () => {
     expect(variants.size).toBe(2);
   });
 });
+
+/**
+ * Le boost sert le cas « les abonnés d'abord, mais pas qu'eux ». Un segment
+ * ordinaire est exclusif ; un boost est relatif au palier global, donc il
+ * donne de l'avance et sature à 100 % en même temps que tout le monde.
+ */
+describe('segments boostés', () => {
+  const premium = (boost) => ({
+    id: 'premium',
+    label: 'Abonnés',
+    boost,
+    conditions: [{ attribute: 'premium', operator: 'eq', value: true }],
+  });
+
+  function shareOf(flag, context, count = 4000) {
+    let seen = 0;
+    for (let i = 0; i < count; i += 1) {
+      if (evaluate(flag, { ...context, user_id: `u${i}` }).enabled) seen += 1;
+    }
+    return seen / count;
+  }
+
+  test('sert plus d’abonnés que d’autres comptes, sans exclure personne', () => {
+    const flag = makeFlag({ rollout_percentage: 20, rules: [premium(2)] });
+
+    const withPremium = shareOf(flag, { premium: true });
+    const withoutPremium = shareOf(flag, { premium: false });
+
+    expect(withPremium).toBeGreaterThan(0.35);
+    expect(withPremium).toBeLessThan(0.45);
+    // Le point de tout l'exercice : les non-abonnés avancent aussi.
+    expect(withoutPremium).toBeGreaterThan(0.15);
+    expect(withoutPremium).toBeLessThan(0.25);
+  });
+
+  test('sature à 100 % : le boost donne de l’avance, jamais l’exclusivité', () => {
+    const flag = makeFlag({ rollout_percentage: 100, rules: [premium(2)] });
+
+    expect(shareOf(flag, { premium: true })).toBe(1);
+    expect(shareOf(flag, { premium: false })).toBe(1);
+  });
+
+  test('suit le palier global sans qu’on ait à toucher au segment', () => {
+    const at = (base) =>
+      shareOf(makeFlag({ rollout_percentage: base, rules: [premium(3)] }), { premium: true });
+
+    expect(at(5)).toBeGreaterThan(at(2));
+    expect(at(20)).toBeGreaterThan(at(5));
+  });
+
+  test('n’enlève la fonctionnalité à personne quand le palier monte', () => {
+    const kept = (base) => {
+      const flag = makeFlag({ rollout_percentage: base, rules: [premium(2)] });
+      const inside = new Set();
+      for (let i = 0; i < 2000; i += 1) {
+        if (evaluate(flag, { user_id: `u${i}`, premium: true }).enabled) inside.add(`u${i}`);
+      }
+      return inside;
+    };
+
+    const before = kept(10);
+    const after = kept(25);
+    for (const user of before) expect(after.has(user)).toBe(true);
+  });
+
+  test('un palier global à 0 % ne sert personne, même boosté', () => {
+    const flag = makeFlag({ rollout_percentage: 0, rules: [premium(5)] });
+    expect(shareOf(flag, { premium: true })).toBe(0);
+  });
+});

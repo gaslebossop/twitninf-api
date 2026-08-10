@@ -174,3 +174,59 @@ describe('featureFlagAutoRollout — arrêts', () => {
       .toBe('targeting_changed');
   });
 });
+
+/**
+ * Un segment boosté est relatif au palier global : le plan doit donc faire
+ * monter le palier GLOBAL et laisser le boost suivre. Le faire grimper aussi
+ * élargirait la portée deux fois par cran.
+ */
+describe('featureFlagAutoRollout — segments boostés', () => {
+  const boosted = (boost = 2) => ({
+    id: 'premium',
+    boost,
+    conditions: [{ attribute: 'premium', operator: 'eq', value: true }],
+  });
+
+  test('fait monter le palier global, pas le boost', () => {
+    const flag = armed(makeFlag({ rollout_percentage: 5, rules: [boosted()] }), {
+      steps: [5, 25, 100],
+      interval_minutes: 60,
+    });
+
+    const changes = auto.computeAdvance(flag, minutes(T0, 60));
+
+    expect(changes.rollout_percentage).toBe(25);
+    expect(changes.rules).toBeUndefined();
+  });
+
+  test('accepte plusieurs segments tant qu’ils sont tous des boosts', () => {
+    const flag = makeFlag({ rules: [boosted(2), { id: 'verifies', boost: 1.5, conditions: [] }] });
+    expect(() => auto.buildPlan(flag, {}, T0)).not.toThrow();
+  });
+
+  test('refuse toujours deux paliers figés : lequel monterait ?', () => {
+    const flag = makeFlag({
+      rules: [
+        { id: 'a', percentage: 10, conditions: [] },
+        { id: 'b', percentage: 50, conditions: [] },
+      ],
+    });
+    expect(() => auto.buildPlan(flag, {}, T0)).toThrow(/plusieurs segments/);
+  });
+
+  test('un boost à côté d’un segment figé laisse monter le segment figé', () => {
+    const flag = armed(
+      makeFlag({
+        rollout_percentage: 0,
+        rules: [boosted(), { id: 'audience', percentage: 5, conditions: [] }],
+      }),
+      { steps: [5, 25, 100], interval_minutes: 60 }
+    );
+
+    const changes = auto.computeAdvance(flag, minutes(T0, 60));
+
+    expect(changes.rules[1].percentage).toBe(25);
+    expect(changes.rules[0].boost).toBe(2);
+    expect(changes.rollout_percentage).toBeUndefined();
+  });
+});

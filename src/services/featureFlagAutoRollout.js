@@ -34,6 +34,7 @@
 
 const { Op } = require('sequelize');
 const logger = require('../utils/logger');
+const evaluator = require('./featureFlagEvaluator');
 
 /** Échelle par défaut. Les petits crans d'abord : c'est là qu'on observe. */
 const DEFAULT_STEPS = [1, 5, 10, 25, 50, 100];
@@ -60,20 +61,42 @@ let timer = null;
 
 // ─────────────────────────── Lecture du palier ───────────────────────────
 
-/** Palier réellement servi : celui du segment quand il y en a un. */
-function effectiveStep(flag) {
+/**
+ * Index du segment qui porte le palier à faire monter, ou `-1` si c'est le
+ * palier global.
+ *
+ * Un segment « boost » ne compte pas : il est relatif au palier global et
+ * monte donc tout seul quand celui-ci monte. Faire grimper le boost
+ * reviendrait à l'élargir deux fois.
+ */
+function absoluteRuleIndexes(flag) {
   const rules = Array.isArray(flag?.rules) ? flag.rules : [];
-  if (rules.length === 0) return Math.max(0, Math.min(100, Number(flag?.rollout_percentage) || 0));
-  const percentage = rules[0].percentage;
+  return rules.reduce((found, rule, index) => {
+    if (!evaluator.isBoostRule(rule)) found.push(index);
+    return found;
+  }, []);
+}
+
+/** Palier réellement servi : celui du segment absolu quand il y en a un. */
+function effectiveStep(flag) {
+  const [index] = absoluteRuleIndexes(flag);
+  if (index === undefined) {
+    return Math.max(0, Math.min(100, Number(flag?.rollout_percentage) || 0));
+  }
+  const percentage = flag.rules[index].percentage;
   if (percentage === undefined || percentage === null) return 100;
   return Math.max(0, Math.min(100, Number(percentage) || 0));
 }
 
 /** Champs à écrire pour poser `value` là où le palier est réellement lu. */
 function stepUpdate(flag, value) {
-  const rules = Array.isArray(flag?.rules) ? flag.rules : [];
-  if (rules.length === 0) return { rollout_percentage: value };
-  return { rules: [{ ...rules[0], percentage: value }, ...rules.slice(1)] };
+  const [index] = absoluteRuleIndexes(flag);
+  if (index === undefined) return { rollout_percentage: value };
+
+  const rules = flag.rules.map((rule, position) =>
+    position === index ? { ...rule, percentage: value } : rule
+  );
+  return { rules };
 }
 
 // ─────────────────────────────── Le plan ───────────────────────────────
@@ -114,7 +137,7 @@ function plusMinutes(date, minutes) {
  * mieux vaut un refus explicite qu'un plan armé qui ne bougera jamais.
  */
 function buildPlan(flag, { steps, interval_minutes: intervalMinutes, actorId } = {}, now = new Date()) {
-  if ((Array.isArray(flag.rules) ? flag.rules : []).length > 1) {
+  if (absoluteRuleIndexes(flag).length > 1) {
     throw new Error(
       'Montée impossible sur un ciblage à plusieurs segments : le palier à faire monter serait ambigu.'
     );
@@ -178,7 +201,7 @@ function computeAdvance(flag, now = new Date()) {
 
   if (flag.archived_at) return { auto_rollout: haltPlan(plan, 'archived', now) };
   if (!flag.enabled) return { auto_rollout: haltPlan(plan, 'flag_off', now) };
-  if ((Array.isArray(flag.rules) ? flag.rules : []).length > 1) {
+  if (absoluteRuleIndexes(flag).length > 1) {
     return { auto_rollout: haltPlan(plan, 'targeting_changed', now) };
   }
 
@@ -333,6 +356,7 @@ module.exports = {
   MAX_INTERVAL_MINUTES,
   DEFAULT_INTERVAL_MINUTES,
   HALT_REASONS,
+  absoluteRuleIndexes,
   effectiveStep,
   stepUpdate,
   sanitizeSteps,

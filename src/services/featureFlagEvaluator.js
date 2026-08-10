@@ -305,9 +305,7 @@ function evaluate(flag, context = {}, now = new Date()) {
   for (const rule of rules) {
     if (!matchRule(rule, context)) continue;
 
-    const percentage = rule.percentage === undefined || rule.percentage === null
-      ? 100
-      : Math.max(0, Math.min(100, Number(rule.percentage)));
+    const percentage = rulePercentage(rule, flag);
 
     if (bucket >= percentage * (BUCKET_SPACE / 100)) {
       return off('rule_rollout_excluded', { bucket, rule: rule.id || rule.label || null });
@@ -343,6 +341,44 @@ function evaluate(flag, context = {}, now = new Date()) {
   };
 }
 
+/**
+ * Palier d'un segment : absolu, ou RELATIF au palier global (« boost »).
+ *
+ * Un segment ordinaire porte un pourcentage figé — il est donc EXCLUSIF : les
+ * abonnés à 30 %, tout le monde à 0 %. Ça ne sait pas exprimer « les abonnés
+ * d'abord, mais pas qu'eux », qui est pourtant le cas courant : on veut que
+ * tout le monde avance, et que certains avancent plus vite.
+ *
+ * D'où `boost`, un multiplicateur du palier global. `boost: 2` avec un palier
+ * global à 10 % sert 20 % des abonnés et 10 % des autres. Deux propriétés en
+ * découlent, et ce sont elles qui font préférer un multiplicateur à un second
+ * pourcentage à tenir à jour :
+ *
+ *   - le segment ne peut pas être oublié à une valeur périmée : il suit le
+ *     palier global, y compris quand une montée automatique le fait grimper ;
+ *   - il sature à 100 % en même temps que tout le monde, donc la fonctionnalité
+ *     finit bien par être servie à tous. Un boost donne de l'avance, jamais
+ *     l'exclusivité.
+ */
+function rulePercentage(rule, flag) {
+  const clamp = (value) => Math.max(0, Math.min(100, value));
+
+  const boost = Number(rule?.boost);
+  if (Number.isFinite(boost) && boost > 0) {
+    const base = clamp(Number(flag?.rollout_percentage) || 0);
+    return clamp(Math.round(base * boost));
+  }
+
+  if (rule?.percentage === undefined || rule?.percentage === null) return 100;
+  return clamp(Number(rule.percentage) || 0);
+}
+
+/** Un segment relatif au palier global plutôt qu'à un pourcentage figé. */
+function isBoostRule(rule) {
+  const boost = Number(rule?.boost);
+  return Number.isFinite(boost) && boost > 0;
+}
+
 /** Attributs réellement référencés par un drapeau — pour la résolution paresseuse. */
 function referencedAttributes(flag) {
   const found = new Set();
@@ -364,6 +400,8 @@ module.exports = {
   compareSemver,
   matchCondition,
   matchRule,
+  rulePercentage,
+  isBoostRule,
   pickVariant,
   evaluate,
   referencedAttributes,
