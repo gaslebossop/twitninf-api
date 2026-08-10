@@ -15,15 +15,32 @@
  *   3. **Ça s'efface tout seul.** Une position expire au bout de huit heures.
  *      Une carte sans expiration devient un historique de déplacements, ce que
  *      personne n'a demandé en activant le partage.
- *   4. **Un public restreint.** Par défaut, les abonnements réciproques
- *      seulement. Une position visible de tous n'est pas une carte entre
+ *   4. **Un lien obligatoire.** Par défaut, les comptes liés dans un sens ou
+ *      dans l'autre — la définition d'« ami » retenue pour le produit. Le
+ *      réglage peut être resserré aux seuls abonnements réciproques, jamais
+ *      élargi au-delà : une position visible de tous n'est pas une carte entre
  *      proches, c'est une publication.
+ *
+ * Ces quatre règles décrivent ce qui est PARTAGÉ. Rien ici ne va chercher une
+ * position ailleurs : `user_location_events` est collecté pour la fraude et
+ * les statistiques, et alimenter la carte avec cette table publierait la
+ * position de comptes qui n'ont jamais accepté d'apparaître.
  */
 
 const { QueryTypes } = require('sequelize');
 
 const SHARING_MODES = ['ghost', 'city', 'precise'];
-const AUDIENCES = ['mutuals', 'followers'];
+
+/**
+ * Qui peut me voir, du plus fermé au plus ouvert :
+ *   - `mutuals`     : on se suit dans les deux sens ;
+ *   - `followers`   : ceux qui me suivent ;
+ *   - `connections` : n'importe quel lien, dans un sens ou dans l'autre.
+ *
+ * Dans tous les cas il FAUT un lien : la carte ne montre jamais un inconnu.
+ * Le choix appartient à la personne qui se montre, jamais à celle qui regarde.
+ */
+const AUDIENCES = ['mutuals', 'followers', 'connections'];
 
 /** Au-delà, la position n'est plus montrée — voir la règle 3. */
 const PRESENCE_TTL_HOURS = 8;
@@ -86,7 +103,7 @@ async function getSettings(sequelize, userId) {
   if (!row) {
     return {
       sharing_mode: 'ghost',
-      audience: 'mutuals',
+      audience: 'connections',
       shared_at: null,
       expires_at: null,
       place_label: null,
@@ -125,7 +142,7 @@ async function updateSettings(sequelize, userId, { sharing_mode: mode, audience 
 
   await sequelize.query(
     `INSERT INTO nf_map_presence (user_id, sharing_mode, audience, created_at, updated_at)
-     VALUES (:userId, COALESCE(:mode, 'ghost'), COALESCE(:audience, 'mutuals'), NOW(), NOW())
+     VALUES (:userId, COALESCE(:mode, 'ghost'), COALESCE(:audience, 'connections'), NOW(), NOW())
      ON CONFLICT (user_id) DO UPDATE SET
        sharing_mode = COALESCE(:mode, nf_map_presence.sharing_mode),
        audience = COALESCE(:audience, nf_map_presence.audience),
@@ -242,25 +259,146 @@ async function nearby(sequelize, viewerId, bounds) {
         AND p.user_id <> :viewerId
         AND p.latitude BETWEEN :south AND :north
         AND p.longitude BETWEEN LEAST(:west, :east) AND GREATEST(:west, :east)
-        AND EXISTS (
-          SELECT 1 FROM user_follows f
-           WHERE f.follower_id = :viewerId
-             AND f.following_id = p.user_id
-             AND f.status = 'active'
-        )
+        -- Un lien est OBLIGATOIRE, quel que soit le réglage : la carte ne
+        -- montre jamais quelqu'un avec qui on n'a aucune relation.
         AND (
-          p.audience = 'followers'
+          EXISTS (
+            SELECT 1 FROM user_follows f
+             WHERE f.follower_id = :viewerId AND f.following_id = p.user_id AND f.status = 'active'
+          )
           OR EXISTS (
-            SELECT 1 FROM user_follows b
-             WHERE b.follower_id = p.user_id
-               AND b.following_id = :viewerId
-               AND b.status = 'active'
+            SELECT 1 FROM user_follows f
+             WHERE f.follower_id = p.user_id AND f.following_id = :viewerId AND f.status = 'active'
+          )
+        )
+        -- Puis le réglage de la personne qui se montre restreint ce lien.
+        AND (
+          p.audience = 'connections'
+          OR (
+            p.audience = 'followers'
+            AND EXISTS (
+              SELECT 1 FROM user_follows f
+               WHERE f.follower_id = :viewerId AND f.following_id = p.user_id AND f.status = 'active'
+            )
+          )
+          OR (
+            p.audience = 'mutuals'
+            AND EXISTS (
+              SELECT 1 FROM user_follows f
+               WHERE f.follower_id = :viewerId AND f.following_id = p.user_id AND f.status = 'active'
+            )
+            AND EXISTS (
+              SELECT 1 FROM user_follows b
+               WHERE b.follower_id = p.user_id AND b.following_id = :viewerId AND b.status = 'active'
+            )
           )
         )
       ORDER BY p.shared_at DESC
       LIMIT ${MAX_RESULTS}`,
     { replacements: { viewerId, north, south, east, west }, type: QueryTypes.SELECT }
   );
+}
+
+/**
+ * Tous les comptes liés à l'appelant, et leur état de partage.
+ *
+ * C'est la réponse honnête à « pourquoi ma carte est vide ». Un ami qui ne
+ * partage pas apparaît ici — par son nom, jamais par sa position — avec de
+ * quoi lui demander. Ce que cette liste ne fait PAS, et ne doit jamais faire :
+ * aller chercher une position ailleurs (`user_location_events` par exemple)
+ * pour combler le vide. Ces captures existent pour la détection de fraude et
+ * les statistiques ; les afficher ici publierait la position de gens qui ne
+ * l'ont jamais accepté, et souvent auprès de comptes qu'ils ne suivent même
+ * pas en retour. Une carte vide est un problème d'adoption ; une carte pleine
+ * de positions non consenties est un problème d'un tout autre ordre.
+ */
+async function connections(sequelize, viewerId) {
+  return sequelize.query(
+    `SELECT u.id,
+            u.username,
+            u.full_name,
+            u.avatar,
+            u.verified,
+            u.premium,
+            (p.sharing_mode IS NOT NULL
+             AND p.sharing_mode <> 'ghost'
+             AND p.latitude IS NOT NULL
+             AND p.expires_at > NOW())         AS is_sharing,
+            EXISTS (
+              SELECT 1 FROM user_follows f
+               WHERE f.follower_id = :viewerId AND f.following_id = u.id AND f.status = 'active'
+            )                                   AS i_follow,
+            EXISTS (
+              SELECT 1 FROM user_follows f
+               WHERE f.follower_id = u.id AND f.following_id = :viewerId AND f.status = 'active'
+            )                                   AS follows_me
+       FROM users u
+       LEFT JOIN nf_map_presence p ON p.user_id = u.id
+      WHERE u.is_active = TRUE
+        AND u.id <> :viewerId
+        AND (
+          EXISTS (
+            SELECT 1 FROM user_follows f
+             WHERE f.follower_id = :viewerId AND f.following_id = u.id AND f.status = 'active'
+          )
+          OR EXISTS (
+            SELECT 1 FROM user_follows f
+             WHERE f.follower_id = u.id AND f.following_id = :viewerId AND f.status = 'active'
+          )
+        )
+      ORDER BY is_sharing DESC, u.username ASC
+      LIMIT 300`,
+    { replacements: { viewerId }, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Demande à un ami d'activer sa position.
+ *
+ * Une invitation, pas un accès : elle ne révèle rien et ne donne rien. Le
+ * destinataire reste libre de ne rien faire, et c'est le seul chemin par
+ * lequel quelqu'un peut apparaître sur la carte de quelqu'un d'autre.
+ *
+ * Une invitation par personne et par jour : au-delà, « demander » devient
+ * « harceler », et le bouton se retourne contre celui qu'il devait convaincre.
+ */
+async function invite(sequelize, Notification, fromUser, targetUserId) {
+  const [link] = await sequelize.query(
+    `SELECT 1 FROM user_follows
+      WHERE status = 'active'
+        AND ((follower_id = :viewerId AND following_id = :targetId)
+          OR (follower_id = :targetId AND following_id = :viewerId))
+      LIMIT 1`,
+    { replacements: { viewerId: fromUser.id, targetId: targetUserId }, type: QueryTypes.SELECT }
+  );
+  if (!link) throw new Error('Aucun lien avec ce compte');
+
+  const [recent] = await sequelize.query(
+    `SELECT 1 FROM notifications
+      WHERE user_id = :targetId
+        AND type = 'system'
+        AND content->>'kind' = 'nf_map_invite'
+        AND content->>'from_user_id' = :viewerId
+        AND created_at > NOW() - INTERVAL '1 day'
+      LIMIT 1`,
+    { replacements: { viewerId: String(fromUser.id), targetId: targetUserId }, type: QueryTypes.SELECT }
+  );
+  if (recent) return { sent: false, reason: 'already_invited_today' };
+
+  await Notification.create({
+    user_id: targetUserId,
+    type: 'system',
+    title: 'Carte NF',
+    message: `@${fromUser.username} aimerait te voir sur la Carte NF.`,
+    content: {
+      kind: 'nf_map_invite',
+      from_user_id: String(fromUser.id),
+      from_username: fromUser.username,
+      entity_type: 'nf_map',
+    },
+  });
+
+  return { sent: true };
 }
 
 /** Purge des positions expirées — appelée par le worker. */
@@ -281,6 +419,8 @@ module.exports = {
   MAX_VIEWPORT_DEGREES,
   MAX_RESULTS,
   positionForMode,
+  connections,
+  invite,
   getSettings,
   updateSettings,
   updatePosition,

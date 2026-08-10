@@ -12,7 +12,7 @@
 const express = require('express');
 const router = express.Router();
 
-const { sequelize } = require('../models');
+const { sequelize, Notification } = require('../models');
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const { requireFlag } = require('../middleware/featureFlagMiddleware');
 const nfMap = require('../services/nfMapService');
@@ -91,6 +91,42 @@ router.get('/nearby', guard, async (req, res) => {
     return res.json({ success: true, data: { people } });
   } catch (error) {
     // Un rectangle refusé est une erreur d'appel, pas une panne.
+    return res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * GET /api/nf-map/friends — mes liens, et qui partage.
+ *
+ * Répond à « pourquoi ma carte est vide » en nommant les amis qui ne
+ * partagent pas. Leur nom, jamais leur position : un compte qui n'a rien
+ * activé n'a aucune position à montrer, et on ne va pas la chercher ailleurs.
+ */
+router.get('/friends', guard, async (req, res) => {
+  try {
+    const people = await nfMap.connections(sequelize, req.user.id);
+    return res.json({
+      success: true,
+      data: {
+        people,
+        sharing_count: people.filter((person) => person.is_sharing).length,
+      },
+    });
+  } catch (error) {
+    logger.error(`[nfMap] connections: ${error.message}`);
+    return res.status(500).json({ success: false, message: 'Liste indisponible' });
+  }
+});
+
+/** POST /api/nf-map/invite/:userId — « montre-toi sur la carte ». */
+router.post('/invite/:userId', [...guard, denySuspended], async (req, res) => {
+  try {
+    const result = await nfMap.invite(sequelize, Notification, req.user, req.params.userId);
+    if (!result.sent && result.reason === 'already_invited_today') {
+      return res.json({ success: true, data: result, message: 'Déjà demandé aujourd\'hui' });
+    }
+    return res.json({ success: true, data: result });
+  } catch (error) {
     return res.status(400).json({ success: false, message: error.message });
   }
 });

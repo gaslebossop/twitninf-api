@@ -368,7 +368,7 @@ async function runMigrations() {
       CREATE TABLE IF NOT EXISTS nf_map_presence (
         user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
         sharing_mode VARCHAR(16) NOT NULL DEFAULT 'ghost',
-        audience VARCHAR(16) NOT NULL DEFAULT 'mutuals',
+        audience VARCHAR(16) NOT NULL DEFAULT 'connections',
         latitude NUMERIC(9,6) NULL,
         longitude NUMERIC(9,6) NULL,
         place_label VARCHAR(120) NULL,
