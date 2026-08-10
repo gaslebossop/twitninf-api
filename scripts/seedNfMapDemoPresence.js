@@ -92,6 +92,18 @@ async function createTestAccounts(count) {
 
 /** Supprime les comptes fabriqués ici. Présences et abonnements suivent en cascade. */
 async function purge() {
+  // Les abonnements d'abord : `user_follows` ne cascade pas sur son auteur,
+  // et supprimer le compte avant sa ligne d'abonnement echoue.
+  await sequelize.query(
+    `DELETE FROM user_follows
+      WHERE follower_id IN (SELECT id FROM users WHERE is_data_test = TRUE)
+         OR following_id IN (SELECT id FROM users WHERE is_data_test = TRUE)`
+  );
+  await sequelize.query(
+    `DELETE FROM nf_map_presence
+      WHERE user_id IN (SELECT id FROM users WHERE is_data_test = TRUE)`
+  );
+
   // `is_data_test` est le critere sur : les pseudos de demonstration portent
   // desormais des prenoms, et se fier au prefixe en laisserait derriere.
   const [, meta] = await sequelize.query(
