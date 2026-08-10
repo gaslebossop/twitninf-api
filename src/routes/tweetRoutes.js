@@ -2,6 +2,7 @@ const express = require('express');
 const { body, param, query, validationResult } = require('express-validator');
 const router = express.Router();
 const path = require('path');
+const multer = require('multer');
 
 // Import des modèles et services
 const { Tweet, TweetLike, TweetRetweet, User, Notification } = require('../models');
@@ -22,7 +23,25 @@ const tweetEditService = require('../services/tweetEditService');
 const TweetRecommendationService = require('../services/tweetRecommendationService');
 const RealtimeQueueService = require('../services/realtimeQueueService');
 const { upload, videoService } = require('../services/videoService');
+const { requireFlag } = require('../middleware/featureFlagMiddleware');
+const tweetImageService = require('../services/tweetImageService');
 const logger = require('../utils/logger');
+
+/**
+ * Réception des images de tweet. En mémoire puis recompressées : le fichier
+ * d'origine n'atteint jamais le disque, donc aucun nettoyage à faire si
+ * l'envoi échoue en cours de route.
+ */
+const imageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: tweetImageService.MAX_UPLOAD_BYTES, files: 1 },
+  fileFilter: (req, file, cb) => {
+    if (!tweetImageService.isAcceptedMimetype(file.mimetype)) {
+      return cb(new Error('Format d\'image non pris en charge'));
+    }
+    cb(null, true);
+  },
+});
 
 // 🎯 Retargeting hook — batch créé à chaque interaction utilisateur
 const retargetingHook = require('../services/retargetingHook');
@@ -1094,14 +1113,53 @@ router.get('/:id/similar', [
 // ========================================
 
 /**
+ * POST /api/tweets/media
+ * Envoie une image à joindre à un tweet, et renvoie son URL publique.
+ *
+ * En deux temps (envoyer l'image, puis publier le tweet qui la référence)
+ * plutôt qu'en un seul multipart : l'image part pendant que l'auteur finit
+ * d'écrire, la publication reste une requête JSON légère, et un brouillon
+ * repris plus tard n'a pas à renvoyer les fichiers déjà transférés.
+ *
+ * `requireFlag` rend un 404 tant que le drapeau `tweet.images` n'est pas
+ * ouvert pour l'appelant : la route existe en production bien avant d'être
+ * accessible, et c'est le palier de déploiement qui l'ouvre — sans redéployer.
+ */
+router.post(
+  '/media',
+  [authenticateToken, denySuspended, requireFlag('tweet.images'), imageUpload.single('image')],
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: 'Fichier manquant (champ "image")' });
+      }
+
+      const url = await tweetImageService.storeUploadedImage(req.file.buffer, req.user.id);
+      return res.status(201).json({ success: true, data: { url } });
+    } catch (error) {
+      logger.error('Erreur upload image de tweet:', error);
+      return res.status(500).json({ success: false, message: 'Impossible d\'envoyer cette image' });
+    }
+  }
+);
+
+/**
  * POST /api/tweets
  * Créer un nouveau tweet
  */
 router.post('/', [
   authenticateToken,
   denySuspended,
-  body('content').trim().isLength({ min: 1 }).withMessage('Le contenu ne peut pas être vide')
-    .custom(assertTweetLength),
+  // Une image se suffit à elle-même : un tweet sans texte est valide s'il en
+  // porte une. Sans cette exception, publier une photo obligerait à écrire
+  // quelque chose par-dessus.
+  body('content').trim().custom(async (value, meta) => {
+    const images = tweetImageService.sanitizeMediaUrls(meta.req.body?.media_urls);
+    if (!value && images.length === 0) {
+      throw new Error('Le contenu ne peut pas être vide');
+    }
+    return assertTweetLength(value, meta);
+  }),
   body('parent_tweet_id').optional().isUUID().withMessage('ID de tweet parent invalide'),
   body('media_urls').optional().isArray().withMessage('Les URLs des médias doivent être un tableau'),
   body('is_private').optional().isBoolean().withMessage('Le statut privé doit être un booléen'),
@@ -1233,7 +1291,11 @@ router.post('/', [
         parent_tweet_id,
         original_tweet_id,
         tweet_type: final_tweet_type,
-        media_urls,
+        // Seules les images que cette API a émises entrent ici. Accepter une
+        // URL arbitraire ferait charger un serveur tiers à chaque affichage du
+        // tweet, ce qui livrerait l'IP et l'heure de lecture de tous ceux qui
+        // le croisent. Voir `services/tweetImageService`.
+        media_urls: tweetImageService.sanitizeMediaUrls(media_urls),
         is_private,
         is_sensitive,
         location,
@@ -1592,7 +1654,7 @@ router.post('/', [
         tweetId: String(parent_tweet_id),
         tweetContent: content || '',
         authorUsername: '',
-        mediaUrls: Array.isArray(media_urls) ? media_urls : []
+        mediaUrls: tweet.media_urls || []
       });
       // Similarité
       similarity.getEngine().onInteraction(String(userId), String(parent_tweet_id), 'comment', content || '');
@@ -1602,10 +1664,10 @@ router.post('/', [
         userId: String(userId),
         tweetId: String(tweet.id),
         tweetContent: content || '',
-        mediaUrls: Array.isArray(media_urls) ? media_urls : []
+        mediaUrls: tweet.media_urls || []
       });
       // Similarité
-      similarity.getEngine().onNewTweet(String(tweet.id), String(userId), content || '', Array.isArray(media_urls) ? media_urls : [], tweet.parent_tweet_id);
+      similarity.getEngine().onNewTweet(String(tweet.id), String(userId), content || '', tweet.media_urls || [], tweet.parent_tweet_id);
     }
 
     res.status(201).json({
