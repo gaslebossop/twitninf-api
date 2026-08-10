@@ -37,6 +37,7 @@
 
 const { QueryTypes } = require('sequelize');
 const { sequelize } = require('../src/models');
+const { positionForMode } = require('../src/services/nfMapService');
 
 function arg(name, fallback = null) {
   const index = process.argv.indexOf(`--${name}`);
@@ -153,6 +154,12 @@ async function main() {
     const { dLat, dLon } = jitter(centerLat, radiusKm);
     const mode = Math.random() < 0.3 ? 'city' : 'precise';
 
+    // Même arrondi que la production : sans lui, les points « ville » de la
+    // démonstration seraient plus précis que les vrais, et l'écran donnerait
+    // une idée fausse de ce que ce mode montre réellement.
+    const stored = positionForMode(mode, centerLat + dLat, centerLon + dLon);
+    if (!stored) continue;
+
     await sequelize.query(
       `INSERT INTO nf_map_presence
          (user_id, sharing_mode, audience, latitude, longitude, place_label, shared_at, expires_at, created_at, updated_at)
@@ -172,8 +179,8 @@ async function main() {
         replacements: {
           userId: account.id,
           mode,
-          latitude: Number((centerLat + dLat).toFixed(6)),
-          longitude: Number((centerLon + dLon).toFixed(6)),
+          latitude: stored.latitude,
+          longitude: stored.longitude,
         },
       }
     );
