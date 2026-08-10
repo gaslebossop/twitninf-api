@@ -90,10 +90,17 @@ async function createTestAccounts(count) {
   return created;
 }
 
-/** Supprime les comptes fabriqués ici. Présences et abonnements suivent en cascade. */
+/**
+ * Retire les comptes de démonstration de la circulation.
+ *
+ * On les DÉSACTIVE au lieu de les supprimer. Un compte est référencé par une
+ * douzaine de tables (`profile_views`, `user_follows`, notifications…) dont
+ * toutes ne cascadent pas : le supprimer revient à courir après chaque
+ * contrainte, et une seule oubliée fait échouer la purge à moitié faite.
+ * Désactivé, présence effacée et abonnements retirés, il disparaît de partout
+ * où il se voyait — c'est ce qu'on veut, sans toucher au schéma.
+ */
 async function purge() {
-  // Les abonnements d'abord : `user_follows` ne cascade pas sur son auteur,
-  // et supprimer le compte avant sa ligne d'abonnement echoue.
   await sequelize.query(
     `DELETE FROM user_follows
       WHERE follower_id IN (SELECT id FROM users WHERE is_data_test = TRUE)
@@ -104,12 +111,11 @@ async function purge() {
       WHERE user_id IN (SELECT id FROM users WHERE is_data_test = TRUE)`
   );
 
-  // `is_data_test` est le critere sur : les pseudos de demonstration portent
-  // desormais des prenoms, et se fier au prefixe en laisserait derriere.
   const [, meta] = await sequelize.query(
-    `DELETE FROM users WHERE is_data_test = TRUE`
+    `UPDATE users SET is_active = FALSE, updated_at = NOW()
+      WHERE is_data_test = TRUE AND is_active = TRUE`
   );
-  console.log(`🧹 ${meta?.rowCount || 0} compte(s) de démonstration supprimé(s).`);
+  console.log(`🧹 ${meta?.rowCount || 0} compte(s) de démonstration désactivé(s).`);
 }
 
 async function undo() {
