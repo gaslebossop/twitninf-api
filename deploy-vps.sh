@@ -129,9 +129,14 @@ cd "$(dirname "$0")"
 #   .env — chaque hôte a le sien (rôle, hôte base, réplique locale).
 #   scheduler.json — état hérité de PolicierCongo, désormais dans Redis ;
 #     l'écraser au déploiement remettrait un horaire périmé.
+#   src/public/tweets, src/public/stories — médias envoyés par les
+#     utilisateurs, créés à l'exécution. Ils n'existent localement que si
+#     quelqu'un a lancé l'API sur sa machine ; les envoyer déverserait des
+#     fichiers de test dans la production.
 EXCLUDES=(
   --exclude=node_modules --exclude=.git
   --exclude=storage --exclude=src/public/avatars --exclude=data
+  --exclude=src/public/tweets --exclude=src/public/stories
   --exclude=.env --exclude=logs
   --exclude=src/services/policiercongo/scheduler.json
 )

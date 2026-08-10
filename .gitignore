@@ -36,3 +36,7 @@ test-*.js
 # Session MegaLLM : cookie d'authentification complet, jamais dans le depot.
 # Voir src/megallm-client/megallm-session.example.json pour la structure.
 src/megallm-client/megallm-session.json
+
+# Medias envoyes par les utilisateurs, crees a l execution
+src/public/tweets/
+src/public/stories/
