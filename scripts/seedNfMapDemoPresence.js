@@ -54,6 +54,58 @@ function jitter(latitude, radiusKm) {
   return { dLat, dLon };
 }
 
+/**
+ * Répartition des points : des GRAPPES, pas un semis uniforme.
+ *
+ * Une dispersion uniforme sur dix kilomètres ne met presque jamais deux
+ * comptes assez près l'un de l'autre pour qu'ils se regroupent. On teste donc
+ * une carte qui n'exerce jamais son regroupement — c'est-à-dire pas la carte
+ * qu'auront les vrais utilisateurs, où les gens sont dans des villes, des
+ * quartiers, des soirées.
+ *
+ * Un tiers des comptes reste dispersé, le reste se répartit sur quelques
+ * points de rassemblement dans un rayon de ~200 m : de quoi voir des piles de
+ * visages au dézoom et les voir se séparer en zoomant.
+ */
+function makePlacement(centerLat, centerLon, radiusKm, groupCount = 4) {
+  const hubs = Array.from({ length: groupCount }, () => {
+    const { dLat, dLon } = jitter(centerLat, radiusKm * 0.8);
+    return { latitude: centerLat + dLat, longitude: centerLon + dLon };
+  });
+
+  return function place(index) {
+    // Un sur trois reste isolé : sans eux, on ne verrait plus jamais d'épingle
+    // simple et on ne testerait que la moitié de l'affichage.
+    if (index % 3 === 0) {
+      const { dLat, dLon } = jitter(centerLat, radiusKm);
+      return { latitude: centerLat + dLat, longitude: centerLon + dLon };
+    }
+
+    const hub = hubs[index % hubs.length];
+    const { dLat, dLon } = jitter(hub.latitude, 0.2);
+    return { latitude: hub.latitude + dLat, longitude: hub.longitude + dLon };
+  };
+}
+
+/**
+ * Ancienneté de la présence, en minutes.
+ *
+ * Toutes les présences posées à la même seconde donnent une liste où chaque
+ * ligne affiche « à l'instant » : la fraîcheur devient invisible alors que
+ * c'est elle qui dit si une position veut encore dire quelque chose. On étale
+ * donc sur les six dernières heures, en gardant une majorité de récents —
+ * c'est la forme qu'aurait une vraie carte.
+ *
+ * Jamais au-delà de six heures : la durée de vie est de huit, et une présence
+ * née expirée ne s'afficherait pas du tout.
+ */
+function ageInMinutes() {
+  const roll = Math.random();
+  if (roll < 0.4) return Math.floor(Math.random() * 5);
+  if (roll < 0.75) return 5 + Math.floor(Math.random() * 55);
+  return 60 + Math.floor(Math.random() * 300);
+}
+
 const TEST_PREFIX = 'nfmaptest_';
 
 /**
@@ -78,10 +130,21 @@ async function createTestAccounts(count) {
     const firstName = DEMO_NAMES[index % DEMO_NAMES.length];
     const username = `${firstName.toLowerCase()}_demo${index}`.slice(0, 30);
 
+    // `DO UPDATE` et non `DO NOTHING` : `--purge` DÉSACTIVE les comptes au
+    // lieu de les supprimer (voir plus bas), donc leurs pseudos restent pris.
+    // Avec `DO NOTHING`, `--create` devenait un no-op définitif après le
+    // premier purge — pseudos occupés, comptes inertes, et plus aucun moyen de
+    // repeupler la carte. On les réveille au lieu d'échouer en silence.
+    //
+    // Le filtre `is_data_test` sur la clause reste le garde-fou : un compte
+    // réel qui porterait par accident un de ces pseudos ne serait jamais
+    // touché.
     const [row] = await sequelize.query(
       `INSERT INTO users (id, username, full_name, password, platform, is_data_test, is_active, created_at, updated_at)
        VALUES (uuid_generate_v4(), :username, :fullName, 'compte-de-test-non-connectable', 'android', TRUE, TRUE, NOW(), NOW())
-       ON CONFLICT (username) DO NOTHING
+       ON CONFLICT (username) DO UPDATE
+         SET is_active = TRUE, updated_at = NOW()
+         WHERE users.is_data_test = TRUE
        RETURNING id, username`,
       { replacements: { username, fullName: firstName }, type: QueryTypes.SELECT }
     );
@@ -180,9 +243,14 @@ async function main() {
     );
   }
 
-  for (const account of accounts) {
-    const { dLat, dLon } = jitter(centerLat, radiusKm);
+  const place = makePlacement(centerLat, centerLon, radiusKm);
+
+  for (const [index, account] of accounts.entries()) {
+    const spot = place(index);
+    const dLat = spot.latitude - centerLat;
+    const dLon = spot.longitude - centerLon;
     const mode = Math.random() < 0.3 ? 'city' : 'precise';
+    const age = ageInMinutes();
 
     // Même arrondi que la production : sans lui, les points « ville » de la
     // démonstration seraient plus précis que les vrais, et l'écran donnerait
@@ -195,20 +263,23 @@ async function main() {
          (user_id, sharing_mode, audience, latitude, longitude, place_label, shared_at, expires_at, created_at, updated_at)
        VALUES
          (:userId, :mode, 'connections', :latitude, :longitude, NULL,
-          NOW(), NOW() + INTERVAL '8 hours', NOW(), NOW())
+          NOW() - (:age * INTERVAL '1 minute'),
+          NOW() - (:age * INTERVAL '1 minute') + INTERVAL '8 hours',
+          NOW(), NOW())
        ON CONFLICT (user_id) DO UPDATE SET
          sharing_mode = EXCLUDED.sharing_mode,
          audience = EXCLUDED.audience,
          latitude = EXCLUDED.latitude,
          longitude = EXCLUDED.longitude,
          place_label = EXCLUDED.place_label,
-         shared_at = NOW(),
-         expires_at = NOW() + INTERVAL '8 hours',
+         shared_at = EXCLUDED.shared_at,
+         expires_at = EXCLUDED.expires_at,
          updated_at = NOW()`,
       {
         replacements: {
           userId: account.id,
           mode,
+          age,
           latitude: stored.latitude,
           longitude: stored.longitude,
         },

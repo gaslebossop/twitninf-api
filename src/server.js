@@ -74,6 +74,7 @@ const PriceEvolutionService = require('./services/priceEvolutionService');
 
 // Import des routes
 const authRoutes = require('./routes/authRoutes');
+const gAuthRoutes = require('./routes/gAuthRoutes');
 const tweetRoutes = require('./routes/tweetRoutes');
 const searchRoutes = require('./routes/searchRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
@@ -415,6 +416,15 @@ app.use('/api', exceptHealth(checkApiRequest));
 app.use('/legal', require('./routes/legalRoutes'));
 
 // Routes API - Version complète avec toutes les fonctionnalités
+//
+// gAuthRoutes DOIT être monté avant authRoutes : Express matche les préfixes
+// dans l'ordre d'enregistrement, et `/api/auth/g-auth/start` correspond au
+// préfixe `/api/auth` d'authRoutes. Dans l'autre ordre, la requête ne sort
+// jamais d'authRoutes — elle tombe sur son `router.use(authenticateToken, …)`
+// générique (ligne ~290) et rend 401 avant d'atteindre ce routeur, alors que
+// /start et /callback doivent rester publics (un navigateur frais, sans
+// session, y arrive par construction).
+app.use('/api/auth/g-auth', gAuthRoutes);
 app.use('/api/auth', authRoutes);
 
 app.use('/api/tweets', tweetRoutes);

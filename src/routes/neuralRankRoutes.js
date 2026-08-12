@@ -43,15 +43,6 @@ async function getRedisClient() {
   return _redisClient;
 }
 
-// Fallback vers l'engine JS progressif si le service Rust est down
-let ProgressiveEngine;
-function getFallbackEngine() {
-  if (!ProgressiveEngine) {
-    ProgressiveEngine = new (require('../services/progressiveRecommendationEngine'))();
-  }
-  return ProgressiveEngine;
-}
-
 /**
  * Récupère les tweets complets depuis la DB à partir d'une liste d'IDs,
  * en préservant l'ordre Rust et en incluant author + interactions utilisateur.
@@ -431,61 +422,13 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
     if (refusedByPaidContent) return;
     return res.json(payload);
   } catch (err) {
-    logger.warn(`[NeuralRank] Rust service unavailable (${err.message}), using JS fallback`);
-
-    // Fallback JS
-    try {
-      const fallback = getFallbackEngine();
-      const fallbackResult = await fallback.getProgressiveRecommendations(userId, {
-        limit: limitInt,
-        offset: offsetInt,
-      });
-      const recommendations = (fallbackResult.recommendations || []).filter(recommendation => {
-        const tweet = recommendation?.tweet || recommendation;
-        const type = String(tweet?.tweet_type || tweet?.type || '').toLowerCase();
-        const original = tweet?.originalTweet || tweet?.original_tweet || null;
-        const isRetweet = Boolean(tweet?.is_retweet) || type === 'retweet';
-        const ownMedia = normalizeMediaList(tweet?.media_urls, tweet?.media_url, tweet?.image_url);
-        const originalMedia = normalizeMediaList(original?.media_urls, original?.media_url, original?.image_url);
-        const renderable = Boolean(String(tweet?.content || '').trim())
-          || ownMedia.length > 0
-          || Boolean(String(original?.content || '').trim())
-          || originalMedia.length > 0;
-
-        // Le moteur de secours ne sait pas vérifier "suivi ou plus de likes
-        // que le parent" (pas d'accès au graphe social ici) : par prudence il
-        // exclut les réponses plutôt que de les recommander sans filtre.
-        return tweet?.parent_tweet_id == null
-          && tweet?.parentTweetId == null
-          && type !== 'reply'
-          && type !== 'comment'
-          && (!isRetweet || (original && original?.parent_tweet_id == null))
-          && renderable;
-      });
-
-      // Le repli sert le même contenu par un autre chemin : il doit passer par
-      // le même masquage, sinon une simple panne du service Rust rouvrirait
-      // gratuitement tout le contenu vendu.
-      if (!(await paidContentService.maskTweetsOrFail(recommendations, userId, res))) return;
-
-      return res.json({
-        success: true,
-        engine: 'js-progressive-fallback',
-        data: {
-          recommendations,
-          count: recommendations.length,
-          pagination: {
-            limit: limitInt,
-            offset: offsetInt,
-            hasMore: false,
-            total: recommendations.length,
-          },
-        },
-      });
-    } catch (fallbackErr) {
-      logger.error(`[NeuralRank] Fallback also failed: ${fallbackErr.message}`);
-      return res.status(500).json({ success: false, error: 'Service temporairement indisponible' });
-    }
+    // Plus de repli JS : le fil « Pour toi » n'a qu'une seule source de
+    // classement (le service Rust). Un repli silencieux servait un contenu
+    // dégradé (auteurs sans personnalisation de profil, réponses exclues,
+    // graphe social ignoré) sans que rien ne le signale à l'utilisateur — la
+    // panne se voit désormais au lieu de se déguiser en fil normal.
+    logger.error(`[NeuralRank] Rust service unavailable (${err.message})`);
+    return res.status(503).json({ success: false, error: 'Service de recommandation temporairement indisponible' });
   }
 });
 
@@ -590,23 +533,3 @@ router.get('/health', authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
-
-
-function normalizeMediaList(...values) {
-  const result = [];
-  for (const value of values) {
-    if (Array.isArray(value)) {
-      result.push(...value.filter(Boolean));
-      continue;
-    }
-    if (typeof value !== 'string' || !value.trim()) continue;
-    try {
-      const parsed = JSON.parse(value);
-      if (Array.isArray(parsed)) result.push(...parsed.filter(Boolean));
-      else result.push(value);
-    } catch {
-      result.push(value);
-    }
-  }
-  return result;
-}

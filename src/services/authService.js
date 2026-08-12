@@ -519,7 +519,7 @@ class AuthService {
           'preferred_language', 'declared_age', 'birth_day', 'birth_month',
           'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at',
           'consent_version', 'consent_accepted_at', 'consent_preferences',
-          'follow_onboarding_completed_at'
+          'follow_onboarding_completed_at', 'g_auth_sub'
         ]
       });
       if (!user || !user.is_active) {
@@ -545,7 +545,7 @@ class AuthService {
           'preferred_language', 'declared_age', 'birth_day', 'birth_month',
           'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at',
           'consent_version', 'consent_accepted_at', 'consent_preferences',
-          'follow_onboarding_completed_at'
+          'follow_onboarding_completed_at', 'g_auth_sub'
         ]
       });
 
@@ -560,7 +560,7 @@ class AuthService {
           'preferred_language', 'declared_age', 'birth_day', 'birth_month',
           'demographics_validated_at', 'location_consent_status', 'location_consent_updated_at',
           'consent_version', 'consent_accepted_at', 'consent_preferences',
-          'follow_onboarding_completed_at'
+          'follow_onboarding_completed_at', 'g_auth_sub'
         ]
       });
 

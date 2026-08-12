@@ -364,7 +364,7 @@ class ProgressiveRecommendationEngine {
           {
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
           }
         ],
         order: [['created_at', 'DESC']],
@@ -426,7 +426,7 @@ class ProgressiveRecommendationEngine {
           {
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
           }
         ]
       });
@@ -495,7 +495,7 @@ class ProgressiveRecommendationEngine {
           {
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
           }
         ]
       });
@@ -717,7 +717,7 @@ class ProgressiveRecommendationEngine {
           {
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
           }
         ],
         order: [['created_at', 'DESC']],
@@ -1729,7 +1729,7 @@ class ProgressiveRecommendationEngine {
         {
           model: User,
           as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified']
+          attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
         },
         {
           model: TweetLike,
@@ -2678,7 +2678,7 @@ class ProgressiveRecommendationEngine {
           {
             model: User,
             as: 'author',
-            attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified']
+            attributes: ['id', 'username', 'full_name', 'avatar', 'stats', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
           },
           {
             model: TweetLike,

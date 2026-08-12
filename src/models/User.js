@@ -57,7 +57,11 @@ class User extends Model {
       is_suspended: this.is_suspended || false,
       suspension_reason: this.suspension_reason || null,
       suspended_until: this.suspended_until || null,
-      is_ios_native: this.is_ios_native || false
+      is_ios_native: this.is_ios_native || false,
+      // Jamais le sub g-auth lui-même (identifiant tiers opaque) : le client
+      // n'a besoin que de savoir si le lien existe, pour afficher l'état
+      // correct du bouton d'association dans les réglages.
+      g_auth_linked: !!this.g_auth_sub
     };
   }
 
@@ -489,6 +493,27 @@ const userSchema = {
     type: DataTypes.FLOAT,
     allowNull: false,
     defaultValue: 1.0
+  },
+
+  /**
+   * Identifiant g-auth (claim `sub`) lié à ce compte, si l'utilisateur s'est
+   * connecté ou associé via G. L'unicité réelle est un index partiel posé en
+   * SQL brut (migrate.js) — pas ici, `sync({alter:true})` n'ajoute pas les
+   * colonnes existantes de façon fiable en production.
+   */
+  g_auth_sub: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  g_auth_linked_at: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  // Distinct de g_auth_linked_at : si un délien/relien est ajouté plus tard,
+  // il ne doit pas permettre de reclaimer le bonus d'association.
+  g_auth_bonus_claimed_at: {
+    type: DataTypes.DATE,
+    allowNull: true
   }
 };
 

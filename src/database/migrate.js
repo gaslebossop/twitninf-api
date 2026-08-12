@@ -510,6 +510,21 @@ async function runMigrations() {
         ON tweet_ab_assignments (user_id, experiment_id);
     `);
 
+    // Liaison de compte avec g-auth (connexion et association « associer mon
+    // compte à G »). g_auth_bonus_claimed_at est distinct de g_auth_linked_at :
+    // si un délienage/reliaison est introduit plus tard, il ne doit pas
+    // permettre de reclaimer le bonus.
+    await sequelize.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS g_auth_sub TEXT NULL,
+        ADD COLUMN IF NOT EXISTS g_auth_linked_at TIMESTAMPTZ NULL,
+        ADD COLUMN IF NOT EXISTS g_auth_bonus_claimed_at TIMESTAMPTZ NULL;
+    `);
+    await sequelize.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_g_auth_sub
+        ON users (g_auth_sub) WHERE g_auth_sub IS NOT NULL;
+    `);
+
     await createOptimizedIndexes();
 
     // Créer les vues optimisées
