@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
 const videoEditService = require('./videoEditService');
 const { sequelize } = require('../database');
+const { getPublicMediaOrigin } = require('../utils/publicMediaOrigin');
 
 // Dossier cible pour le stockage (dans le code API)
 const STORAGE_DIR = path.join(__dirname, '../../storage');
@@ -167,13 +168,17 @@ class VideoService {
                   if (unlinkErr) logger.warn(`Impossible de supprimer le fichier temporaire ${inputPath}:`, unlinkErr);
                 });
 
-                // Retourner info. 
-                // A NOTER: On utilise /storage/ prefix qui devra être servi en statique par Express.
+                // Retourner info.
+                // URL absolue (domaine + /storage/, servi en statique par Express) :
+                // un chemin relatif n'est pas une URI valide pour <Image>/<Video>
+                // côté client, qui a besoin d'un schéma + hôte pour aller chercher
+                // le fichier sur le réseau — c'est resté en chemin relatif jusqu'ici,
+                // d'où une vidéo/miniature qui ne charge jamais.
                 resolve({
                   videoPath: outputPath,
-                  publicUrl: `/storage/${fileName}`,
+                  publicUrl: `${getPublicMediaOrigin()}/storage/${fileName}`,
                   thumbnailPath: thumbnailPath,
-                  publicThumbnailUrl: `/storage/${thumbName}`,
+                  publicThumbnailUrl: `${getPublicMediaOrigin()}/storage/${thumbName}`,
                   duration: targetDuration
                 });
               })
@@ -182,7 +187,7 @@ class VideoService {
                 // On résout quand même si la vidéo a marché
                 resolve({
                   videoPath: outputPath,
-                  publicUrl: `/storage/${fileName}`,
+                  publicUrl: `${getPublicMediaOrigin()}/storage/${fileName}`,
                   thumbnailPath: null,
                   publicThumbnailUrl: null,
                   duration: targetDuration
