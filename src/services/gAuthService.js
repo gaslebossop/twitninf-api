@@ -7,6 +7,8 @@ const logger = require('../utils/logger');
 const authService = require('./authService');
 const NewEconomyService = require('./newEconomyService');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
+const { TIER } = require('../constants/subscriptionTiers');
+const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
 
 /**
  * Connexion / association de compte via g-auth (fournisseur d'identité du
@@ -28,6 +30,11 @@ const APP_SCHEME = process.env.TWITNINF_APP_SCHEME || 'twitninf';
 const DEEP_LINK_HOST = 'g-auth-callback';
 
 const LINK_BONUS_NF = 5;
+// Réservé aux comptes pas déjà Pro au moment de l'association : offrir « 3
+// jours de Pro » à quelqu'un qui l'a déjà n'a pas de sens et le programme
+// ne doit pas se présenter comme un avantage dans ce cas (voir le client,
+// qui masque la carte de promotion quand `isSubscriptionActive` + tier Pro).
+const LINK_BONUS_TRIAL_PRO_DAYS = 3;
 const STATE_TTL_SECONDS = 10 * 60;
 const LINK_TOKEN_TTL = '5m';
 const LINK_TOKEN_PURPOSE = 'g_auth_link';
@@ -355,7 +362,21 @@ async function linkAccount(userId, { sub }) {
       throw new Error(reward.reason || 'échec du crédit du bonus');
     }
 
-    return { status: 'linked', bonus: LINK_BONUS_NF };
+    // Le volet Pro ne s'applique pas à un compte déjà Pro actif — inutile
+    // (et trompeur) d'« offrir » ce que la personne a déjà. Un compte gratuit,
+    // Plus, ou Pro expiré reçoit 3 jours de Pro pleins à partir de maintenant :
+    // pas une extension de son palier courant (qui n'a pas de sens si c'est
+    // Plus), un vrai palier Pro temporaire.
+    let trialDays = 0;
+    if (!(isSubscriptionActive(user) && user.subscription_tier === TIER.PRO)) {
+      trialDays = LINK_BONUS_TRIAL_PRO_DAYS;
+      user.subscription_tier = TIER.PRO;
+      user.premium = true;
+      user.subscription_expires_at = new Date(Date.now() + trialDays * 86400000);
+      await user.save({ transaction });
+    }
+
+    return { status: 'linked', bonus: LINK_BONUS_NF, trialDays };
   });
 }
 

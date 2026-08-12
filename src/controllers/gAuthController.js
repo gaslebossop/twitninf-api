@@ -72,7 +72,12 @@ class GAuthController {
 
       if (flow.intent === 'link') {
         const result = await gAuthService.linkAccount(flow.userId, { sub: profile.sub });
-        return finish({ intent: 'link', status: result.status, bonus: result.bonus ?? 0 });
+        return finish({
+          intent: 'link',
+          status: result.status,
+          bonus: result.bonus ?? 0,
+          trialDays: result.trialDays ?? 0,
+        });
       }
 
       const session = await gAuthService.loginOrRegister(
