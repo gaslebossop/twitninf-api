@@ -11,9 +11,12 @@
  * plutôt qu'un statut d'erreur qui ferait basculer l'écran en état cassé.
  */
 
-const { TwEvent } = require('../models');
+const { TwEvent, TwEventPost, User } = require('../models');
 const eventQuestService = require('../services/eventQuestService');
 const logger = require('../utils/logger');
+
+/** Le mot du livre d'or a la longueur d'un tweet, volontairement. */
+const GUESTBOOK_MAX = 280;
 
 /**
  * Ce que le client a le droit de voir d'une quête.
@@ -131,6 +134,114 @@ class TwEventController {
     } catch (error) {
       logger.error('signal de quete:', error);
       return res.json({ success: false, message: 'Signal refusé' });
+    }
+  }
+
+  /**
+   * GET /api/events/:slug/guestbook
+   *
+   * Le livre d'or : ce que les gens ont écrit. C'est la seule partie de
+   * l'événement qui soit du contenu — donc la seule qui donne une raison de
+   * revenir une fois les quêtes finies.
+   */
+  async getGuestbook(req, res) {
+    try {
+      const limit = Math.min(60, Math.max(1, parseInt(req.query.limit, 10) || 30));
+      const posts = await TwEventPost.findAll({
+        where: { event_slug: req.params.slug, hidden: false },
+        order: [['created_at', 'DESC']],
+        limit,
+        include: [{ model: User, as: 'author', attributes: ['id', 'username', 'avatar', 'verified'] }],
+      });
+
+      const mine = await TwEventPost.findOne({
+        where: { user_id: req.user.id, event_slug: req.params.slug },
+      });
+
+      return res.json({
+        success: true,
+        message: 'Livre d\'or',
+        data: {
+          posts: posts.map((p) => ({
+            id: p.id,
+            message: p.message,
+            created_at: p.created_at,
+            author: p.author
+              ? {
+                  id: p.author.id,
+                  username: p.author.username,
+                  avatar: p.author.avatar,
+                  verified: p.author.verified,
+                }
+              : null,
+          })),
+          // Le client en a besoin pour montrer « tu as déjà signé » plutôt que
+          // de proposer un champ qui sera refusé.
+          mine: mine ? { id: mine.id, message: mine.message, created_at: mine.created_at } : null,
+        },
+      });
+    } catch (error) {
+      logger.error('livre d or (lecture):', error);
+      return res.json({ success: true, message: 'Livre d\'or indisponible', data: { posts: [], mine: null } });
+    }
+  }
+
+  /**
+   * POST /api/events/:slug/guestbook
+   *
+   * Un message par compte, garanti par l'index unique et non par le contrôle
+   * qui le précède : deux envois simultanés passent au travers d'un findOne.
+   *
+   * Écrire VALIDE aussi la quête du livre d'or — c'est le serveur qui pose le
+   * signal, pas le client. Une quête dont l'accomplissement dépendrait d'un
+   * appel séparé du mobile serait réclamable sans avoir rien écrit.
+   */
+  async postGuestbook(req, res) {
+    try {
+      const event = await TwEvent.getCurrent();
+      if (!event || event.slug !== req.params.slug) {
+        return res.json({ success: false, message: 'Aucun événement en cours' });
+      }
+
+      const message = String(req.body?.message ?? '').trim();
+      if (!message) return res.json({ success: false, message: 'Message vide' });
+      if (message.length > GUESTBOOK_MAX) {
+        return res.json({ success: false, message: `Message trop long (${GUESTBOOK_MAX} caractères max)` });
+      }
+
+      let post;
+      try {
+        post = await TwEventPost.create({
+          user_id: req.user.id,
+          event_slug: event.slug,
+          message,
+        });
+      } catch (error) {
+        if (error?.name === 'SequelizeUniqueConstraintError') {
+          return res.json({ success: false, message: 'Tu as déjà laissé un mot' });
+        }
+        throw error;
+      }
+
+      // La quête se valide ici, côté serveur, sur un fait constaté.
+      const quest = (event.quests || []).find((q) => (q.measure || {}).source === 'signals' && q.id === 'guestbook');
+      if (quest) {
+        await eventQuestService.reportSignal(
+          req.user.id,
+          event.slug,
+          quest.id,
+          `${event.slug}:guestbook:${req.user.id}`
+        );
+      }
+
+      return res.json({
+        success: true,
+        message: 'Merci pour le mot',
+        data: { post: { id: post.id, message: post.message, created_at: post.created_at } },
+      });
+    } catch (error) {
+      logger.error('livre d or (ecriture):', error);
+      return res.json({ success: false, message: 'Message non enregistré' });
     }
   }
 }

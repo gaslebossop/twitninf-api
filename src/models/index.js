@@ -32,6 +32,7 @@ const FunctionalEvent = require('./FunctionalEvent');
 const TwEvent = require('./TwEvent');
 const TwQuestClaim = require('./TwQuestClaim');
 const TwQuestSignal = require('./TwQuestSignal');
+const TwEventPost = require('./TwEventPost');
 const FeatureFlagModule = require('./FeatureFlag');
 const VerificationRequest = require('./VerificationRequest');
 const Advertisement = require('./Advertisement');
@@ -139,6 +140,7 @@ const FunctionalEventModel = FunctionalEvent(sequelize);
 const TwEventModel = TwEvent(sequelize);
 const TwQuestClaimModel = TwQuestClaim(sequelize);
 const TwQuestSignalModel = TwQuestSignal(sequelize);
+const TwEventPostModel = TwEventPost(sequelize);
 
 // Drapeaux de fonctionnalité — déploiement progressif et ciblage par attributs
 const FeatureFlag = FeatureFlagModule(sequelize);
@@ -735,6 +737,10 @@ AdEngagementModel.belongsTo(User, {
   foreignKey: 'user_id', 
   as: 'user'
 });
+
+// Association du livre d'or : le controleur fait un include({ as: 'author' }),
+// qui echoue silencieusement en erreur SQL sans cette declaration.
+TwEventPostModel.belongsTo(User, { foreignKey: 'user_id', as: 'author' });
 
 // Associations UserChallenge
 User.hasMany(UserChallengeModel, { 
@@ -1799,6 +1805,7 @@ module.exports = {
   TwEvent: TwEventModel,
   TwQuestClaim: TwQuestClaimModel,
   TwQuestSignal: TwQuestSignalModel,
+  TwEventPost: TwEventPostModel,
   FeatureFlag,
   VerificationRequest: VerificationRequestModel,
   BotReputation,

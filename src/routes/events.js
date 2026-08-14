@@ -47,6 +47,16 @@ router.post(
   twEventController.reportQuestSignal
 );
 
+/**
+ * GET  /events/:slug/guestbook   lire le livre d'or
+ * POST /events/:slug/guestbook   y laisser un mot (un seul par compte)
+ *
+ * Ecrire valide aussi la quete correspondante : c'est le serveur qui pose le
+ * signal, sur un fait constate, pas le mobile.
+ */
+router.get('/:slug/guestbook', authenticateToken, twEventController.getGuestbook);
+router.post('/:slug/guestbook', authenticateToken, twEventController.postGuestbook);
+
 // Routes publiques (accessibles à tous les utilisateurs authentifiés)
 
 /**
