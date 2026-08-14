@@ -40,6 +40,33 @@ async function runAutoMigration() {
       logger.warn('⚠️ enum tweet_type concours:', e.message);
     }
 
+    // Séquestre des concours. Même raison que ci-dessus : `sync()` crée la
+    // table `contests` mais n'y AJOUTE jamais une colonne une fois qu'elle
+    // existe — et elle existe déjà en production, avec des lignes dedans.
+    // Sans ce bloc, toute création de concours échoue sur une colonne
+    // manquante.
+    try {
+      await sequelize.query(`
+        DO $$ BEGIN
+          CREATE TYPE "enum_contests_escrow_status" AS ENUM ('none','held','paid','refunded');
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+      `);
+      await sequelize.query(`
+        ALTER TABLE contests
+          ADD COLUMN IF NOT EXISTS currency_id UUID NULL REFERENCES virtual_currencies(id) ON DELETE SET NULL,
+          ADD COLUMN IF NOT EXISTS escrow_total DECIMAL(20,8) NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS escrow_status "enum_contests_escrow_status" NOT NULL DEFAULT 'none';
+      `);
+      await sequelize.query('ALTER TABLE contests ALTER COLUMN prize_amount TYPE DECIMAL(20,8);');
+      await sequelize.query(
+        'CREATE INDEX IF NOT EXISTS idx_contests_currency ON contests (currency_id);'
+      );
+      logger.info('✅ Colonnes de séquestre des concours vérifiées');
+    } catch (e) {
+      logger.warn('⚠️ séquestre concours:', e.message);
+    }
+
     // Consentement RGPD. Le DDL doit vivre ICI et pas seulement dans
     // database/migrate.js : ce dernier est un script en ligne de commande, il
     // n'est pas joué au démarrage. `sequelize.sync()` crée bien la table

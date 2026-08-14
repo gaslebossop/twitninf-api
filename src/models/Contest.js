@@ -11,12 +11,23 @@ const crypto = require('crypto');
  * ajouterait une dizaine de colonnes nulles à 99,99 % des lignes de la table
  * la plus lue de la base.
  *
- * ── Montant et devise ────────────────────────────────────────────────────
- * `prize_amount` + `prize_currency` sont DÉCLARATIFS : le créateur annonce ce
- * qu'il met en jeu, dans la devise qu'il veut (EUR, USD, XAF, NF…), et règle
- * lui-même le gagnant. Aucun débit automatique n'est fait ici — séquestrer
- * des fonds supposerait un portefeuille par devise, ce qui n'existe pas.
- * Le champ sert à afficher l'enjeu et à garder trace de ce qui a été promis.
+ * ── Montant, devise et séquestre ─────────────────────────────────────────
+ * La cagnotte est une VRAIE somme, dans une monnaie du catalogue
+ * (`virtual_currencies`) : NF, EUR interne, ou n'importe quelle monnaie
+ * communautaire. Aucune saisie libre — une devise inventée serait un montant
+ * que personne ne peut verser.
+ *
+ * À la création, `prize_amount × winners_count` est PRÉLEVÉ sur le
+ * portefeuille de l'organisateur et déposé à la trésorerie
+ * (`EconomyLedger.spendToTreasury`). C'est ce qui rend le concours crédible :
+ * l'argent a déjà quitté le compte de celui qui promet. Au tirage, chaque
+ * gagnant est crédité depuis la trésorerie ; toute part non attribuée (moins
+ * de gagnants éligibles que prévu, concours annulé) revient à l'organisateur.
+ * `escrow_status` dit où en est cet argent, et c'est lui qui empêche de payer
+ * ou de rembourser deux fois.
+ *
+ * `prize_currency` garde le symbole (NF, KOSP…) en clair : c'est ce qui
+ * s'affiche partout, et ça évite une jointure sur chaque carte du fil.
  *
  * ── Tirage vérifiable ────────────────────────────────────────────────────
  * Le tirage n'est pas un `ORDER BY RANDOM()` : il est reproductible à partir
@@ -99,20 +110,47 @@ const schema = {
     allowNull: true
   },
 
-  // Enjeu déclaré. DECIMAL et pas FLOAT : un montant d'argent affiché ne doit
-  // pas dériver à l'arrondi binaire.
+  // Gain PAR gagnant. DECIMAL(20,8) comme les portefeuilles : un montant qui
+  // transite par le grand livre ne doit pas perdre de décimales en route.
   prize_amount: {
-    type: DataTypes.DECIMAL(14, 2),
+    type: DataTypes.DECIMAL(20, 8),
     allowNull: false,
     validate: { min: 0 }
   },
 
-  // Code libre en majuscules (EUR, USD, XAF, NF, BTC…) : le concours n'est pas
-  // limité aux devises que la plateforme sait convertir.
+  // Monnaie du catalogue (NF, EUR interne, monnaies communautaires).
+  // Nullable uniquement pour les concours créés avant le séquestre, qui
+  // n'avaient qu'un code de devise saisi à la main.
+  currency_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'virtual_currencies', key: 'id' }
+  },
+
+  // Symbole dénormalisé (NF, KOSP…) : affiché sur chaque carte du fil, une
+  // jointure par carte serait payée à chaque défilement.
   prize_currency: {
     type: DataTypes.STRING(8),
     allowNull: false,
-    defaultValue: 'EUR'
+    defaultValue: 'NF'
+  },
+
+  // Ce qui a réellement été prélevé à la création : prize_amount ×
+  // winners_count au moment du prélèvement. Stocké plutôt que recalculé —
+  // c'est la somme à rembourser, elle ne doit pas bouger si le modèle change.
+  escrow_total: {
+    type: DataTypes.DECIMAL(20, 8),
+    allowNull: false,
+    defaultValue: 0
+  },
+
+  // `none` = concours hérité, sans séquestre. `held` = l'argent est à la
+  // trésorerie. `paid` / `refunded` = il en est ressorti. Ce champ est le
+  // garde-fou contre un double versement ou un double remboursement.
+  escrow_status: {
+    type: DataTypes.ENUM('none', 'held', 'paid', 'refunded'),
+    allowNull: false,
+    defaultValue: 'none'
   },
 
   // Précision libre : « par gagnant », « virement PayPal sous 48 h »…
@@ -186,7 +224,8 @@ const options = {
     { unique: true, fields: ['tweet_id'] },
     { fields: ['creator_id'] },
     // Index du cron de tirage : il cherche les concours ouverts échus.
-    { fields: ['status', 'ends_at'] }
+    { fields: ['status', 'ends_at'] },
+    { fields: ['currency_id'] }
   ]
 };
 

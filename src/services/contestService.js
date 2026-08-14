@@ -15,23 +15,28 @@
  *    vient de `sha256(graine + ':' + user_id)`. La graine est engagée par son
  *    empreinte dès la création, révélée seulement une fois le tirage fait.
  *    N'importe qui peut alors refaire le calcul et vérifier les gagnants.
+ *
+ * 3. **L'argent est prélevé d'avance et ressort une seule fois.** La cagnotte
+ *    quitte le portefeuille de l'organisateur à la création et attend à la
+ *    trésorerie. Au tirage, chaque gagnant est crédité, et toute part non
+ *    attribuée revient à l'organisateur. `escrow_status` passe de `held` à
+ *    `paid`/`refunded` dans la MÊME transaction que les mouvements : c'est ce
+ *    qui rend un double versement impossible, même si le cron repasse.
  */
 
 const { Op } = require('sequelize');
 const logger = require('../utils/logger');
+const EconomyLedger = require('../economy/ledger');
+const EconomyMetrics = require('../economy/metrics');
+const { roundTWC } = require('../economy/money');
 
 /** Durée maximale d'un concours. Au-delà, plus personne ne s'en souvient. */
 const MAX_DURATION_DAYS = 30;
 /** Durée minimale : le temps que le tweet soit vu par autre chose qu'un bot. */
 const MIN_DURATION_MINUTES = 10;
 
-/**
- * Devises acceptées en saisie libre : 3 à 8 caractères alphanumériques en
- * majuscules. Volontairement permissif — le concours doit pouvoir être en
- * XAF, en NF ou en n'importe quoi d'autre — mais pas au point d'accepter une
- * chaîne arbitraire qui s'afficherait n'importe comment dans la carte.
- */
-const CURRENCY_RE = /^[A-Z0-9]{2,8}$/;
+/** Plancher du grand livre : en dessous, `spendToTreasury` refuse. */
+const MIN_PRIZE = 0.01;
 
 class ContestValidationError extends Error {
   constructor(message, code = 'CONTEST_INVALID', status = 400) {
@@ -43,26 +48,70 @@ class ContestValidationError extends Error {
 }
 
 /**
+ * Monnaies utilisables pour une cagnotte, avec le solde de l'utilisateur.
+ *
+ * Le catalogue fait autorité : NF, EUR interne et toutes les monnaies
+ * communautaires actives. L'app ne propose que ça — laisser saisir un code
+ * libre revenait à promettre une somme dans une devise que personne ne peut
+ * verser.
+ */
+async function listUsableCurrencies(userId) {
+  const { VirtualCurrency, UserWallet } = require('../models');
+
+  const currencies = await VirtualCurrency.findAll({
+    where: { isActive: true },
+    order: [['isUserCreated', 'ASC'], ['symbol', 'ASC']],
+  });
+
+  const wallets = await UserWallet.findAll({ where: { userId } });
+  const balanceByCurrency = new Map(
+    wallets.map((w) => [String(w.currencyId), Number(w.balance) || 0])
+  );
+
+  return currencies.map((c) => ({
+    id: c.id,
+    name: c.name,
+    symbol: c.symbol,
+    color: c.color,
+    icon: c.icon,
+    // Le portefeuille n'existe qu'après un premier mouvement : pas de ligne
+    // veut dire 0, pas « monnaie indisponible ».
+    balance: balanceByCurrency.get(String(c.id)) ?? 0,
+    is_community: !!c.isUserCreated,
+    price_eur: Number(c.currentPrice) || 0,
+  }));
+}
+
+/**
  * Valide et normalise ce que le client a envoyé pour créer un concours.
  * Renvoie un objet prêt à insérer, ou lève une ContestValidationError dont le
  * message est directement affichable.
+ *
+ * Asynchrone parce que la monnaie est vérifiée en base : accepter un
+ * `currency_id` sans le résoudre laisserait créer un concours dont la
+ * cagnotte ne pourrait jamais être versée.
  */
-function normalizeCreatePayload(body = {}) {
+async function normalizeCreatePayload(body = {}) {
   const Contest = require('../models/Contest');
+  const { VirtualCurrency } = require('../models');
 
-  const amount = Number.parseFloat(body.prize_amount);
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new ContestValidationError('Indique le montant mis en jeu.', 'PRIZE_REQUIRED');
-  }
-  if (amount > 99999999999.99) {
-    throw new ContestValidationError('Le montant annoncé est trop élevé.', 'PRIZE_TOO_LARGE');
-  }
-
-  const currency = String(body.prize_currency || 'EUR').trim().toUpperCase();
-  if (!CURRENCY_RE.test(currency)) {
+  const amount = roundTWC(Number.parseFloat(body.prize_amount));
+  if (!Number.isFinite(amount) || amount < MIN_PRIZE) {
     throw new ContestValidationError(
-      'La devise doit être un code court en majuscules (EUR, USD, XAF, NF…).',
-      'CURRENCY_INVALID'
+      `Indique le montant mis en jeu (au moins ${MIN_PRIZE}).`,
+      'PRIZE_REQUIRED'
+    );
+  }
+
+  const currencyId = String(body.currency_id || '').trim();
+  if (!currencyId) {
+    throw new ContestValidationError('Choisis la monnaie de la cagnotte.', 'CURRENCY_REQUIRED');
+  }
+  const currency = await VirtualCurrency.findByPk(currencyId);
+  if (!currency || !currency.isActive) {
+    throw new ContestValidationError(
+      "Cette monnaie n'existe pas ou n'est plus active.",
+      'CURRENCY_UNKNOWN'
     );
   }
 
@@ -90,18 +139,50 @@ function normalizeCreatePayload(body = {}) {
   }
 
   const { seed, commitment } = Contest.newSeed();
+  // Ce qui sera réellement prélevé : le gain est PAR gagnant.
+  const escrowTotal = roundTWC(amount * winners);
 
   return {
     title: body.title ? String(body.title).trim().slice(0, 120) : null,
     prize_amount: amount,
-    prize_currency: currency,
+    currency_id: currency.id,
+    prize_currency: currency.symbol,
     prize_note: body.prize_note ? String(body.prize_note).trim().slice(0, 160) : null,
     winners_count: winners,
     conditions: Contest.normalizeConditions(body.conditions),
     ends_at: endsAt,
     draw_seed: seed,
     seed_commitment: commitment,
+    escrow_total: escrowTotal,
+    escrow_status: 'held',
   };
+}
+
+/**
+ * Traduit un refus du grand livre en message affichable.
+ *
+ * Le solde insuffisant et le blocage anti-fraude sont les deux refus
+ * attendus ; les laisser remonter tels quels afficherait « Solde insuffisant »
+ * sans dire combien il manque, ou un code de risque incompréhensible.
+ */
+function explainLedgerError(error, { total, symbol, balance }) {
+  const message = String(error?.message || '');
+  if (message.includes('Solde insuffisant')) {
+    const missing = roundTWC(Math.max(0, total - (balance ?? 0)));
+    return new ContestValidationError(
+      `Il te manque ${missing} ${symbol} : la cagnotte (${total} ${symbol}) est prélevée dès la création.`,
+      'INSUFFICIENT_FUNDS',
+      402
+    );
+  }
+  if (error?.name === 'TransactionRiskError' || String(error?.code || '').startsWith('RISK_')) {
+    return new ContestValidationError(
+      'Ton portefeuille est bloqué par la protection anti-fraude : impossible de mettre une cagnotte en jeu pour le moment.',
+      error.code || 'RISK_BLOCKED',
+      403
+    );
+  }
+  return null;
 }
 
 /**
@@ -238,6 +319,12 @@ async function drawContest(contestId) {
       for (const entry of entries) {
         await entry.save({ transaction });
       }
+
+      // Versement dans la MÊME transaction que la clôture : soit les gagnants
+      // sont payés ET le concours est clos, soit rien n'a bougé. Un versement
+      // commité sans clôture serait rejoué au passage suivant du cron.
+      await settleEscrow(contest, winners.map((w) => w.entry), transaction);
+
       await contest.update(
         { status: 'closed', drawn_at: new Date() },
         { transaction }
@@ -260,12 +347,96 @@ async function drawContest(contestId) {
 }
 
 /**
+ * Verse la cagnotte : chaque gagnant est crédité de `prize_amount` depuis la
+ * trésorerie, et la part non attribuée revient à l'organisateur.
+ *
+ * La part non attribuée n'est pas un cas rare : un concours à 3 gagnants qui
+ * n'a que 1 participant éligible laisse 2 parts en trésorerie. Sans ce
+ * remboursement, l'argent resterait bloqué là indéfiniment, prélevé à
+ * quelqu'un pour personne.
+ *
+ * `escrow_status` est vérifié avant toute écriture ET repositionné dans la
+ * même transaction : c'est ce qui rend un double versement impossible.
+ */
+async function settleEscrow(contest, winners, transaction) {
+  if (contest.escrow_status !== 'held' || !contest.currency_id) {
+    // Concours hérité (créé avant le séquestre) : rien à verser, le montant
+    // n'a jamais été prélevé. Le tirage reste valable, il est juste déclaratif.
+    return;
+  }
+
+  const share = roundTWC(Number(contest.prize_amount));
+  const total = roundTWC(Number(contest.escrow_total));
+  let paid = 0;
+
+  for (const winner of winners) {
+    await EconomyLedger.rewardFromTreasury(
+      winner.user_id,
+      contest.currency_id,
+      share,
+      `Concours gagné - ${share} ${contest.prize_currency}`,
+      transaction
+    );
+    paid = roundTWC(paid + share);
+  }
+
+  // `rewardFromTreasury` refuse un crédit sous MIN_PRIZE : une poussière
+  // d'arrondi ferait échouer tout le tirage plutôt que de rendre 0,004 NF.
+  const leftover = roundTWC(total - paid);
+  if (leftover >= MIN_PRIZE) {
+    await EconomyLedger.rewardFromTreasury(
+      contest.creator_id,
+      contest.currency_id,
+      leftover,
+      winners.length === 0
+        ? `Concours sans gagnant - remboursement ${leftover} ${contest.prize_currency}`
+        : `Concours - part non attribuee remboursee (${leftover} ${contest.prize_currency})`,
+      transaction
+    );
+  }
+
+  await contest.update(
+    { escrow_status: winners.length > 0 ? 'paid' : 'refunded' },
+    { transaction }
+  );
+
+  // Les métriques de la monnaie bougent avec la circulation : le casino fait
+  // le même appel après chaque mouvement.
+  await EconomyMetrics.refresh(contest.currency_id, transaction);
+}
+
+/**
+ * Rend la totalité de la cagnotte à l'organisateur (annulation avant tirage).
+ * Renvoie le montant remboursé, 0 s'il n'y avait rien à rendre.
+ */
+async function refundEscrow(contest, transaction) {
+  if (contest.escrow_status !== 'held' || !contest.currency_id) return 0;
+
+  const total = roundTWC(Number(contest.escrow_total));
+  if (total > 0) {
+    await EconomyLedger.rewardFromTreasury(
+      contest.creator_id,
+      contest.currency_id,
+      total,
+      `Concours annule - remboursement ${total} ${contest.prize_currency}`,
+      transaction
+    );
+    await EconomyMetrics.refresh(contest.currency_id, transaction);
+  }
+  await contest.update({ escrow_status: 'refunded' }, { transaction });
+  return total;
+}
+
+/**
  * Notifie les gagnants et l'organisateur. Le type reste `system` avec un
  * sous-type dans `metadata.kind` : ajouter une valeur à l'ENUM `type` des
  * notifications imposerait une migration à toute la table.
  */
 async function notifyResults(contest, winners, Notification) {
-  const prize = `${contest.prize_amount} ${contest.prize_currency}`;
+  const prize = `${roundTWC(Number(contest.prize_amount))} ${contest.prize_currency}`;
+  // `paid` = les portefeuilles ont bougé. Sur un concours hérité (sans
+  // séquestre), annoncer un crédit qui n'a pas eu lieu serait un mensonge.
+  const paidOut = contest.escrow_status === 'paid';
   try {
     for (const winner of winners) {
       await Notification.create({
@@ -274,7 +445,9 @@ async function notifyResults(contest, winners, Notification) {
         tweet_id: contest.tweet_id,
         type: 'system',
         title: 'Tu as gagné le concours',
-        message: `Tu fais partie des gagnants du concours (${prize}).`,
+        message: paidOut
+          ? `${prize} viennent d'être crédités sur ton portefeuille.`
+          : `Tu fais partie des gagnants du concours (${prize}).`,
         priority: 'high',
         content: { contest_id: contest.id, rank: winner.rank, prize },
         metadata: { kind: 'contest_won', contest_id: contest.id },
@@ -286,8 +459,12 @@ async function notifyResults(contest, winners, Notification) {
       type: 'system',
       title: 'Ton concours est terminé',
       message: winners.length
-        ? `${winners.length} gagnant(s) tiré(s). À toi de verser ${prize}.`
-        : 'Aucun participant éligible : aucun gagnant tiré.',
+        ? paidOut
+          ? `${winners.length} gagnant(s) tiré(s) et payé(s) automatiquement.`
+          : `${winners.length} gagnant(s) tiré(s).`
+        : paidOut || contest.escrow_status === 'refunded'
+          ? "Aucun participant éligible : la cagnotte t'a été remboursée."
+          : 'Aucun participant éligible : aucun gagnant tiré.',
       priority: 'high',
       content: { contest_id: contest.id, winners: winners.length },
       metadata: { kind: 'contest_closed', contest_id: contest.id },
@@ -323,9 +500,13 @@ async function drawDueContests() {
 module.exports = {
   ContestValidationError,
   normalizeCreatePayload,
+  listUsableCurrencies,
+  explainLedgerError,
   checkConditions,
+  refundEscrow,
   drawContest,
   drawDueContests,
   MAX_DURATION_DAYS,
   MIN_DURATION_MINUTES,
+  MIN_PRIZE,
 };

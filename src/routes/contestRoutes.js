@@ -2,7 +2,9 @@ const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
 
-const { Contest, ContestEntry, Tweet, User, sequelize } = require('../models');
+const { Contest, ContestEntry, Tweet, User, UserWallet, sequelize } = require('../models');
+const EconomyLedger = require('../economy/ledger');
+const EconomyMetrics = require('../economy/metrics');
 const { authenticateToken } = require('../middleware/authMiddleware');
 const contestService = require('../services/contestService');
 const logger = require('../utils/logger');
@@ -26,7 +28,7 @@ router.post('/', authenticateToken, async (req, res) => {
 
     let payload;
     try {
-      payload = contestService.normalizeCreatePayload(req.body);
+      payload = await contestService.normalizeCreatePayload(req.body);
     } catch (error) {
       if (error instanceof contestService.ContestValidationError) {
         return res.status(error.status).json({ success: false, message: error.message, code: error.code });
@@ -46,34 +48,100 @@ router.post('/', authenticateToken, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Texte trop long.', code: 'CONTENT_TOO_LONG' });
     }
 
-    const result = await sequelize.transaction(async (transaction) => {
-      const tweet = await Tweet.create({
-        user_id: req.user.id,
-        content,
-        tweet_type: 'concours',
-        media_urls: Array.isArray(req.body.media_urls) ? req.body.media_urls.slice(0, 4) : [],
-        language: req.body.language || 'fr',
-      }, { transaction });
-
-      const contest = await Contest.create({
-        ...payload,
-        tweet_id: tweet.id,
-        creator_id: req.user.id,
-      }, { transaction });
-
-      return { tweet, contest };
+    // Solde lu AVANT la transaction, uniquement pour pouvoir dire combien il
+    // manque si le prélèvement échoue. Le contrôle qui fait foi est celui du
+    // grand livre, sous verrou.
+    const wallet = await UserWallet.findOne({
+      where: { userId: req.user.id, currencyId: payload.currency_id },
     });
+    const balanceBefore = wallet ? Number(wallet.balance) || 0 : 0;
+
+    let result;
+    try {
+      result = await sequelize.transaction(async (transaction) => {
+        const tweet = await Tweet.create({
+          user_id: req.user.id,
+          content,
+          tweet_type: 'concours',
+          media_urls: Array.isArray(req.body.media_urls) ? req.body.media_urls.slice(0, 4) : [],
+          language: req.body.language || 'fr',
+        }, { transaction });
+
+        const contest = await Contest.create({
+          ...payload,
+          tweet_id: tweet.id,
+          creator_id: req.user.id,
+        }, { transaction });
+
+        // Le prélèvement est DANS la transaction du tweet : si le solde est
+        // insuffisant ou si l'anti-fraude refuse, le tweet n'est pas publié
+        // non plus. Sinon un concours annoncé publiquement pourrait exister
+        // sans cagnotte derrière.
+        const spend = await EconomyLedger.spendToTreasury(
+          req.user.id,
+          payload.currency_id,
+          payload.escrow_total,
+          {
+            description: `Concours - cagnotte ${payload.escrow_total} ${payload.prize_currency}`,
+            itemType: 'contest',
+            itemId: contest.id,
+            metadata: {
+              contest_id: contest.id,
+              winners_count: payload.winners_count,
+              prize_per_winner: payload.prize_amount,
+            },
+          },
+          transaction
+        );
+
+        await EconomyMetrics.refresh(payload.currency_id, transaction);
+        return { tweet, contest, remainingBalance: spend.remainingBalance };
+      });
+    } catch (error) {
+      const explained = contestService.explainLedgerError(error, {
+        total: payload.escrow_total,
+        symbol: payload.prize_currency,
+        balance: balanceBefore,
+      });
+      if (explained) {
+        return res.status(explained.status).json({
+          success: false,
+          message: explained.message,
+          code: explained.code,
+        });
+      }
+      throw error;
+    }
 
     return res.status(201).json({
       success: true,
       data: {
         tweet: result.tweet,
         contest: result.contest.toPublicJSON(),
+        remaining_balance: result.remainingBalance,
       },
     });
   } catch (error) {
     logger.error('[Concours] création impossible:', error);
     return res.status(500).json({ success: false, message: 'Création du concours impossible.' });
+  }
+});
+
+/**
+ * Monnaies utilisables pour une cagnotte, avec le solde de l'utilisateur.
+ * L'app ne propose que celles-là : monnaies système (NF, EUR interne) et
+ * monnaies communautaires actives.
+ */
+router.get('/currencies', authenticateToken, async (req, res) => {
+  try {
+    const currencies = await contestService.listUsableCurrencies(req.user.id);
+    return res.json({
+      success: true,
+      data: { currencies, min_prize: contestService.MIN_PRIZE },
+    });
+  } catch (error) {
+    logger.error('[Concours] monnaies indisponibles:', error);
+    return res.status(500).json({ success: false, message: 'Monnaies indisponibles.' });
   }
 });
 
@@ -328,11 +396,23 @@ router.post('/:id/cancel', authenticateToken, async (req, res) => {
     if (contest.status !== 'open') {
       return res.status(409).json({ success: false, message: 'Le tirage a déjà eu lieu.' });
     }
-    await contest.update({
-      status: 'cancelled',
-      cancelled_reason: String(req.body?.reason || '').trim().slice(0, 160) || null,
+
+    // Annulation et remboursement dans la même transaction : un concours
+    // marqué annulé sans que l'argent soit rendu serait invisible et
+    // définitif — plus rien ne repasserait dessus.
+    let refunded = 0;
+    await sequelize.transaction(async (transaction) => {
+      refunded = await contestService.refundEscrow(contest, transaction);
+      await contest.update({
+        status: 'cancelled',
+        cancelled_reason: String(req.body?.reason || '').trim().slice(0, 160) || null,
+      }, { transaction });
     });
-    return res.json({ success: true, data: contest.toPublicJSON() });
+
+    return res.json({
+      success: true,
+      data: { ...contest.toPublicJSON(), refunded },
+    });
   } catch (error) {
     logger.error('[Concours] annulation impossible:', error);
     return res.status(500).json({ success: false, message: 'Annulation impossible.' });
@@ -386,6 +466,14 @@ async function describeForUser(contest, userId) {
     ...contest.toPublicJSON(),
     creator: contest.creator,
     tweet: contest.tweet,
+    // Ce que l'écran doit pouvoir dire sans deviner : la cagnotte est-elle
+    // réellement bloquée, déjà versée, ou s'agit-il d'un concours hérité
+    // purement déclaratif ?
+    escrow: {
+      status: contest.escrow_status,
+      total: contest.escrow_total,
+      is_funded: contest.escrow_status !== 'none',
+    },
     viewer: {
       is_owner: isOwner,
       is_participating: !!entry,
