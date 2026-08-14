@@ -92,7 +92,23 @@ function positionForMode(mode, latitude, longitude) {
   };
 }
 
-/** Réglages de l'appelant. Un compte sans ligne est fantôme, pas absent. */
+/**
+ * Réglages de l'appelant.
+ *
+ * ── Le défaut est « ville », plus « fantôme » ─────────────────────────────
+ * Un compte sans ligne n'a jamais ouvert les réglages de la carte. Il était
+ * jusqu'ici invisible, ce qui rendait la carte vide pour presque tout le
+ * monde : au moment du changement, 3 502 comptes sur 3 550 n'avaient aucune
+ * ligne, et AUCUN n'avait explicitement choisi « fantôme ».
+ *
+ * Le défaut est donc « ville » : visible, mais à la précision d'une grille de
+ * quartier — jamais la position exacte. Celle-ci reste un choix délibéré, que
+ * 37 comptes ont fait.
+ *
+ * ⚠️ C'est un changement de VISIBILITÉ pour des gens qui n'ont rien demandé.
+ * Il est assumé et décidé côté produit ; il ne touche aucun choix explicite,
+ * puisqu'il n'en existait aucun dans l'autre sens.
+ */
 async function getSettings(sequelize, userId) {
   const [row] = await sequelize.query(
     `SELECT sharing_mode, audience, latitude, longitude, place_label, shared_at, expires_at
@@ -102,7 +118,7 @@ async function getSettings(sequelize, userId) {
 
   if (!row) {
     return {
-      sharing_mode: 'ghost',
+      sharing_mode: 'city',
       audience: 'connections',
       shared_at: null,
       expires_at: null,
@@ -142,7 +158,7 @@ async function updateSettings(sequelize, userId, { sharing_mode: mode, audience 
 
   await sequelize.query(
     `INSERT INTO nf_map_presence (user_id, sharing_mode, audience, created_at, updated_at)
-     VALUES (:userId, COALESCE(:mode, 'ghost'), COALESCE(:audience, 'connections'), NOW(), NOW())
+     VALUES (:userId, COALESCE(:mode, 'city'), COALESCE(:audience, 'connections'), NOW(), NOW())
      ON CONFLICT (user_id) DO UPDATE SET
        sharing_mode = COALESCE(:mode, nf_map_presence.sharing_mode),
        audience = COALESCE(:audience, nf_map_presence.audience),
@@ -177,18 +193,35 @@ async function updatePosition(sequelize, userId, { latitude, longitude, place_la
   const position = positionForMode(settings.sharing_mode, Number(latitude), Number(longitude));
   if (!position) return { stored: false, reason: 'invalid_position' };
 
+  // INSERT ... ON CONFLICT, et pas un simple UPDATE.
+  //
+  // Depuis que le mode par défaut est « ville », la quasi-totalité des comptes
+  // n'a AUCUNE ligne dans cette table — 3 502 sur 3 550 au moment du
+  // changement. Un `UPDATE ... WHERE user_id` n'y touche alors rien du tout :
+  // le mode par défaut aurait été « visible », et personne ne serait jamais
+  // apparu. La ligne se crée donc à la première position reçue.
+  //
+  // `sharing_mode` est repris de `settings`, qui vient d'être relu en base :
+  // on n'écrit jamais un mode fourni par l'appelant.
   await sequelize.query(
-    `UPDATE nf_map_presence
-        SET latitude = :latitude,
-            longitude = :longitude,
-            place_label = :placeLabel,
-            shared_at = NOW(),
-            expires_at = NOW() + INTERVAL '${PRESENCE_TTL_HOURS} hours',
-            updated_at = NOW()
-      WHERE user_id = :userId`,
+    `INSERT INTO nf_map_presence
+       (user_id, sharing_mode, audience, latitude, longitude, place_label,
+        shared_at, expires_at, created_at, updated_at)
+     VALUES
+       (:userId, :mode, :audience, :latitude, :longitude, :placeLabel,
+        NOW(), NOW() + INTERVAL '${PRESENCE_TTL_HOURS} hours', NOW(), NOW())
+     ON CONFLICT (user_id) DO UPDATE SET
+        latitude = :latitude,
+        longitude = :longitude,
+        place_label = :placeLabel,
+        shared_at = NOW(),
+        expires_at = NOW() + INTERVAL '${PRESENCE_TTL_HOURS} hours',
+        updated_at = NOW()`,
     {
       replacements: {
         userId,
+        mode: settings.sharing_mode,
+        audience: settings.audience,
         latitude: position.latitude,
         longitude: position.longitude,
         placeLabel: typeof placeLabel === 'string' ? placeLabel.slice(0, 120) : null,

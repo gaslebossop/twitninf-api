@@ -712,6 +712,45 @@ class AuthService {
       location_consent_updated_at: new Date(),
     });
 
+    // ─── Report vers la Carte NF ────────────────────────────────────────────
+    //
+    // La position n'arrivait sur la carte que si l'on OUVRAIT la carte : c'est
+    // l'ecran lui-meme qui poussait `POST /api/nf-map/position`. Quelqu'un qui
+    // avait active le partage mais n'ouvrait jamais l'onglet restait donc
+    // invisible, ou fige sur une position vieille de plusieurs jours — la
+    // presence expire au bout de 8 h.
+    //
+    // On profite de la localisation deja transmise ici : elle est capturee au
+    // demarrage, avec le consentement de l'utilisateur, et c'est exactement le
+    // moment ou l'on sait ou il est.
+    //
+    // ⚠️ Le consentement de la CARTE est distinct de celui-ci. On ne le
+    // contourne surtout pas : `updatePosition` relit `sharing_mode` en base et
+    // refuse en mode « fantome » — qui est le defaut. Autrement dit, ce report
+    // ne rend visible que ceux qui ont deja choisi de l'etre, et applique la
+    // precision de LEUR mode (ville ou exacte), pas celle qu'on lui passe.
+    //
+    // Un seul appel suffit pour les deux choses demandees : `updatePosition`
+    // ecrit la position ET repousse `expires_at`, qui est ce que la carte
+    // utilise comme statut « en ligne ».
+    if (granted) {
+      try {
+        const nfMap = require('./nfMapService');
+        const { sequelize } = require('../models');
+        // Les coordonnees ARRONDIES, pas les brutes : on ne transmet jamais a
+        // la carte plus de precision que l'antifraude n'en a conserve.
+        await nfMap.updatePosition(sequelize, userId, {
+          latitude: eventData.latitude,
+          longitude: eventData.longitude,
+          place_label: eventData.city || null,
+        });
+      } catch (error) {
+        // La carte est un agrement, l'enregistrement de localisation une
+        // obligation : un echec ici ne doit jamais faire echouer celui-la.
+        logger.warn(`[nfMap] report depuis la localisation de session impossible: ${error.message}`);
+      }
+    }
+
     return {
       success: true,
       message: granted ? 'Localisation de connexion enregistree' : 'Choix de localisation enregistre',
