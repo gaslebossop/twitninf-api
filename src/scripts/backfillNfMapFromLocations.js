@@ -9,23 +9,17 @@
  * PROCHAIN démarrage de l'app. Les localisations déjà enregistrées — celles
  * d'avant le changement — n'ont jamais été reportées. Ce script rattrape.
  *
- * ── Pourquoi l'heure de capture est conservée ─────────────────────────────
- * C'est le point important, et le seul choix discutable de ce script.
+ * ── L'heure de capture est conservée ──────────────────────────────────────
+ * La présence n'expire plus : toute position reportée reste affichée jusqu'à
+ * son remplacement. `shared_at` est donc recalé sur la capture RÉELLE, et pas
+ * sur maintenant.
  *
- * La présence sur la carte dure 8 heures : c'est une PRÉSENCE, pas une
- * dernière adresse connue. Reporter une localisation vieille de dix jours avec
- * l'horodatage du jour la ferait passer pour actuelle — on afficherait
- * quelqu'un à un endroit qu'il a quitté depuis longtemps, sur une carte où
- * d'autres personnes peuvent aller le chercher.
- *
- * `shared_at` et `expires_at` sont donc calculés depuis `captured_at`. En
- * pratique, seules les localisations de moins de 8 heures deviennent visibles ;
- * les autres sont écrites mais déjà expirées, et réapparaîtront d'elles-mêmes
- * à la prochaine ouverture de l'app par leur propriétaire.
- *
- * Si l'on voulait qu'une localisation ancienne reste affichée, le bon levier
- * serait d'allonger `PRESENCE_TTL_HOURS` — décision de produit — et non de
- * mentir sur la date.
+ * La distinction compte : la position s'affiche dans les deux cas, mais
+ * l'antidater ferait passer une localisation vieille de dix jours pour
+ * fraîche. Garder la vraie date laisse à l'app la possibilité de dire depuis
+ * quand elle date — sur une carte où d'autres peuvent aller chercher
+ * quelqu'un, c'est la seule chose qui distingue « elle est là » de « elle y
+ * était ».
  *
  * ── Le consentement ───────────────────────────────────────────────────────
  * Le mode de partage est relu par compte, et « fantôme » est ignoré. La
@@ -66,8 +60,10 @@ async function main() {
       continue;
     }
 
+    // Tout devient visible : la presence n'expire plus. L'age reste affiche
+    // parce qu'il change le SENS de ce qu'on publie.
     const fresh = row.age_hours < 8;
-    const mark = fresh ? 'VISIBLE' : 'expirée';
+    const mark = fresh ? 'VISIBLE (recente)' : 'VISIBLE (ancienne)';
     console.log(
       `  ${String(row.username).padEnd(16)} ${String(row.city || '—').padEnd(14)} ` +
       `${String(row.age_hours).padStart(4)} h   ${mark}`
@@ -86,10 +82,12 @@ async function main() {
     });
     if (!result.stored) continue;
 
+    // On recale `shared_at` sur la capture reelle : la position reste
+    // affichee (elle n'expire plus), mais l'app peut dire honnetement DEPUIS
+    // QUAND elle date. L'antidater a maintenant serait le seul vrai mensonge.
     await sequelize.query(
       `UPDATE nf_map_presence
-          SET shared_at = :capturedAt,
-              expires_at = :capturedAt::timestamptz + INTERVAL '8 hours'
+          SET shared_at = :capturedAt
         WHERE user_id = :userId`,
       { replacements: { userId: row.user_id, capturedAt: row.captured_at } }
     );

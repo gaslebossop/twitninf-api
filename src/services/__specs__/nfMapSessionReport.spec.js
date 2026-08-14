@@ -80,7 +80,7 @@ test('un compte en mode fantome n est JAMAIS positionne', async () => {
   assert.strictEqual(writes.length, 0, 'aucune ecriture ne doit partir en mode fantome');
 });
 
-test('un compte qui partage est positionne ET remis en ligne', async () => {
+test('un compte qui partage est positionne, sans echeance', async () => {
   const db = fakeSequelize(SHARING);
 
   const result = await nfMap.updatePosition(db, 'user-2', {
@@ -96,10 +96,15 @@ test('un compte qui partage est positionne ET remis en ligne', async () => {
   // depuis que le mode par defaut est « ville ». Un simple UPDATE ne toucherait
   // rien et personne n'apparaitrait jamais.
   assert.match(write.sql, /ON CONFLICT/i);
-  // `expires_at` repousse est ce que la carte lit comme « en ligne » : sans
-  // lui, la position serait ecrite mais la personne resterait invisible.
-  assert.match(write.sql, /expires_at\s*=\s*NOW\(\)/i);
+  // La presence n'expire plus : la derniere position connue reste affichee
+  // jusqu'a son remplacement. `shared_at` dit DEPUIS QUAND, ce qui reste utile
+  // a l'affichage, mais ne conditionne plus la visibilite.
   assert.match(write.sql, /shared_at\s*=\s*NOW\(\)/i);
+  assert.doesNotMatch(
+    write.sql,
+    /expires_at\s*=\s*NOW\(\)\s*\+/i,
+    'aucune echeance ne doit etre posee'
+  );
 });
 
 test('le mode « ville » degrade la precision transmise', async () => {

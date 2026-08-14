@@ -43,7 +43,11 @@ const SHARING_MODES = ['ghost', 'city', 'precise'];
 const AUDIENCES = ['mutuals', 'followers', 'connections'];
 
 /** Au-delà, la position n'est plus montrée — voir la règle 3. */
-const PRESENCE_TTL_HOURS = 8;
+/**
+ * Conservée à 0 pour compatibilité d'import : la présence n'expire plus.
+ * Voir `purgeExpired` et `nearby`.
+ */
+const PRESENCE_TTL_HOURS = 0;
 
 /**
  * Arrondi du mode « ville » : ~0,05° ≈ 5,5 km en latitude. Assez pour situer
@@ -133,11 +137,10 @@ async function getSettings(sequelize, userId) {
     place_label: row.place_label,
     shared_at: row.shared_at,
     expires_at: row.expires_at,
-    is_live:
-      row.sharing_mode !== 'ghost' &&
-      row.latitude !== null &&
-      !!row.expires_at &&
-      new Date(row.expires_at) > new Date(),
+    // Une position connue et un mode non fantome suffisent : elle ne se
+    // perime plus. `shared_at` reste disponible pour dire DEPUIS QUAND, ce
+    // qui est une information d'affichage, pas de visibilite.
+    is_live: row.sharing_mode !== 'ghost' && row.latitude !== null,
   };
 }
 
@@ -209,13 +212,13 @@ async function updatePosition(sequelize, userId, { latitude, longitude, place_la
         shared_at, expires_at, created_at, updated_at)
      VALUES
        (:userId, :mode, :audience, :latitude, :longitude, :placeLabel,
-        NOW(), NOW() + INTERVAL '${PRESENCE_TTL_HOURS} hours', NOW(), NOW())
+        NOW(), NULL, NOW(), NOW())
      ON CONFLICT (user_id) DO UPDATE SET
         latitude = :latitude,
         longitude = :longitude,
         place_label = :placeLabel,
         shared_at = NOW(),
-        expires_at = NOW() + INTERVAL '${PRESENCE_TTL_HOURS} hours',
+        expires_at = NULL,
         updated_at = NOW()`,
     {
       replacements: {
@@ -229,7 +232,7 @@ async function updatePosition(sequelize, userId, { latitude, longitude, place_la
     }
   );
 
-  return { stored: true, ...position, expires_in_hours: PRESENCE_TTL_HOURS };
+  return { stored: true, ...position, expires_in_hours: null };
 }
 
 /** Efface la position et repasse en fantôme. */
@@ -285,9 +288,16 @@ async function nearby(sequelize, viewerId, bounds) {
             p.shared_at
        FROM nf_map_presence p
        JOIN users u ON u.id = p.user_id
+      -- La presence n'expire plus : la derniere position connue reste
+      -- affichee jusqu'a ce qu'elle soit remplacee, ou effacee par un
+      -- passage en mode fantome.
+      --
+      -- Retirer la condition d'expiration ne rend AUCUN compte masque
+      -- visible : les deux lignes ci-dessous suffisent deja a exclure les
+      -- fantomes, et clearPresence comme le passage en fantome mettent
+      -- latitude a NULL.
       WHERE p.sharing_mode <> 'ghost'
         AND p.latitude IS NOT NULL
-        AND p.expires_at > NOW()
         AND u.is_active = TRUE
         AND p.user_id <> :viewerId
         AND p.latitude BETWEEN :south AND :north
@@ -353,10 +363,11 @@ async function connections(sequelize, viewerId) {
             u.avatar,
             u.verified,
             u.premium,
+            -- Plus d'echeance : une position connue reste valable jusqu'a
+            -- son remplacement (voir nearby).
             (p.sharing_mode IS NOT NULL
              AND p.sharing_mode <> 'ghost'
-             AND p.latitude IS NOT NULL
-             AND p.expires_at > NOW())         AS is_sharing,
+             AND p.latitude IS NOT NULL)       AS is_sharing,
             EXISTS (
               SELECT 1 FROM user_follows f
                WHERE f.follower_id = :viewerId AND f.following_id = u.id AND f.status = 'active'
@@ -434,12 +445,25 @@ async function invite(sequelize, Notification, fromUser, targetUserId) {
   return { sent: true };
 }
 
-/** Purge des positions expirées — appelée par le worker. */
+/**
+ * Ancienne purge des positions expirées. Ne fait plus rien.
+ *
+ * La présence n'expire plus : la dernière position connue est conservée
+ * jusqu'à son remplacement, ou son effacement volontaire par un passage en
+ * mode fantôme. Une purge par échéance effacerait donc exactement ce qu'on
+ * cherche à garder — y compris les positions reportées depuis l'historique de
+ * localisation, dont l'échéance calculée est déjà passée.
+ *
+ * La fonction est conservée plutôt que supprimée : elle est appelée par le
+ * worker (`server.js`), et la retirer demanderait de toucher au démarrage pour
+ * un gain nul. Elle neutralise juste `expires_at` sur les lignes qui en
+ * portent encore une, héritée de l'ancien fonctionnement.
+ */
 async function purgeExpired(sequelize) {
   const [, meta] = await sequelize.query(
     `UPDATE nf_map_presence
-        SET latitude = NULL, longitude = NULL, place_label = NULL, expires_at = NULL, updated_at = NOW()
-      WHERE expires_at IS NOT NULL AND expires_at <= NOW() AND latitude IS NOT NULL`
+        SET expires_at = NULL, updated_at = NOW()
+      WHERE expires_at IS NOT NULL`
   );
   return meta?.rowCount || 0;
 }
