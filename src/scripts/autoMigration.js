@@ -40,6 +40,24 @@ async function runAutoMigration() {
       logger.warn('⚠️ earn_multiplier:', e.message);
     }
 
+    // Marque une remise dont l'octroi a REELLEMENT abouti.
+    //
+    // Sans cette colonne, une reclamation enregistree pendant que l'octroi
+    // etait en panne est indistinguable d'une reclamation honoree — et l'index
+    // unique de `tw_quest_claims` empeche de re-reclamer. La recompense est
+    // donc perdue sans trace exploitable. C'est arrive : les remises faites
+    // avant le deploiement de `grant()` n'ont rien accorde.
+    //
+    // `NULL` = a rejouer. `scripts/replayEventGrants.js` s'en sert.
+    try {
+      await sequelize.query(`
+        ALTER TABLE tw_quest_claims ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ NULL;
+      `);
+      logger.info('✅ Colonne tw_quest_claims.settled_at vérifiée');
+    } catch (e) {
+      logger.warn('⚠️ tw_quest_claims.settled_at:', e.message);
+    }
+
     try {
       await sequelize.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
     } catch (e) {

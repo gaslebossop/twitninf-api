@@ -370,10 +370,19 @@ async function claim(userId, questId) {
 
   try {
     await grant(userId, granted);
+    // Marque la dette comme honorée. Tant que `settled_at` est nul, la remise
+    // est enregistrée mais rien n'a été donné — et l'index unique empêche de
+    // re-réclamer. C'est exactement ce qui s'est produit pour les remises
+    // faites avant que `grant()` n'accorde réellement quoi que ce soit :
+    // `scripts/replayEventGrants.js` les rattrape.
+    await TwQuestClaim.update(
+      { settled_at: new Date() },
+      { where: { user_id: userId, event_slug: event.slug, quest_id: questId } }
+    );
   } catch (error) {
     // La remise est ACQUISE même si l'octroi échoue : on préfère un compte à
-    // qui l'on doit 300 NF, réparable à la main depuis la trace, plutôt qu'une
-    // quête qu'on pourrait réclamer en boucle jusqu'à ce que ça marche.
+    // qui l'on doit 300 NF, retrouvable par `settled_at IS NULL`, plutôt
+    // qu'une quête réclamable en boucle jusqu'à ce que ça marche.
     logger.error(`Octroi echoue pour ${userId} / ${questId}:`, error);
   }
 
@@ -634,4 +643,4 @@ async function reportSignal(userId, eventSlug, questId, idempotencyKey) {
   }
 }
 
-module.exports = { measureAll, claim, reportSignal, drawLoot, earnMultiplierFor };
+module.exports = { measureAll, claim, reportSignal, drawLoot, earnMultiplierFor, grant };

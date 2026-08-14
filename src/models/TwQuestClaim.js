@@ -47,6 +47,20 @@ module.exports = (sequelize) => {
       allowNull: false,
       defaultValue: DataTypes.NOW,
     },
+    /**
+     * Quand l'octroi a REELLEMENT abouti. `null` = a rejouer.
+     *
+     * La reclamation et l'octroi sont deux choses distinctes : la premiere est
+     * enregistree avant le second, exprès, pour qu'une quete ne puisse pas
+     * etre reclamee en boucle jusqu'a ce que l'octroi passe. Le prix de ce
+     * choix est qu'un octroi qui echoue laisse une dette — cette colonne est
+     * ce qui la rend retrouvable.
+     */
+    settled_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null,
+    },
   }, {
     tableName: 'tw_quest_claims',
     timestamps: true,
