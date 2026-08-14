@@ -37,8 +37,11 @@ const {
   TwEvent,
   TwQuestClaim,
   TwQuestSignal,
+  User,
 } = require('../models');
 const logger = require('../utils/logger');
+const EconomyLedger = require('../economy/ledger');
+const VirtualCurrencyService = require('./virtualCurrencyService');
 
 /** Mémoïsation du comptage global, qui est le seul à balayer toute la table. */
 const globalCache = new Map();
@@ -380,36 +383,165 @@ async function claim(userId, questId) {
 /**
  * L'octroi effectif.
  *
- * Volontairement isolé et incomplet : `coins` et `pro_days` touchent au
- * registre économique, dont les entrées sont doublement écrites et auditées.
- * Les brancher demande de décider quel compte source débite les NF offerts —
- * une question d'équilibre économique, pas d'implémentation. Voir la note en
- * fin de docs/EVENTS_API.md côté mobile.
+ * ── D'où sortent les NF offerts ───────────────────────────────────────────
+ * De la TRÉSORERIE de la plateforme, via `EconomyLedger.rewardFromTreasury` —
+ * le chemin qui sert déjà aux récompenses créateur. La question « quel compte
+ * débite » était en réalité déjà tranchée par l'économie de l'app : les
+ * récompenses sont financées par les dépenses des utilisateurs, et le registre
+ * refuse l'opération si la trésorerie est à sec plutôt que de créer de la
+ * monnaie à partir de rien.
  *
- * Les récompenses purement cosmétiques, elles, sont accordées ici.
+ * C'est ce refus qui rend l'événement sûr : onze quêtes distribuées à des
+ * milliers de comptes ne peuvent pas faire dériver la masse monétaire.
+ *
+ * ── Pourquoi les échecs ne remontent pas ──────────────────────────────────
+ * Chaque octroi est isolé. Un badge qui échoue ne doit pas empêcher les NF
+ * d'arriver, et l'appelant a DÉJÀ enregistré la réclamation — c'est
+ * délibéré : mieux vaut un compte à qui l'on doit quelque chose, réparable
+ * depuis `tw_quest_claims.granted`, qu'une quête réclamable en boucle jusqu'à
+ * ce que ça marche.
  */
 async function grant(userId, granted) {
-  switch (granted.kind) {
-    case 'cosmetic':
-    case 'badge':
-    case 'title':
-    case 'unlock':
-    case 'multiplier':
-      // Ces quatre-là passent par l'inventaire / la personnalisation. La trace
-      // reste dans `tw_quest_claims.granted`, donc rien n'est perdu si le
-      // branchement arrive plus tard.
-      logger.info(`Recompense ${granted.kind} a accorder a ${userId}: ${granted.label}`);
-      return;
-    case 'coins':
-    case 'pro_days':
-      logger.warn(
-        `Recompense ${granted.kind} NON accordee automatiquement (${granted.label}) — ` +
-        `compte source a decider, voir eventQuestService.grant`
-      );
-      return;
-    default:
-      return;
+  const payload = granted.payload || {};
+
+  // Une récompense composite (le badge « Fondateur » porte aussi des NF, des
+  // jours de Pro et un titre) déclenche plusieurs octrois. On les tente tous,
+  // indépendamment.
+  const jobs = [];
+
+  if (granted.kind === 'coins' || payload.coins) {
+    jobs.push(['coins', () => grantCoins(userId, Number(payload.amount ?? payload.coins), granted.label)]);
   }
+  if (granted.kind === 'pro_days' || payload.pro_days) {
+    jobs.push(['pro_days', () => grantProDays(userId, Number(payload.days ?? payload.pro_days))]);
+  }
+  if (granted.kind === 'badge' || payload.badge) {
+    jobs.push(['badge', () => grantInventoryItem(userId, granted.label)]);
+  }
+  if (granted.kind === 'cosmetic' && payload.slot) {
+    jobs.push(['cosmetic', () => grantCosmetic(userId, String(payload.slot), payload.value)]);
+  }
+  if (granted.kind === 'title' || payload.title) {
+    jobs.push(['title', () => grantTitle(userId, String(payload.title))]);
+  }
+
+  for (const [kind, run] of jobs) {
+    try {
+      await run();
+    } catch (error) {
+      logger.error(`Octroi ${kind} echoue pour ${userId} (${granted.label}):`, error.message);
+    }
+  }
+
+  if (jobs.length === 0) {
+    // `multiplier` et `unlock` sont des effets temporaires : ils demandent un
+    // support côté économie qui n'existe pas encore. La trace reste dans
+    // `tw_quest_claims.granted`, donc rien n'est perdu.
+    logger.info(`Recompense ${granted.kind} enregistree sans octroi automatique: ${granted.label}`);
+  }
+}
+
+/** NF, depuis la trésorerie. Refusé si elle est insuffisante. */
+async function grantCoins(userId, amount, description) {
+  if (!Number.isFinite(amount) || amount <= 0) return;
+
+  const currency = await VirtualCurrencyService.getMainCurrency();
+  if (!currency) throw new Error('Monnaie principale introuvable');
+
+  const dbTransaction = await sequelize.transaction();
+  try {
+    await EconomyLedger.rewardFromTreasury(
+      userId,
+      currency.id,
+      amount,
+      `Événement : ${description}`,
+      dbTransaction
+    );
+    await dbTransaction.commit();
+    logger.info(`[event] ${amount} NF accordes a ${userId}`);
+  } catch (error) {
+    await dbTransaction.rollback();
+    throw error;
+  }
+}
+
+/**
+ * Jours de Pro.
+ *
+ * On PROLONGE une échéance existante au lieu de la remplacer : quelqu'un qui
+ * paie déjà son abonnement ne doit pas voir sa date reculer parce qu'il a
+ * gagné sept jours.
+ */
+async function grantProDays(userId, days) {
+  if (!Number.isFinite(days) || days <= 0) return;
+
+  const user = await User.findByPk(userId);
+  if (!user) throw new Error('Compte introuvable');
+
+  const now = new Date();
+  const current = user.subscription_expires_at ? new Date(user.subscription_expires_at) : null;
+  const base = current && current > now ? current : now;
+  const until = new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
+
+  await user.update({
+    subscription_tier: user.subscription_tier === 'free' ? 'pro' : user.subscription_tier,
+    subscription_expires_at: until,
+    premium: true,
+  });
+  logger.info(`[event] ${days} jours de Pro accordes a ${userId} (jusqu'au ${until.toISOString()})`);
+}
+
+/** Badge : passe par l'inventaire, comme les autres objets de compte. */
+async function grantInventoryItem(userId, itemName) {
+  const InventoryService = require('./inventoryService');
+  const already = await InventoryService.userHasItem(userId, itemName);
+  if (already) return;
+  await InventoryService.addItemToUser(userId, itemName, 1);
+  logger.info(`[event] objet « ${itemName} » ajoute a l'inventaire de ${userId}`);
+}
+
+/**
+ * Cosmétique : écrit dans `profile_customization`, la colonne JSON que l'app
+ * lit déjà pour l'habillage de profil.
+ */
+async function grantCosmetic(userId, slot, value) {
+  const user = await User.findByPk(userId);
+  if (!user) throw new Error('Compte introuvable');
+
+  const current = user.profile_customization || {};
+  // On n'ÉCRASE pas un choix existant : débloquer une police ne doit pas
+  // changer celle que la personne s'est choisie. On l'ajoute aux éléments
+  // possédés, et elle l'appliquera si elle le veut.
+  const unlocked = Array.isArray(current.unlocked) ? current.unlocked : [];
+  const token = `${slot}:${value}`;
+  if (unlocked.includes(token)) return;
+
+  await user.update({
+    profile_customization: { ...current, unlocked: [...unlocked, token] },
+  });
+  logger.info(`[event] cosmetique ${token} debloque pour ${userId}`);
+}
+
+/** Titre de profil, dans la même colonne. */
+async function grantTitle(userId, title) {
+  if (!title) return;
+  const user = await User.findByPk(userId);
+  if (!user) throw new Error('Compte introuvable');
+
+  const current = user.profile_customization || {};
+  const titles = Array.isArray(current.titles) ? current.titles : [];
+  if (titles.includes(title)) return;
+
+  await user.update({
+    profile_customization: {
+      ...current,
+      titles: [...titles, title],
+      // Le premier titre gagné s'applique tout seul : sans cela, la
+      // récompense est invisible tant qu'on n'a pas fouillé les réglages.
+      profile_title: current.profile_title || title,
+    },
+  });
+  logger.info(`[event] titre « ${title} » accorde a ${userId}`);
 }
 
 // ─── Signaux ─────────────────────────────────────────────────────────────────
