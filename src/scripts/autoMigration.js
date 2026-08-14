@@ -20,6 +20,26 @@ async function runAutoMigration() {
       logger.warn('⚠️ algorithmic_visibility_multiplier:', e.message);
     }
 
+    // Bonus temporaire sur les gains, gagné en récompense d'événement.
+    //
+    // Ici et pas dans une migration Sequelize : `sequelize.sync()` tourne avec
+    // `alter: false`, donc il ne touche JAMAIS une table existante. Une
+    // nouvelle colonne sur `users` n'apparaîtrait pas au déploiement, et le
+    // code qui la lit tomberait sur « column does not exist » en production.
+    //
+    // L'échéance est portée par la colonne plutôt que par une tâche de
+    // nettoyage : un bonus expiré se lit comme absent, sans qu'aucun cron
+    // n'ait à passer. Rien à réparer si le serveur redémarre au mauvais moment.
+    try {
+      await sequelize.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS earn_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS earn_multiplier_until TIMESTAMPTZ NULL;
+      `);
+      logger.info('✅ Colonnes earn_multiplier vérifiées');
+    } catch (e) {
+      logger.warn('⚠️ earn_multiplier:', e.message);
+    }
+
     try {
       await sequelize.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
     } catch (e) {

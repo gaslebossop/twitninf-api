@@ -424,6 +424,12 @@ async function grant(userId, granted) {
   if (granted.kind === 'title' || payload.title) {
     jobs.push(['title', () => grantTitle(userId, String(payload.title))]);
   }
+  if (granted.kind === 'multiplier') {
+    jobs.push([
+      'multiplier',
+      () => grantMultiplier(userId, Number(payload.factor), Number(payload.hours)),
+    ]);
+  }
 
   for (const [kind, run] of jobs) {
     try {
@@ -434,10 +440,69 @@ async function grant(userId, granted) {
   }
 
   if (jobs.length === 0) {
-    // `multiplier` et `unlock` sont des effets temporaires : ils demandent un
-    // support côté économie qui n'existe pas encore. La trace reste dans
-    // `tw_quest_claims.granted`, donc rien n'est perdu.
+    // Il ne reste que `unlock`, qui prêterait une capacité normalement
+    // payante. Rien à faire de plus que `pro_days` ne fasse déjà mieux : les
+    // capacités sont gardées par `subscription_tier`, donc prêter l'accès EST
+    // accorder du Pro. La trace reste dans `tw_quest_claims.granted`.
     logger.info(`Recompense ${granted.kind} enregistree sans octroi automatique: ${granted.label}`);
+  }
+}
+
+/**
+ * Bonus temporaire sur les gains.
+ *
+ * ── Pourquoi une échéance en base et pas une tâche de nettoyage ───────────
+ * Un bonus expiré se lit comme absent (voir `earnMultiplierFor`), donc aucun
+ * cron n'a à repasser derrière. Rien n'est à réparer si le serveur redémarre
+ * au mauvais moment, et un bonus ne peut pas rester actif indéfiniment par
+ * l'oubli d'une tâche planifiée.
+ *
+ * ── Ce qui se passe si on en gagne deux ───────────────────────────────────
+ * On garde le MEILLEUR facteur et on PROLONGE l'échéance. Empiler les facteurs
+ * (× 2 puis × 2 = × 4) ouvrirait une dérive : l'événement distribue le même
+ * bonus à chaque compte, et rien n'empêcherait de le cumuler avec un futur.
+ */
+async function grantMultiplier(userId, factor, hours) {
+  if (!Number.isFinite(factor) || factor <= 1) return;
+  if (!Number.isFinite(hours) || hours <= 0) return;
+
+  const user = await User.findByPk(userId);
+  if (!user) throw new Error('Compte introuvable');
+
+  const now = new Date();
+  const current = user.earn_multiplier_until ? new Date(user.earn_multiplier_until) : null;
+  const active = current && current > now;
+
+  const nextFactor = active ? Math.max(Number(user.earn_multiplier) || 1, factor) : factor;
+  const base = active ? current : now;
+  const until = new Date(base.getTime() + hours * 60 * 60 * 1000);
+
+  await user.update({ earn_multiplier: nextFactor, earn_multiplier_until: until });
+  logger.info(`[event] bonus x${nextFactor} accorde a ${userId} jusqu'au ${until.toISOString()}`);
+}
+
+/**
+ * Le facteur en vigueur pour un compte, ou 1.
+ *
+ * Exporté parce que c'est la monétisation des tweets qui l'applique, au seul
+ * endroit où les fonds bougent réellement.
+ */
+async function earnMultiplierFor(userId) {
+  try {
+    const user = await User.findByPk(userId, {
+      attributes: ['earn_multiplier', 'earn_multiplier_until'],
+    });
+    if (!user?.earn_multiplier_until) return 1;
+    if (new Date(user.earn_multiplier_until) <= new Date()) return 1;
+
+    const factor = Number(user.earn_multiplier);
+    // Plafond de sécurité : une valeur aberrante en base ne doit pas pouvoir
+    // vider la trésorerie.
+    return Number.isFinite(factor) && factor > 1 ? Math.min(factor, 5) : 1;
+  } catch (error) {
+    // Un bonus illisible n'empêche jamais de payer le gain de base.
+    logger.error('Lecture du bonus de gains impossible:', error.message);
+    return 1;
   }
 }
 
@@ -569,4 +634,4 @@ async function reportSignal(userId, eventSlug, questId, idempotencyKey) {
   }
 }
 
-module.exports = { measureAll, claim, reportSignal, drawLoot };
+module.exports = { measureAll, claim, reportSignal, drawLoot, earnMultiplierFor };

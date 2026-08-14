@@ -278,6 +278,24 @@ class TweetMonetizationService {
         return { success: false, reason: 'Aucune récompense valide' };
       }
 
+      // Bonus temporaire gagné en récompense d'événement.
+      //
+      // Appliqué ICI, sur la fonction qui bouge réellement les fonds, et pas
+      // dans le calcul d'éligibilité : `rewardAmount` court-circuite tout le
+      // calcul quand il est fourni, donc un bonus pose en amont serait ignore
+      // sur ce chemin-la. C'est la meme raison qui fait que le verrou de
+      // monetisation est pose ici.
+      //
+      // Le bonus multiplie le gain de l'auteur, mais la source reste la
+      // tresorerie : `rewardFromTreasury` refuse si elle est insuffisante,
+      // donc un bonus ne peut jamais creer de monnaie.
+      const boost = await require('./eventQuestService').earnMultiplierFor(userId);
+      if (boost > 1) {
+        const boosted = reward * boost;
+        logger.info(`✨ Bonus d'evenement x${boost} : ${reward} -> ${boosted} pour ${userId}`);
+        reward = boosted;
+      }
+
       const currency = await getPlatformCurrency();
       if (!currency) throw new Error('Cryptomonnaie non trouvée');
 

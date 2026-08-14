@@ -522,6 +522,29 @@ const userSchema = {
     allowNull: true
   },
 
+  /**
+   * Bonus temporaire sur les gains, gagné en récompense d'événement.
+   *
+   * L'échéance vit dans la colonne voisine plutôt que dans une tâche de
+   * nettoyage : un bonus expiré se lit comme absent, sans qu'aucun cron n'ait
+   * à passer, et rien n'est à réparer si le serveur redémarre au mauvais
+   * moment. La colonne est créée par `scripts/autoMigration.js` — `sync()`
+   * tourne en `alter: false` et n'ajoute jamais de colonne à une table
+   * existante.
+   */
+  earn_multiplier: {
+    type: DataTypes.DOUBLE,
+    allowNull: false,
+    defaultValue: 1.0
+  },
+
+  /** Fin du bonus. `null` = aucun bonus en cours. */
+  earn_multiplier_until: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    defaultValue: null
+  },
+
   algorithmic_visibility_multiplier: {
     type: DataTypes.FLOAT,
     allowNull: false,
