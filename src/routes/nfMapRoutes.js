@@ -10,15 +10,133 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
+const { QueryTypes } = require('sequelize');
 const router = express.Router();
 
 const { sequelize, Notification } = require('../models');
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const { requireFlag } = require('../middleware/featureFlagMiddleware');
 const nfMap = require('../services/nfMapService');
+const nfMapPin = require('../services/nfMapPinService');
 const logger = require('../utils/logger');
 
 const guard = [authenticateToken, requireFlag('fil.cartenf')];
+
+/**
+ * Les routes d'épingle sont SANS JETON, et ce n'est pas un oubli.
+ *
+ * Un marqueur de `react-native-maps` charge son image par le chargeur natif de
+ * la plateforme — `RCTImageLoader` sur iOS, Fresco sur Android. Ni l'un ni
+ * l'autre ne porte l'en-tête `Authorization` de l'app : une route protégée
+ * répondrait 401 à toutes les épingles, et la carte serait couverte de
+ * marqueurs vides.
+ *
+ * Ce qu'on accepte de servir en clair est donc strictement ce qui est DÉJÀ
+ * public : l'avatar et le pseudo, que `GET /api/users/profile/:username` rend
+ * sans authentification. Aucune position n'entre dans l'image — le dessin ne
+ * dit pas où quelqu'un se trouve, seulement à quoi il ressemble. C'est la
+ * condition qui rend cette ouverture acceptable, et elle doit le rester.
+ */
+const pinLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  // Large : une carte bien remplie demande jusqu'à deux cents épingles d'un
+  // coup, et chacune n'est calculée qu'une fois grâce au cache ci-dessous.
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Trop de requêtes' },
+});
+
+/**
+ * Une journée de cache, et c'est délibérément long.
+ *
+ * L'image ne dépend que de l'avatar et du pseudo, deux choses qui ne changent
+ * pas dans la journée. Un changement d'avatar produit une nouvelle URL de
+ * fichier, donc une nouvelle empreinte dans l'URL de l'épingle : le cache se
+ * périme de lui-même, sans qu'on ait à le raccourcir pour tout le monde.
+ */
+const PIN_CACHE_SECONDS = 24 * 60 * 60;
+
+function sendPng(res, png) {
+  res.set('Content-Type', 'image/png');
+  res.set('Cache-Control', `public, max-age=${PIN_CACHE_SECONDS}, immutable`);
+  // Les épingles ne varient pas selon l'appelant : rien d'utile à négocier.
+  res.set('Vary', 'Accept-Encoding');
+  return res.send(png);
+}
+
+/** Les seuls comptes dessinables : ceux qui existent et sont actifs. */
+async function loadPinSubjects(ids) {
+  if (ids.length === 0) return [];
+  return sequelize.query(
+    `SELECT id, username, avatar FROM users WHERE id IN (:ids) AND is_active = TRUE`,
+    { replacements: { ids }, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * GET /api/nf-map/pin/:userId.png?v=precise|city|selected|self|ghost&d=3
+ *
+ * `d` est la densité de l'écran demandeur. iOS charge l'image avec
+ * `scale: RCTScreenScale()` et Android dessine le bitmap à sa taille en
+ * pixels : les deux veulent donc `points × densité`, et c'est l'app qui sait
+ * laquelle elle a.
+ */
+router.get('/pin/:userId.png', pinLimiter, async (req, res) => {
+  try {
+    const [subject] = await loadPinSubjects([req.params.userId]);
+    if (!subject) return res.status(404).end();
+
+    const png = await nfMapPin.renderPersonPin({
+      username: subject.username,
+      avatar: subject.avatar,
+      // Le libellé vient de l'appelant pour « Toi » et « Toi · invisible », qui
+      // ne sont pas des pseudos. Tronqué : une étiquette est une étiquette.
+      label: String(req.query.label || subject.username).slice(0, 24),
+      variant: String(req.query.v || 'precise'),
+      density: req.query.d,
+    });
+
+    return sendPng(res, png);
+  } catch (error) {
+    logger.error(`[nfMap] pin: ${error.message}`);
+    return res.status(500).end();
+  }
+});
+
+/**
+ * GET /api/nf-map/cluster.png?ids=a,b,c&count=7&d=3
+ *
+ * `ids` ne porte QUE les visages montrés — trois au plus. Envoyer la
+ * composition entière d'un groupe de quarante allongerait l'URL sans rien
+ * ajouter à l'image, et ferait rater le cache à chaque fois qu'un membre
+ * lointain bouge.
+ */
+router.get('/cluster.png', pinLimiter, async (req, res) => {
+  try {
+    const ids = String(req.query.ids || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean)
+      .slice(0, nfMapPin.CLUSTER.maxFaces);
+
+    const count = Math.max(ids.length, Math.min(9999, Number(req.query.count) || 0));
+    const subjects = await loadPinSubjects(ids);
+    if (subjects.length === 0) return res.status(404).end();
+
+    // L'ordre demandé fait foi : c'est lui qui décide quel visage est devant,
+    // et il doit rester le même d'un rendu à l'autre pour que le cache serve.
+    const byId = new Map(subjects.map((subject) => [String(subject.id), subject]));
+    const faces = ids.map((id) => byId.get(String(id))).filter(Boolean);
+
+    const png = await nfMapPin.renderClusterPin({ faces, count, density: req.query.d });
+    return sendPng(res, png);
+  } catch (error) {
+    logger.error(`[nfMap] cluster: ${error.message}`);
+    return res.status(500).end();
+  }
+});
 
 /** GET /api/nf-map/me — mes réglages de partage. */
 router.get('/me', guard, async (req, res) => {
