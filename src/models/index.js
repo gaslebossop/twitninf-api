@@ -69,6 +69,11 @@ const TweetVelocityAlertModule = require('./TweetVelocityAlert');
 const UsernameListingModule = require('./UsernameListing');
 const UsernameSaleModule = require('./UsernameSale');
 const UsernameReservationModule = require('./UsernameReservation');
+const DailySpotlight = require('./DailySpotlight');
+// Concours : cagnotte attachée à un tweet, conditions de participation et
+// tirage automatique à l'échéance.
+const Contest = require('./Contest');
+const ContestEntry = require('./ContestEntry');
 
 // Créer l'instance Sequelize
 const sequelize = new Sequelize(config.database);
@@ -151,6 +156,9 @@ StoryView.initStoryViewModel(sequelize);
 StoryHighlight.initStoryHighlightModel(sequelize);
 StoryHighlightItem.initStoryHighlightItemModel(sequelize);
 TweetTranslation.initTweetTranslationModel(sequelize);
+DailySpotlight.initDailySpotlightModel(sequelize);
+Contest.initContestModel(sequelize);
+ContestEntry.initContestEntryModel(sequelize);
 const UnbanTicketModel = UnbanTicketModule(sequelize);
 const SupportTicketModel = SupportTicketModule(sequelize);
 const SupportTicketMessageModel = SupportTicketMessageModule(sequelize);
@@ -907,6 +915,24 @@ Story.hasMany(StoryView, {
   as: 'views',
   onDelete: 'CASCADE'
 });
+
+// Association DailySpotlight
+DailySpotlight.belongsTo(Tweet, {
+  foreignKey: 'tweet_id',
+  as: 'tweet'
+});
+
+// Associations Concours
+Contest.belongsTo(Tweet, { foreignKey: 'tweet_id', as: 'tweet' });
+Tweet.hasOne(Contest, { foreignKey: 'tweet_id', as: 'contest' });
+Contest.belongsTo(User, { foreignKey: 'creator_id', as: 'creator' });
+Contest.hasMany(ContestEntry, {
+  foreignKey: 'contest_id',
+  as: 'entries',
+  onDelete: 'CASCADE'
+});
+ContestEntry.belongsTo(Contest, { foreignKey: 'contest_id', as: 'contest' });
+ContestEntry.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 
 StoryView.belongsTo(Story, {
   foreignKey: 'story_id',
@@ -1800,6 +1826,9 @@ module.exports = {
   PolicierCongoContract: PolicierCongoContractModel,
   MiningRound: MiningRoundModel,
   CasinoBet: CasinoBetModel,
+  DailySpotlight,
+  Contest,
+  ContestEntry,
   testConnection,
   syncDatabase,
   closeConnection

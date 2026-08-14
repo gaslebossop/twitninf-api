@@ -744,6 +744,7 @@ router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
       ageRows,
       ageCoverageRows,
       countryRows,
+      cityRows,
       locationRows,
       contentRows,
       profile,
@@ -821,6 +822,22 @@ router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
         ORDER BY audience_count DESC, label
         LIMIT 12
       `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
+      sequelize.query(`${audienceEventsCte}, latest_locations AS (
+        SELECT DISTINCT ON (user_id) user_id, country_code, city
+        FROM user_location_events
+        WHERE permission_status = 'granted' AND city IS NOT NULL AND city <> ''
+        ORDER BY user_id, captured_at DESC
+      )
+        SELECT
+          ll.city || COALESCE(', ' || ll.country_code, '') AS label,
+          ll.country_code,
+          COUNT(*) AS audience_count
+        FROM audience_users au JOIN latest_locations ll ON ll.user_id = au.actor_id
+        GROUP BY ll.city, ll.country_code
+        HAVING COUNT(*) >= 5
+        ORDER BY audience_count DESC, label
+        LIMIT 12
+      `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
       sequelize.query(`
         SELECT
           COUNT(*) FILTER (WHERE permission_status = 'granted') AS captured_sessions,
@@ -875,6 +892,7 @@ router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
     const declaredAudience = int(ageCoverageRows[0]?.declared_users);
     const visibleAgeTotal = ageRows.reduce((sum, row) => sum + int(row.audience_count), 0);
     const visibleCountryTotal = countryRows.reduce((sum, row) => sum + int(row.audience_count), 0);
+    const visibleCityTotal = cityRows.reduce((sum, row) => sum + int(row.audience_count), 0);
 
     res.json({
       success: true,
@@ -916,6 +934,12 @@ router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
             code: row.country_code,
             count: int(row.audience_count),
             percentage: visibleCountryTotal > 0 ? Math.round(int(row.audience_count) * 1000 / visibleCountryTotal) / 10 : 0,
+          })),
+          cities: cityRows.map((row) => ({
+            label: row.label,
+            code: row.country_code,
+            count: int(row.audience_count),
+            percentage: visibleCityTotal > 0 ? Math.round(int(row.audience_count) * 1000 / visibleCityTotal) / 10 : 0,
           })),
           privacyThreshold: 5,
         },

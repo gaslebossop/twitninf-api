@@ -30,8 +30,12 @@ const schema = {
       key: 'id'
     }
   },
+  // 32 et non 8 : un emoji composé dépasse largement 8 caractères — une
+  // famille « 👨‍👩‍👧‍👦 » en fait 11, un drapeau arc-en-ciel 6, une teinte de
+  // peau 4. Avec 8, le sélecteur libre échouait en « value too long » côté
+  // Postgres. Doit rester aligné sur MAX_EMOJI_LENGTH (utils/emoji).
   emoji: {
-    type: DataTypes.STRING(8),
+    type: DataTypes.STRING(32),
     allowNull: false
   }
 };

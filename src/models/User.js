@@ -282,6 +282,39 @@ const userSchema = {
     defaultValue: null
   },
 
+  /**
+   * Programme de monétisation : condition supplémentaire à l'abonnement
+   * payant. `approved` est nécessaire pour toucher des récompenses tweet
+   * (voir `TweetMonetizationService.isAuthorMonetizable`), même avec un
+   * abonnement actif. Passe toujours par une validation manuelle, même
+   * quand les seuils (vues, abonnés, qualité) sont atteints.
+   */
+  monetization_program_status: {
+    type: DataTypes.ENUM('none', 'pending', 'approved', 'rejected'),
+    allowNull: false,
+    defaultValue: 'none'
+  },
+  monetization_applied_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    defaultValue: null
+  },
+  monetization_reviewed_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    defaultValue: null
+  },
+  monetization_reviewed_by: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    defaultValue: null
+  },
+  monetization_rejection_reason: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+    defaultValue: null
+  },
+
   /** Solde du générateur de tweets à la demande (5 offerts par achat payant). */
   tweet_generation_credits: {
     type: DataTypes.INTEGER,

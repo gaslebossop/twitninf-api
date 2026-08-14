@@ -278,7 +278,7 @@ const tweetSchema = {
 
   // Type de tweet
   tweet_type: {
-    type: DataTypes.ENUM('tweet', 'reply', 'retweet', 'quote', 'video'),
+    type: DataTypes.ENUM('tweet', 'reply', 'retweet', 'quote', 'video', 'concours'),
     defaultValue: 'tweet'
   },
 

@@ -81,6 +81,7 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const userRoutes = require('./routes/userRoutes');
 const messageRoutes = require('./routes/messageRoutes');
 const storyRoutes = require('./routes/storyRoutes');
+const spotlightRoutes = require('./routes/spotlightRoutes');
 const moderationRoutes = require('./routes/moderationRoutes');
 const recommendationRoutes = require('./routes/recommendationRoutes');
 const behaviorRoutes = require('./routes/behaviorRoutes');
@@ -92,6 +93,7 @@ const newEconomyRoutes = require('./routes/newEconomyRoutes');
 const userCurrencyRoutes = require('./routes/userCurrencyRoutes');
 const casinoRoutes = require('./routes/casinoRoutes');
 const tweetMonetizationRoutes = require('./routes/tweetMonetizationRoutes');
+const monetizationProgramRoutes = require('./routes/monetizationProgramRoutes');
 const eventRoutes = require('./routes/events');
 const functionalEventRoutes = require('./routes/functionalEventRoutes');
 const featureFlagRoutes = require('./routes/featureFlagRoutes');
@@ -125,6 +127,7 @@ const paidContentRoutes = require('./routes/paidContentRoutes');
 const scheduledTweetRoutes = require('./routes/scheduledTweetRoutes');
 const insightsRoutes = require('./routes/insightsRoutes');
 const usernameMarketRoutes = require('./routes/usernameMarketRoutes');
+const contestRoutes = require('./routes/contestRoutes');
 const infrastructureInternalRoutes = require('./routes/infrastructureInternalRoutes');
 const infrastructureAdminRoutes = require('./routes/infrastructureAdminRoutes');
 const scheduledTweetService = require('./services/scheduledTweetService');
@@ -438,6 +441,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/messages', messageRoutes);
 
 app.use('/api/stories', storyRoutes);
+app.use('/api/spotlight', spotlightRoutes);
 
 app.use('/api/moderation', moderationRoutes);
 
@@ -461,6 +465,7 @@ app.use('/api/currencies', userCurrencyRoutes);
 app.use('/api/casino', casinoRoutes);
 
 app.use('/api/tweet-monetization', tweetMonetizationRoutes);
+app.use('/api/monetization-program', monetizationProgramRoutes);
 
 app.use('/api/events', eventRoutes);
 
@@ -500,6 +505,9 @@ app.use('/api/paid-content', paidContentRoutes);
 app.use('/api/scheduled-tweets', scheduledTweetRoutes);
 app.use('/api/insights', insightsRoutes);
 app.use('/api/username-market', usernameMarketRoutes);
+
+// Concours : cagnotte attachée à un tweet, participations et tirage.
+app.use('/api/contests', contestRoutes);
 
 app.use('/api/verification', verificationRoutes);
 
@@ -887,6 +895,41 @@ app.use((error, req, res, next) => {
 
 // Tâches cron pour la maintenance
 function setupCronJobs() {
+  /**
+   * Spotlight : calcule le tweet le plus liké d'hier (jour calendaire
+   * Europe/Paris), une fois par nuit. La fenêtre "hier" est recalculée dans
+   * le service lui-même à partir du fuseau cible, pas de l'heure de
+   * déclenchement du cron — celle-ci tourne dans le fuseau du process, qui
+   * n'est pas garanti être Europe/Paris.
+   */
+  cron.schedule('10 0 * * *', async () => {
+    try {
+      await require('./services/spotlightService').computeYesterdaySpotlight();
+    } catch (error) {
+      logger.error('[Spotlight] Erreur lors du calcul quotidien:', error);
+    }
+  });
+
+  /**
+   * Concours : tirage des concours arrivés à échéance, toutes les minutes.
+   *
+   * Une minute et pas une heure : un concours annoncé « fin à 20 h 00 » dont
+   * les gagnants tombent à 20 h 47 passe pour truqué. Le passage est
+   * quasiment gratuit quand rien n'est échu — un SELECT sur l'index
+   * (status, ends_at) qui ne ramène rien.
+   *
+   * Le service prend chaque concours par un UPDATE conditionnel
+   * open → drawing, donc deux exécutions qui se chevauchent ne tirent jamais
+   * deux fois le même.
+   */
+  cron.schedule('* * * * *', async () => {
+    try {
+      await require('./services/contestService').drawDueContests();
+    } catch (error) {
+      logger.error('[Concours] tirage périodique impossible:', error.message);
+    }
+  });
+
   /**
    * Carte NF : effacement des positions expirées, tous les quarts d'heure.
    *

@@ -188,6 +188,12 @@ const modelOptions = {
       fields: ['created_at']
     },
     {
+      // Sert l'agrégation "plus liké de la veille" (spotlightService) :
+      // filtrer par created_at puis regrouper par tweet_id.
+      name: 'tweet_likes_created_at_tweet_id',
+      fields: ['created_at', 'tweet_id']
+    },
+    {
       fields: ['like_type']
     }
   ],

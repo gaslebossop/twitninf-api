@@ -26,6 +26,20 @@ async function runAutoMigration() {
       logger.warn('⚠️ uuid-ossp (ignoré si pas les droits):', e.message);
     }
 
+    // Concours : nouvelle valeur du type de tweet. `sequelize.sync()` crée
+    // bien les tables `contests` / `contest_entries` à partir des modèles,
+    // mais il n'ajoute JAMAIS une valeur à un ENUM déjà créé en base : sans
+    // ce bloc, toute publication de concours échoue en production sur
+    // « invalid input value for enum enum_tweets_tweet_type: "concours" ».
+    try {
+      await sequelize.query(`
+        ALTER TYPE "enum_tweets_tweet_type" ADD VALUE IF NOT EXISTS 'concours';
+      `);
+      logger.info('✅ Type de tweet "concours" vérifié');
+    } catch (e) {
+      logger.warn('⚠️ enum tweet_type concours:', e.message);
+    }
+
     // Consentement RGPD. Le DDL doit vivre ICI et pas seulement dans
     // database/migrate.js : ce dernier est un script en ligne de commande, il
     // n'est pas joué au démarrage. `sequelize.sync()` crée bien la table
@@ -96,6 +110,30 @@ async function runAutoMigration() {
       logger.info('✅ Table feed_hashtag_rules vérifiée');
     } catch (e) {
       logger.warn('⚠️ feed_hashtag_rules:', e.message);
+    }
+
+    // Index Spotlight : `sync()` crée bien la nouvelle table daily_spotlights,
+    // mais n'ajoute aucun index à une table EXISTANTE comme tweet_likes.
+    try {
+      await sequelize.query(`
+        CREATE INDEX IF NOT EXISTS tweet_likes_created_at_tweet_id
+          ON tweet_likes (created_at, tweet_id);
+      `);
+      logger.info('✅ Index tweet_likes_created_at_tweet_id vérifié');
+    } catch (e) {
+      logger.warn('⚠️ index tweet_likes (Spotlight):', e.message);
+    }
+
+    // Réactions aux messages : le sélecteur libre accepte les emojis composés,
+    // qui dépassent les 8 caractères d'origine (« 👨‍👩‍👧‍👦 » en fait 11).
+    // `sync()` ne modifie jamais une colonne existante — d'où ce DDL.
+    try {
+      await sequelize.query(`
+        ALTER TABLE message_reactions ALTER COLUMN emoji TYPE VARCHAR(32);
+      `);
+      logger.info('✅ Colonne message_reactions.emoji vérifiée (VARCHAR 32)');
+    } catch (e) {
+      logger.warn('⚠️ message_reactions.emoji:', e.message);
     }
 
     // Vérifier si les colonnes de modération existent

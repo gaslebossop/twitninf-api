@@ -40,3 +40,12 @@ src/megallm-client/megallm-session.json
 # Medias envoyes par les utilisateurs, crees a l execution
 src/public/tweets/
 src/public/stories/
+
+# « conTESTs » contient « test » : la regle *test*.js plus haut excluait donc
+# silencieusement TOUT le module concours (Contest.js, contestRoutes.js,
+# contestService.js, la migration...). Le code partait a la poubelle sans le
+# moindre avertissement, et l'API deployee n'avait tout simplement pas la
+# fonctionnalite. Exception explicite plutot que de toucher a la regle
+# generale, qui protege de vrais scripts de test.
+!*contest*.js
+!*Contest*.js

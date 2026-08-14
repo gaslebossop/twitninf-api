@@ -9,6 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
+const { isSingleEmoji } = require('../utils/emoji');
 const {
   sequelize,
   User,
@@ -37,8 +38,6 @@ const mediaUpload = multer({
   }
 });
 
-/** Barre de réactions rapides façon Instagram DM — un emoji hors de cette liste est refusé. */
-const ALLOWED_REACTION_EMOJIS = ['❤️', '😂', '😮', '😢', '😡', '👍'];
 
 function serializeReaction(reaction) {
   const plain = typeof reaction.toJSON === 'function' ? reaction.toJSON() : reaction;
@@ -1494,7 +1493,7 @@ router.post('/:messageId/reactions', authenticateToken, denySuspended, async (re
     const userId = req.user.id;
     const messageId = req.params.messageId;
     const emoji = String(req.body?.emoji || '').trim();
-    if (!ALLOWED_REACTION_EMOJIS.includes(emoji)) {
+    if (!isSingleEmoji(emoji)) {
       return res.status(400).json({ success: false, message: 'Emoji non supporté' });
     }
 
