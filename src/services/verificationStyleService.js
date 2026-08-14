@@ -41,12 +41,28 @@ class VerificationStyleService {
    */
   static async changeUserVerificationStyle(userId, style) {
     try {
+      // `verification_style` fait partie de la selection, alors qu'on ne
+      // chargeait que `id` et `verified`.
+      //
+      // Ecrire une colonne absente de l'instance chargee, c'est demander a
+      // Sequelize de mettre a jour un champ dont il ignore la valeur
+      // precedente : il n'a alors aucun moyen de savoir si elle change, et le
+      // comportement depend de la version. On charge donc ce qu'on ecrit.
+      //
+      // Effet de bord utile : la comparaison ci-dessous devient possible, et
+      // un re-choix du meme style ne declenche plus d'ecriture inutile.
       const user = await User.findByPk(userId, {
-        attributes: ['id', 'verified']
+        attributes: ['id', 'verified', 'verification_style']
       });
 
       if (!user || !user.verified) {
         return false;
+      }
+
+      if (user.verification_style === style) {
+        // Deja ce style : succes, sans ecriture. Repondre `false` ferait
+        // afficher « impossible de changer » pour une demande deja satisfaite.
+        return true;
       }
 
       // Vérifier que l'utilisateur peut utiliser ce style
