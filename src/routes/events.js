@@ -6,7 +6,46 @@
 const express = require('express');
 const router = express.Router();
 const eventController = require('../controllers/eventController');
+const twEventController = require('../controllers/twEventController');
 const { authenticateToken, requireAdmin } = require('../middleware/authMiddleware');
+
+// ─── Système unifié ────────────────────────────────────────────────────────
+//
+// Ces trois routes remplacent le trio /api/events (couleurs) +
+// /api/functional-events (bascules) + /api/user-challenges (quêtes), que rien
+// ne reliait qu'un slug recopié à la main. Les anciennes restent servies le
+// temps que les appelants migrent.
+//
+// ⚠️ `/current` est déclarée AVANT `/:id`, sinon le paramètre l'avalerait et
+// la route unifiée répondrait « événement introuvable » pour l'id « current ».
+
+/**
+ * GET /events/current
+ * L'événement en cours et la progression du compte. `event: null` quand il n'y
+ * a rien — ce qui est la réponse normale onze mois sur douze.
+ */
+router.get('/current', authenticateToken, twEventController.getCurrent);
+
+/**
+ * POST /events/:slug/quests/:questId/claim
+ * Réclame une récompense. Idempotent : la seconde demande est refusée.
+ */
+router.post(
+  '/:slug/quests/:questId/claim',
+  authenticateToken,
+  twEventController.claimQuest
+);
+
+/**
+ * POST /events/:slug/quests/:questId/report
+ * Signale un geste que seul le client peut constater (une navigation).
+ * N'accorde jamais rien : incrémente un compteur que la remise revérifie.
+ */
+router.post(
+  '/:slug/quests/:questId/report',
+  authenticateToken,
+  twEventController.reportQuestSignal
+);
 
 // Routes publiques (accessibles à tous les utilisateurs authentifiés)
 

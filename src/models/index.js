@@ -27,6 +27,11 @@ const UserWallet = require('./UserWallet');
 const Transaction = require('./Transaction');
 const Event = require('./Event');
 const FunctionalEvent = require('./FunctionalEvent');
+// Systeme d'evenements unifie — remplace le trio Event / FunctionalEvent /
+// UserChallenge, conserves le temps que les anciens appelants soient migres.
+const TwEvent = require('./TwEvent');
+const TwQuestClaim = require('./TwQuestClaim');
+const TwQuestSignal = require('./TwQuestSignal');
 const FeatureFlagModule = require('./FeatureFlag');
 const VerificationRequest = require('./VerificationRequest');
 const Advertisement = require('./Advertisement');
@@ -129,6 +134,11 @@ const VerificationRequestModel = VerificationRequest(sequelize);
 // Initialiser le modèle d'événements
 const EventModel = Event(sequelize);
 const FunctionalEventModel = FunctionalEvent(sequelize);
+
+// Evenements unifies : definition, reclamations, signaux de navigation.
+const TwEventModel = TwEvent(sequelize);
+const TwQuestClaimModel = TwQuestClaim(sequelize);
+const TwQuestSignalModel = TwQuestSignal(sequelize);
 
 // Drapeaux de fonctionnalité — déploiement progressif et ciblage par attributs
 const FeatureFlag = FeatureFlagModule(sequelize);
@@ -1786,6 +1796,9 @@ module.exports = {
   Transaction: TransactionModel,
   Event: EventModel,
   FunctionalEvent: FunctionalEventModel,
+  TwEvent: TwEventModel,
+  TwQuestClaim: TwQuestClaimModel,
+  TwQuestSignal: TwQuestSignalModel,
   FeatureFlag,
   VerificationRequest: VerificationRequestModel,
   BotReputation,
