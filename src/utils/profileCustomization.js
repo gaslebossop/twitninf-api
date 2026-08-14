@@ -53,6 +53,43 @@ const PROFILE_TITLE_MAX = 40;
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
 /**
+ * Titres qui ne peuvent PAS être écrits librement.
+ *
+ * ── Le problème ───────────────────────────────────────────────────────────
+ * Le titre de profil est un champ de texte libre. Sans cette liste,
+ * n'importe quel compte payant tape « Invité d'honneur » et l'obtient sans
+ * avoir rien fait — la récompense d'événement ne vaut alors strictement rien,
+ * et pire, elle dévalue celle de ceux qui l'ont gagnée.
+ *
+ * Un titre réservé n'est acceptés que s'il figure dans les titres POSSÉDÉS du
+ * compte (`profile_customization.titles`), écrits par le serveur seul.
+ *
+ * ── Les limites, assumées ─────────────────────────────────────────────────
+ * La comparaison est normalisée (casse, accents, espaces multiples), donc
+ * « invite d'honneur » et « INVITÉ  D'HONNEUR » sont bien bloqués. Elle ne
+ * protège pas d'une imitation volontaire (« Invité d'honneur. », « Ínvité »),
+ * et c'est acceptable : le but est d'empêcher qu'on obtienne le titre SANS LE
+ * SAVOIR en le recopiant, pas de gagner une course aux homoglyphes.
+ */
+const RESERVED_TITLES = [
+  "Invité d'honneur",
+  'Généreux',
+  'Là depuis la première bougie',
+];
+
+/** Casse, accents et espaces multiples écartés — voir `RESERVED_TITLES`. */
+function normalizeTitle(value) {
+  return String(value)
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const RESERVED_TITLES_NORMALIZED = RESERVED_TITLES.map(normalizeTitle);
+
+/**
  * Habillages POSSÉDÉS, gagnés en récompense d'événement.
  *
  * ── Pourquoi ils ne peuvent pas venir de la requête ───────────────────────
@@ -67,6 +104,11 @@ const HEX_COLOR = /^#[0-9a-f]{6}$/i;
  * d'événement — quelqu'un qui change sa couleur d'accent perdrait la police
  * qu'il a gagnée.
  */
+function ownedTitles(existing) {
+  const list = existing && Array.isArray(existing.titles) ? existing.titles : [];
+  return list.filter((t) => typeof t === 'string');
+}
+
 function ownedTokens(existing) {
   const list = existing && Array.isArray(existing.unlocked) ? existing.unlocked : [];
   return list.filter((token) => typeof token === 'string');
@@ -135,7 +177,20 @@ function sanitizeCustomization(input, tier, { verified = false, existing = null 
   }
   if (paid && typeof source.profile_title === 'string') {
     const title = source.profile_title.trim().replace(/\s+/g, ' ').slice(0, PROFILE_TITLE_MAX);
-    if (title) output.profile_title = title;
+    if (title) {
+      // Un titre réservé ne s'écrit pas : il se gagne. On garde alors le titre
+      // précédent plutôt que de vider le champ — perdre son titre parce qu'on
+      // a tenté d'en écrire un autre serait une punition disproportionnée.
+      const normalized = normalizeTitle(title);
+      const reserved = RESERVED_TITLES_NORMALIZED.includes(normalized);
+      const ownsIt = ownedTitles(existing).some((t) => normalizeTitle(t) === normalized);
+
+      if (!reserved || ownsIt) {
+        output.profile_title = title;
+      } else if (existing && typeof existing.profile_title === 'string') {
+        output.profile_title = existing.profile_title;
+      }
+    }
   }
   if (paid && typeof source.about_me === 'string') {
     const about = source.about_me.trim().slice(0, 300);
@@ -145,6 +200,11 @@ function sanitizeCustomization(input, tier, { verified = false, existing = null 
   // le sanitizer construit un objet neuf, donc sans cette ligne la premiere
   // sauvegarde de profil effacerait les recompenses d'evenement.
   if (owned.length > 0) output.unlocked = owned;
+  // Même report, même raison : sans cette ligne, la première sauvegarde de
+  // profil effacerait les titres gagnés — et le contrôle ci-dessus, qui s'y
+  // adosse, laisserait alors passer n'importe qui.
+  const titles = ownedTitles(existing);
+  if (titles.length > 0) output.titles = titles;
 
   return output;
 }
