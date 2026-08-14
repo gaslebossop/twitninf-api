@@ -1764,6 +1764,10 @@ router.put('/me/profile-customization', [authenticateToken, denySuspended], asyn
 
     const customization = sanitizeCustomization(req.body?.customization ?? req.body, tier, {
       verified: !!user.verified,
+      // Les habillages possédés viennent de l'ENREGISTREMENT, jamais du corps
+      // de la requête : sinon n'importe qui se les accorde en postant une
+      // liste. Voir `sanitizeCustomization`.
+      existing: user.profile_customization,
     });
     user.profile_customization = customization;
     // `profile_customization` est un JSONB muté par assignation : sans ce

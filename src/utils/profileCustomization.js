@@ -52,12 +52,46 @@ const PROFILE_EFFECTS = ['none', 'sparkles', 'embers', 'bubbles', 'snow'];
 const PROFILE_TITLE_MAX = 40;
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
-function sanitizeCustomization(input, tier, { verified = false } = {}) {
+/**
+ * Habillages POSSÉDÉS, gagnés en récompense d'événement.
+ *
+ * ── Pourquoi ils ne peuvent pas venir de la requête ───────────────────────
+ * `owned` est lu sur l'enregistrement EXISTANT, jamais sur le corps envoyé par
+ * le client. C'est ce qui empêche n'importe qui de s'accorder tous les
+ * cosmétiques en postant `unlocked: [...]` — le seul écrivain légitime est
+ * `eventQuestService.grantCosmetic`, après une quête réellement terminée.
+ *
+ * ── Et pourquoi il faut le réinjecter ─────────────────────────────────────
+ * Le sanitizer construit un objet NEUF : tout champ non recopié disparaît. Sans
+ * ce report, la première sauvegarde de profil effacerait les récompenses
+ * d'événement — quelqu'un qui change sa couleur d'accent perdrait la police
+ * qu'il a gagnée.
+ */
+function ownedTokens(existing) {
+  const list = existing && Array.isArray(existing.unlocked) ? existing.unlocked : [];
+  return list.filter((token) => typeof token === 'string');
+}
+
+/**
+ * @param existing enregistrement actuel, source des habillages possédés. Sans
+ *   lui, la fonction se comporte comme avant : seul le palier ouvre les droits.
+ */
+function sanitizeCustomization(input, tier, { verified = false, existing = null } = {}) {
   const source = input && typeof input === 'object' ? input : {};
   const output = {};
   // Un compte certifié gratuit passe la porte de la route pour son seul effet
   // de nom : tout le reste reste payant, d'où ce garde-fou champ par champ.
   const paid = tier !== TIER.FREE;
+
+  const owned = ownedTokens(existing);
+  /**
+   * Palier OU possession.
+   *
+   * Un habillage gagné à un événement est acquis À VIE : le refuser parce que
+   * l'abonnement a expiré reviendrait à reprendre une récompense, ce qui vide
+   * de sens la promesse « on ne la reverra pas ».
+   */
+  const allows = (slot, value) => tier === TIER.PRO || owned.includes(`${slot}:${value}`);
 
   if (paid && typeof source.accent_color === 'string' && HEX_COLOR.test(source.accent_color.trim())) {
     output.accent_color = source.accent_color.trim().toLowerCase();
@@ -73,13 +107,15 @@ function sanitizeCustomization(input, tier, { verified = false } = {}) {
   }
   // Les décorations d'avatar sont l'avantage exclusif du palier Pro.
   if (PROFILE_AVATAR_DECORATIONS.includes(source.avatar_decoration)) {
-    output.avatar_decoration = tier === TIER.PRO ? source.avatar_decoration : 'none';
+    output.avatar_decoration = allows('avatar_decoration', source.avatar_decoration)
+      ? source.avatar_decoration
+      : 'none';
   }
   // Même règle pour les deux habillages animés arrivés ensuite : ils sont la
   // contrepartie visible du palier Pro, un compte Plus les voit mais ne les
   // enregistre pas.
   if (PROFILE_NAME_FONTS.includes(source.name_font)) {
-    output.name_font = tier === TIER.PRO ? source.name_font : 'system';
+    output.name_font = allows('name_font', source.name_font) ? source.name_font : 'system';
   }
   if (PROFILE_NAME_EFFECTS.includes(source.name_effect)) {
     // Deux droits différents selon l'effet : « Certifié » suit le badge, les
@@ -90,7 +126,9 @@ function sanitizeCustomization(input, tier, { verified = false } = {}) {
     output.name_effect = allowed ? source.name_effect : 'none';
   }
   if (PROFILE_EFFECTS.includes(source.profile_effect)) {
-    output.profile_effect = tier === TIER.PRO ? source.profile_effect : 'none';
+    output.profile_effect = allows('profile_effect', source.profile_effect)
+      ? source.profile_effect
+      : 'none';
   }
   if (PROFILE_NAME_SIZES.includes(source.name_size)) {
     output.name_size = tier === TIER.PRO ? source.name_size : 'normal';
@@ -103,6 +141,11 @@ function sanitizeCustomization(input, tier, { verified = false } = {}) {
     const about = source.about_me.trim().slice(0, 300);
     if (about) output.about_me = about;
   }
+  // Report des possessions, en DERNIER et depuis l'enregistrement existant :
+  // le sanitizer construit un objet neuf, donc sans cette ligne la premiere
+  // sauvegarde de profil effacerait les recompenses d'evenement.
+  if (owned.length > 0) output.unlocked = owned;
+
   return output;
 }
 
