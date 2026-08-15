@@ -8,6 +8,7 @@ const { sequelize, User } = models;
 const forge = require('../services/featureProposalService');
 const logger = require('../utils/logger');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
+const { createAgentTaskIssue } = require('../services/forgeGithubIssue');
 
 /**
  * La Forge — les fonctionnalités proposées par les utilisateurs.
@@ -270,6 +271,11 @@ router.get('/queue', authenticateToken, requireStaff, async (req, res) => {
 
 router.patch('/proposals/:id', authenticateToken, requireStaff, async (req, res) => {
   try {
+    // Lu avant la décision pour distinguer un PASSAGE à "accepted" d'un
+    // simple ré-enregistrement (note modifiée, etc.) — sinon retoucher une
+    // idée déjà retenue rouvrirait une issue GitHub à chaque fois.
+    const before = await models.FeatureProposal.findByPk(req.params.id, { attributes: ['status'] });
+
     const result = await forge.decide(models, sequelize, req.staffId, req.params.id, {
       status: req.body?.status,
       rewardNf: req.body?.reward_nf,
@@ -278,6 +284,13 @@ router.patch('/proposals/:id', authenticateToken, requireStaff, async (req, res)
     if (!result.success) {
       return res.status(result.reason === 'not_found' ? 404 : 400).json(result);
     }
+
+    if (result.proposal.status === 'accepted' && before?.status !== 'accepted') {
+      // Ne bloque jamais la réponse au staff : le versement est déjà acté,
+      // et la routine horaire de secours rattrape même si ceci échoue.
+      createAgentTaskIssue(result.proposal).catch(() => {});
+    }
+
     return res.json(result);
   } catch (error) {
     // La trésorerie insuffisante remonte en exception depuis le grand livre :
