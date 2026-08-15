@@ -127,6 +127,8 @@ async function getSettings(sequelize, userId) {
       shared_at: null,
       expires_at: null,
       place_label: null,
+      latitude: null,
+      longitude: null,
       is_live: false,
     };
   }
@@ -137,6 +139,22 @@ async function getSettings(sequelize, userId) {
     place_label: row.place_label,
     shared_at: row.shared_at,
     expires_at: row.expires_at,
+    /**
+     * SA PROPRE position — jamais celle de quelqu'un d'autre.
+     *
+     * Cette route est authentifiée et ne lit que la ligne de l'appelant : lui
+     * rendre sa position ne publie rien, il vient de l'envoyer lui-même.
+     *
+     * C'est ce qui permet à un client qui n'a pas de GPS — l'app Windows — de
+     * se placer sur la carte : il reprend la dernière position poussée depuis
+     * le téléphone. Sans ça, un ordinateur de bureau n'a aucun moyen de savoir
+     * où est son utilisateur, et l'épingle « Toi » n'existerait pas chez lui.
+     *
+     * En mode « ville » c'est déjà la position arrondie qui est stockée — voir
+     * `positionForMode` : la précision exacte n'a même pas été écrite.
+     */
+    latitude: row.latitude === null ? null : Number(row.latitude),
+    longitude: row.longitude === null ? null : Number(row.longitude),
     // Une position connue et un mode non fantome suffisent : elle ne se
     // perime plus. `shared_at` reste disponible pour dire DEPUIS QUAND, ce
     // qui est une information d'affichage, pas de visibilite.
