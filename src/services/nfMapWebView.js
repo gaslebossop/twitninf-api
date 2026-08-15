@@ -99,7 +99,20 @@ const PALETTES = {
     highway: '#FFFFFF',
     water: '#C7DCEF',
     waterLabel: '#5B7C99',
-    label: '#7A7A7E',
+    /**
+     * Le texte de la carte : noms de rues et d'axes.
+     *
+     * Remonté de #7A7A7E / #6B6B6B (clair / sombre). Ces valeurs venaient de
+     * l'intention « le fond doit rester le plus muet possible », qui est la
+     * bonne pour les APLATS — la terre, les parcs, le bâti. Appliquée au
+     * texte, elle ne le rend pas discret, elle le rend illisible : un nom de
+     * rue qu'on ne peut pas lire n'est pas un fond sobre, c'est un calque
+     * qu'on paie en rendu sans jamais en profiter.
+     *
+     * La discrétion du texte est portée par le HALO et par le plancher de
+     * zoom, pas par un gris trop proche du sol.
+     */
+    label: '#5E5E63',
     labelHalo: '#FFFFFF',
     locality: '#3C3C40',
   },
@@ -129,9 +142,10 @@ const PALETTES = {
   highway: '#454545',
   water: '#0C1420',
   waterLabel: '#3A4A5A',
-  label: '#6B6B6B',
+  /** Voir la note du thème clair : remonté de #6B6B6B, illisible sur #111111. */
+  label: '#9B9B9B',
   labelHalo: '#0A0A0A',
-  locality: '#9A9A9A',
+  locality: '#C4C4C4',
   },
 };
 
@@ -163,9 +177,28 @@ const HIDDEN_LAYERS = new Set([
   'poi_stadium',
   'poi_park',
   'housenumber',
-  'roadname_minor',
   'place_continent',
 ]);
+
+/**
+ * Calques repoussés à un zoom minimum, au lieu d'être éteints.
+ *
+ * `roadname_minor` était dans `HIDDEN_LAYERS`, et la raison invoquée était
+ * juste : à l'échelle d'une ville, les noms de petites rues passent sous des
+ * épingles de 96 points et ne font que du bruit.
+ *
+ * Mais l'éteindre partout enlève aussi le cas où il est le plus utile —
+ * quand on est zoomé sur un quartier, qu'il ne reste qu'une poignée
+ * d'épingles à l'écran, et qu'on cherche justement à savoir DANS QUELLE RUE
+ * se trouve quelqu'un. Le problème n'était pas le calque, c'était son
+ * échelle.
+ *
+ * 15, c'est le niveau où l'on voit un quartier plutôt qu'une ville. En
+ * dessous, rien ne change par rapport à avant.
+ */
+const LAYER_MIN_ZOOM = {
+  roadname_minor: 15,
+};
 
 /**
  * Couleur d'un calque, d'après son rôle.
@@ -216,8 +249,15 @@ function applyPalette(style, theme) {
   const PALETTE = PALETTES[theme];
   const layers = [];
 
-  for (const layer of style.layers || []) {
-    if (HIDDEN_LAYERS.has(layer.id)) continue;
+  for (const raw of style.layers || []) {
+    if (HIDDEN_LAYERS.has(raw.id)) continue;
+
+    // Le plancher de zoom s'applique AVANT tout le reste, et ne descend jamais
+    // celui du fournisseur : `Math.max` — un calque déjà repoussé plus loin
+    // qu'on ne le demande a ses raisons.
+    const floor = LAYER_MIN_ZOOM[raw.id];
+    const layer =
+      floor === undefined ? raw : { ...raw, minzoom: Math.max(raw.minzoom ?? 0, floor) };
 
     const color = paletteFor(layer.id, layer['source-layer'], PALETTE);
     if (color === 'hidden') continue;
