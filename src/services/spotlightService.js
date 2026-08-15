@@ -5,9 +5,10 @@
  * lecture côté client.
  */
 
-const { Op, fn, col, literal } = require('sequelize');
+const { Op, col, literal } = require('sequelize');
 const logger = require('../utils/logger');
 const { instantForZonedHour, zonedDayKey } = require('../utils/timezone');
+const { SUPER_HEART_SPOTLIGHT_WEIGHT } = require('../utils/superHeartHelpers');
 
 const SPOTLIGHT_TIME_ZONE = 'Europe/Paris';
 
@@ -50,7 +51,15 @@ async function computeYesterdaySpotlight() {
       },
       required: true
     }],
-    attributes: ['tweet_id', [fn('COUNT', col('TweetLike.id')), 'like_count']],
+    attributes: [
+      'tweet_id',
+      // Un Super Cœur (pression longue, palier Pro) pèse plus qu'un like
+      // classique dans le classement — voir superHeartHelpers.
+      [
+        literal(`SUM(CASE WHEN "TweetLike"."is_super" THEN ${SUPER_HEART_SPOTLIGHT_WEIGHT} ELSE 1 END)`),
+        'like_count',
+      ],
+    ],
     group: ['tweet_id'],
     order: [[literal('like_count'), 'DESC']],
     raw: true

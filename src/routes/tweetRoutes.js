@@ -26,6 +26,8 @@ const { upload, videoService } = require('../services/videoService');
 const { requireFlag } = require('../middleware/featureFlagMiddleware');
 const tweetImageService = require('../services/tweetImageService');
 const logger = require('../utils/logger');
+const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
+const { maybeRenewSuperHearts, isSuperHeartEligible } = require('../utils/superHeartHelpers');
 
 /**
  * Réception des images de tweet. En mémoire puis recompressées : le fichier
@@ -2161,6 +2163,140 @@ router.post('/:id/like', [
 
   } catch (error) {
     logger.error('Erreur lors du like/unlike du tweet:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur interne du serveur'
+    });
+  }
+});
+
+/**
+ * POST /api/tweets/:id/super-like
+ * Pose un Super Cœur — pression longue sur le cœur côté mobile. Réservé aux
+ * abonnés Pro, solde limité renouvelé tous les `SUPER_HEART_RENEW_DAYS`
+ * jours (voir `src/utils/superHeartHelpers.js`).
+ *
+ * Idempotent une fois posé : rejouer l'appel sur un Super Cœur déjà en place
+ * ne consomme rien de plus. Le retirer se fait via la route `like` ci-dessus
+ * (elle détruit la ligne quel que soit `is_super`) et ne rend JAMAIS le
+ * cœur consommé — c'est la règle explicitement demandée par la proposition.
+ */
+router.post('/:id/super-like', [
+  authenticateToken,
+  checkUserBanStrict,
+  param('id').isUUID().withMessage('ID de tweet invalide'),
+  handleValidationErrors,
+  requireContentAccess(),
+], async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { tweet: requested, targetTweet: tweet, targetId: id } =
+      await resolveEngagementTarget(Tweet, req.params.id);
+    if (!requested) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tweet non trouvé'
+      });
+    }
+
+    const user = await User.findByPk(userId, {
+      attributes: ['id', 'premium', 'subscription_tier', 'subscription_expires_at', 'super_hearts_remaining', 'super_hearts_renew_at'],
+    });
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+    }
+
+    await maybeExpireSubscription(user);
+    await maybeRenewSuperHearts(user);
+
+    if (!isSuperHeartEligible(user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Le Super Cœur est réservé aux abonnés Pro.',
+        code: 'SUPER_HEART_NOT_ELIGIBLE',
+      });
+    }
+
+    const existingLike = await TweetLike.findOne({
+      where: { tweet_id: id, user_id: userId }
+    });
+
+    if (existingLike && existingLike.is_super) {
+      return res.json({
+        success: true,
+        message: 'Déjà en Super Cœur',
+        data: { liked: true, is_super: true, super_hearts_remaining: user.super_hearts_remaining },
+      });
+    }
+
+    if (user.super_hearts_remaining <= 0) {
+      const renewsAt = user.super_hearts_renew_at ? new Date(user.super_hearts_renew_at) : null;
+      return res.status(403).json({
+        success: false,
+        message: renewsAt
+          ? `Plus de Super Cœur disponible. Prochain renouvellement le ${renewsAt.toLocaleDateString('fr-FR')}.`
+          : 'Plus de Super Cœur disponible.',
+        code: 'SUPER_HEART_EXHAUSTED',
+      });
+    }
+
+    if (existingLike) {
+      // Un like classique posé plus tôt : la pression longue le fait passer
+      // en Super Cœur sans créer une seconde ligne (unicité user_id/tweet_id).
+      existingLike.is_super = true;
+      await existingLike.save();
+    } else {
+      await TweetLike.create({
+        tweet_id: id,
+        user_id: userId,
+        is_super: true,
+        metadata: {
+          source: req.userPlatform || 'web',
+          device: req.headers['user-agent'] || 'unknown',
+          ip_address: req.ip
+        }
+      });
+
+      ctrTracker.trackTweetLike(userId, id).catch(err => {
+        logger.warn(`CTR tracking error: ${err.message}`);
+      });
+
+      if (tweet.user_id !== userId) {
+        await Notification.createLikeNotification(userId, id, tweet.user_id);
+      }
+
+      await realtimeQueueService.updateLikesRealtime(id, userId);
+
+      const tweetAuthor = tweet.author || await User.findByPk(tweet.user_id, { attributes: ['username'] }).catch(() => null);
+      retargetingHook.trackLike({
+        userId: String(userId),
+        tweetId: String(id),
+        tweetContent: tweet.content || '',
+        authorUsername: tweetAuthor?.username || '',
+        mediaUrls: Array.isArray(tweet.media_urls) ? tweet.media_urls : []
+      });
+
+      similarity.getEngine().onInteraction(String(userId), String(id), 'like', tweet.content || '');
+
+      if (tweet.tweet_type === 'video') {
+        videoRecommendationService.onInteraction(String(userId), String(id), 'like');
+      }
+    }
+
+    user.super_hearts_remaining -= 1;
+    await user.save();
+
+    logger.info(`Super Cœur posé: utilisateur ${userId} sur le tweet ${id}`);
+
+    res.json({
+      success: true,
+      message: 'Super Cœur posé avec succès',
+      data: { liked: true, is_super: true, super_hearts_remaining: user.super_hearts_remaining },
+    });
+
+  } catch (error) {
+    logger.error('Erreur lors de la pose du Super Cœur:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur interne du serveur'

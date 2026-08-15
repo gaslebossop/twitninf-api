@@ -9,6 +9,12 @@ const {
   TIER,
   DEFAULT_DURATION_DAYS,
 } = require('../utils/subscriptionHelpers');
+const {
+  maybeRenewSuperHearts,
+  isSuperHeartEligible,
+  SUPER_HEART_CAP,
+  SUPER_HEART_RENEW_DAYS,
+} = require('../utils/superHeartHelpers');
 
 router.use(authenticateToken);
 
@@ -65,6 +71,36 @@ router.get('/status', async (req, res) => {
     });
   } catch (error) {
     logger.error('❌ Erreur premium status:', error);
+    res.status(500).json({ success: false, message: 'Erreur serveur' });
+  }
+});
+
+// GET /api/premium/super-hearts — Solde de Super Cœurs (like arc-en-ciel, palier Pro)
+router.get('/super-hearts', async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id, {
+      attributes: ['id', 'premium', 'subscription_tier', 'subscription_expires_at', 'super_hearts_remaining', 'super_hearts_renew_at'],
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+    }
+
+    await maybeExpireSubscription(user);
+    await maybeRenewSuperHearts(user);
+
+    res.json({
+      success: true,
+      data: {
+        eligible: isSuperHeartEligible(user),
+        remaining: user.super_hearts_remaining,
+        cap: SUPER_HEART_CAP,
+        renew_days: SUPER_HEART_RENEW_DAYS,
+        renews_at: user.super_hearts_renew_at,
+      },
+    });
+  } catch (error) {
+    logger.error('❌ Erreur super-hearts status:', error);
     res.status(500).json({ success: false, message: 'Erreur serveur' });
   }
 });

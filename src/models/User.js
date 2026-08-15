@@ -289,6 +289,20 @@ const userSchema = {
     defaultValue: null
   },
 
+  /** Solde de Super Cœurs (palier Pro) — voir `src/utils/superHeartHelpers.js`. */
+  super_hearts_remaining: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0
+  },
+
+  /** Prochain renouvellement du solde de Super Cœurs ; null = jamais accordé. */
+  super_hearts_renew_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    defaultValue: null
+  },
+
   /**
    * Programme de monétisation : condition supplémentaire à l'abonnement
    * payant. `approved` est nécessaire pour toucher des récompenses tweet
