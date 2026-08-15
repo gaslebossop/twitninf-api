@@ -123,6 +123,7 @@ const walletRoutes = require('./routes/walletRoutes');
 const premiumRoutes = require('./routes/premiumRoutes');
 const creatorIntelligenceRoutes = require('./routes/creatorIntelligenceRoutes');
 const supportRoutes = require('./routes/supportRoutes');
+const featureProposalRoutes = require('./routes/featureProposalRoutes');
 const paidContentRoutes = require('./routes/paidContentRoutes');
 const scheduledTweetRoutes = require('./routes/scheduledTweetRoutes');
 const insightsRoutes = require('./routes/insightsRoutes');
@@ -498,6 +499,7 @@ app.use('/api/creator-intelligence', creatorIntelligenceRoutes);
 
 // Support par ticket (traitement prioritaire pour le palier Pro)
 app.use('/api/support', supportRoutes);
+app.use('/api/forge', featureProposalRoutes);
 
 // Offre créateur : contenu à l'unité, file de publication, renseignements
 // (visiteurs, usurpation, radar, décollage) et marché des pseudos.

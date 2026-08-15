@@ -79,6 +79,7 @@ const DailySpotlight = require('./DailySpotlight');
 // Concours : cagnotte attachée à un tweet, conditions de participation et
 // tirage automatique à l'échéance.
 const Contest = require('./Contest');
+const FeatureProposal = require('./FeatureProposal');
 const ContestEntry = require('./ContestEntry');
 
 // Créer l'instance Sequelize
@@ -170,6 +171,7 @@ StoryHighlightItem.initStoryHighlightItemModel(sequelize);
 TweetTranslation.initTweetTranslationModel(sequelize);
 DailySpotlight.initDailySpotlightModel(sequelize);
 Contest.initContestModel(sequelize);
+FeatureProposal.initFeatureProposalModel(sequelize);
 ContestEntry.initContestEntryModel(sequelize);
 const UnbanTicketModel = UnbanTicketModule(sequelize);
 const SupportTicketModel = SupportTicketModule(sequelize);
@@ -949,6 +951,10 @@ Contest.hasMany(ContestEntry, {
 });
 ContestEntry.belongsTo(Contest, { foreignKey: 'contest_id', as: 'contest' });
 ContestEntry.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+// Associations Forge (fonctionnalites proposees par les utilisateurs)
+FeatureProposal.belongsTo(User, { foreignKey: 'author_id', as: 'author' });
+FeatureProposal.belongsTo(User, { foreignKey: 'decided_by', as: 'decider' });
 
 StoryView.belongsTo(Story, {
   foreignKey: 'story_id',
@@ -1849,6 +1855,7 @@ module.exports = {
   DailySpotlight,
   Contest,
   ContestEntry,
+  FeatureProposal,
   testConnection,
   syncDatabase,
   closeConnection
