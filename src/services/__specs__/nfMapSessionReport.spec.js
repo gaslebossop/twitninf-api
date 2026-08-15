@@ -1,4 +1,19 @@
-const test = require('node:test');
+/*
+ * `test` est celui de JEST, pas celui de `node:test`.
+ *
+ * Ce fichier importait `node:test` alors qu'il est le seul du depot dans ce
+ * cas — tous les autres specs sont en Jest. Consequence : `npm test` ne
+ * voyait aucun test ici et rapportait « Your test suite must contain at least
+ * one test », c'est-a-dire un ECHEC permanent qui ne disait rien de l'etat du
+ * code. Le fichier passait ou echouait uniquement sous `node --test`, que
+ * personne ne lance.
+ *
+ * Ca n'a rien d'anecdotique ici : ce spec est declare comme le garde-fou
+ * contre une publication de positions sans consentement. Il a laisse passer
+ * une contradiction entre le code et lui-meme sans qu'aucune CI ne rougisse.
+ *
+ * `node:assert` reste utilise tel quel : il fonctionne sous Jest.
+ */
 const assert = require('node:assert');
 
 /**
@@ -80,7 +95,7 @@ test('un compte en mode fantome n est JAMAIS positionne', async () => {
   assert.strictEqual(writes.length, 0, 'aucune ecriture ne doit partir en mode fantome');
 });
 
-test('un compte qui partage est positionne, sans echeance', async () => {
+test('un compte qui partage est positionne, avec une echeance', async () => {
   const db = fakeSequelize(SHARING);
 
   const result = await nfMap.updatePosition(db, 'user-2', {
@@ -96,14 +111,32 @@ test('un compte qui partage est positionne, sans echeance', async () => {
   // depuis que le mode par defaut est « ville ». Un simple UPDATE ne toucherait
   // rien et personne n'apparaitrait jamais.
   assert.match(write.sql, /ON CONFLICT/i);
-  // La presence n'expire plus : la derniere position connue reste affichee
-  // jusqu'a son remplacement. `shared_at` dit DEPUIS QUAND, ce qui reste utile
-  // a l'affichage, mais ne conditionne plus la visibilite.
   assert.match(write.sql, /shared_at\s*=\s*NOW\(\)/i);
-  assert.doesNotMatch(
+
+  /*
+   * L'echeance est POSEE, et ce test le protege dans ce sens.
+   *
+   * Il exigeait l'inverse — « aucune echeance ne doit etre posee » — du temps
+   * ou l'expiration etait desactivee. Le sens est retabli : sur une carte qui
+   * repond a « ou sont mes amis maintenant », une position vieille de
+   * plusieurs semaines n'est pas une information, et la table deviendrait un
+   * historique de deplacements que personne n'a accepte de tenir.
+   *
+   * C'est donc une assertion de VIE PRIVEE autant que de comportement. La
+   * relacher redonne des positions eternelles, sans rien casser d'autre :
+   * exactement le genre de regression qui passe inapercue.
+   */
+  assert.match(
     write.sql,
     /expires_at\s*=\s*NOW\(\)\s*\+/i,
-    'aucune echeance ne doit etre posee'
+    'chaque envoi doit reposer une echeance'
+  );
+  // Le delai vient d'une constante, pas d'une valeur en dur dans le SQL : on
+  // verifie donc qu'il est bien transmis, et qu'il est strictement positif —
+  // un `ttlHours` a 0 rendrait la position expiree a l'instant meme.
+  assert.ok(
+    write.replacements.ttlHours > 0,
+    'le delai d expiration doit etre transmis et non nul'
   );
 });
 

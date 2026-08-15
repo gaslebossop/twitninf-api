@@ -44,10 +44,18 @@ const AUDIENCES = ['mutuals', 'followers', 'connections'];
 
 /** Au-delà, la position n'est plus montrée — voir la règle 3. */
 /**
- * Conservée à 0 pour compatibilité d'import : la présence n'expire plus.
- * Voir `purgeExpired` et `nearby`.
+ * Au-delà, la position n'est plus montrée, puis elle est effacée.
+ *
+ * L'expiration avait été DÉSACTIVÉE (valeur 0, `expires_at` à NULL partout) :
+ * une position poussée une fois restait donc affichée indéfiniment. Sur une
+ * carte qui répond à « où sont mes amis maintenant », un point vieux de
+ * plusieurs semaines n'est pas une information mais une erreur — et la table
+ * devenait un historique de déplacements que personne n'a accepté de tenir.
+ *
+ * 72 h : assez long pour qu'un partage survive à une nuit et à un week-end
+ * sans qu'on ait à le réactiver, assez court pour que rien ne s'accumule.
  */
-const PRESENCE_TTL_HOURS = 0;
+const PRESENCE_TTL_HOURS = 72;
 
 /**
  * Arrondi du mode « ville » : ~0,05° ≈ 5,5 km en latitude. Assez pour situer
@@ -230,17 +238,20 @@ async function updatePosition(sequelize, userId, { latitude, longitude, place_la
         shared_at, expires_at, created_at, updated_at)
      VALUES
        (:userId, :mode, :audience, :latitude, :longitude, :placeLabel,
-        NOW(), NULL, NOW(), NOW())
+        NOW(), NOW() + (:ttlHours * INTERVAL '1 hour'), NOW(), NOW())
      ON CONFLICT (user_id) DO UPDATE SET
         latitude = :latitude,
         longitude = :longitude,
         place_label = :placeLabel,
         shared_at = NOW(),
-        expires_at = NULL,
+        -- Chaque envoi REPART pour un tour complet : qui ouvre la carte tous
+        -- les jours ne se voit jamais expirer.
+        expires_at = NOW() + (:ttlHours * INTERVAL '1 hour'),
         updated_at = NOW()`,
     {
       replacements: {
         userId,
+        ttlHours: PRESENCE_TTL_HOURS,
         mode: settings.sharing_mode,
         audience: settings.audience,
         latitude: position.latitude,
@@ -316,6 +327,10 @@ async function nearby(sequelize, viewerId, bounds) {
       -- latitude a NULL.
       WHERE p.sharing_mode <> 'ghost'
         AND p.latitude IS NOT NULL
+        -- Filtré à la LECTURE, en plus de la purge : le worker ne passe que
+        -- toutes les quinze minutes, et une position périmée ne doit pas
+        -- rester visible dans cet intervalle.
+        AND (p.expires_at IS NULL OR p.expires_at > NOW())
         AND u.is_active = TRUE
         AND p.user_id <> :viewerId
         AND p.latitude BETWEEN :south AND :north
@@ -464,24 +479,34 @@ async function invite(sequelize, Notification, fromUser, targetUserId) {
 }
 
 /**
- * Ancienne purge des positions expirées. Ne fait plus rien.
+ * Efface les positions échues. Appelée par le worker, toutes les 15 min.
  *
- * La présence n'expire plus : la dernière position connue est conservée
- * jusqu'à son remplacement, ou son effacement volontaire par un passage en
- * mode fantôme. Une purge par échéance effacerait donc exactement ce qu'on
- * cherche à garder — y compris les positions reportées depuis l'historique de
- * localisation, dont l'échéance calculée est déjà passée.
+ * Elle avait été vidée de son contenu en même temps que l'expiration : elle se
+ * contentait de remettre `expires_at` à NULL, c'est-à-dire de rendre éternelle
+ * chaque position qu'elle croisait. Elle efface de nouveau.
  *
- * La fonction est conservée plutôt que supprimée : elle est appelée par le
- * worker (`server.js`), et la retirer demanderait de toucher au démarrage pour
- * un gain nul. Elle neutralise juste `expires_at` sur les lignes qui en
- * portent encore une, héritée de l'ancien fonctionnement.
+ * ── Effacer, pas masquer ──
+ * `nearby` filtre déjà sur l'échéance, donc une position périmée est invisible
+ * sans cette purge. Mais invisible n'est pas effacé : la ligne resterait en
+ * base, et le point exact de quelqu'un continuerait d'y dormir des mois après
+ * qu'il a cessé de le partager. C'est précisément l'historique de déplacements
+ * que la carte s'interdit de constituer.
+ *
+ * Le MODE est conservé, seule la position part : quelqu'un qui a choisi
+ * « ville » retrouve son réglage à sa prochaine ouverture, il n'a pas à le
+ * refaire parce qu'il s'est absenté trois jours.
  */
 async function purgeExpired(sequelize) {
   const [, meta] = await sequelize.query(
     `UPDATE nf_map_presence
-        SET expires_at = NULL, updated_at = NOW()
-      WHERE expires_at IS NOT NULL`
+        SET latitude = NULL,
+            longitude = NULL,
+            place_label = NULL,
+            expires_at = NULL,
+            updated_at = NOW()
+      WHERE expires_at IS NOT NULL
+        AND expires_at <= NOW()
+        AND latitude IS NOT NULL`
   );
   return meta?.rowCount || 0;
 }
