@@ -17,6 +17,7 @@ const { ultraSafeClean } = require('../utils/circularRefCleaner');
 const { engagementTargetId, resolveEngagementTarget } = require('../utils/engagementTarget');
 const { assertTweetLength } = require('../utils/tweetLimits');
 const tweetTranslationService = require('../services/tweetTranslationService');
+const spotifyService = require('../services/spotifyService');
 const paidContentService = require('../services/paidContentService');
 const { requireContentAccess, assertAccessible } = require('../middleware/paidContentAccess');
 const tweetEditService = require('../services/tweetEditService');
@@ -1167,6 +1168,7 @@ router.post('/', [
   body('is_private').optional().isBoolean().withMessage('Le statut privé doit être un booléen'),
   body('is_sensitive').optional().isBoolean().withMessage('Le statut sensible doit être un booléen'),
   body('translation_enabled').optional().isBoolean().withMessage('L\'option de traduction doit être un booléen'),
+  body('spotify_track').optional().isObject().withMessage('spotify_track doit être un objet'),
   handleValidationErrors,
   // Répondre à un contenu payant non acheté : la réponse s'afficherait sous
   // un texte que son auteur n'a jamais lu, et le fil de discussion d'un tweet
@@ -1206,10 +1208,16 @@ router.post('/', [
       location,
       language = 'fr',
       ab_test,
-      translation_enabled = false
+      translation_enabled = false,
+      spotify_track = null
     } = req.body;
 
     const userId = req.user.id;
+
+    // Le client peut envoyer n'importe quoi dans `spotify_track` : on ne
+    // garde que la forme attendue, avec des URLs pointant réellement vers
+    // Spotify (voir `spotifyService.sanitizeSpotifyTrack`).
+    const sanitizedSpotifyTrack = spotify_track ? spotifyService.sanitizeSpotifyTrack(spotify_track) : null;
 
     /**
      * « Traduction (bêta) » : option Pro uniquement. Le palier est revérifié
@@ -1303,6 +1311,7 @@ router.post('/', [
         location,
         language,
         translation_enabled: translationEnabled,
+        spotify_track: sanitizedSpotifyTrack,
         moderation_status: 'pending', // En attente de traitement
         metadata: {
           source: req.userPlatform || 'web',

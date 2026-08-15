@@ -1605,6 +1605,33 @@ async function ensureUsersPreferredLanguageColumn() {
   }
 }
 
+/**
+ * Morceau Spotify attaché à un tweet (La Forge : « mettre de la musique dans
+ * les tweets »). Même garde-fou que `ensureTweetsTranslationColumn` : colonne
+ * déclarée par le modèle `Tweet` mais que `sync({ alter: false })` n'ajoute
+ * pas sur la table `tweets` déjà existante.
+ */
+async function ensureTweetsSpotifyTrackColumn() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'tweets'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TABLE tweets ADD COLUMN IF NOT EXISTS spotify_track JSONB NULL;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureTweetsSpotifyTrackColumn:', e.message);
+    throw e;
+  }
+}
+
 // Fonction pour synchroniser la base de données
 async function syncDatabase() {
   try {
@@ -1636,6 +1663,7 @@ async function syncDatabase() {
     await ensureStoryLikesCountColumn();
     await ensureReportsV2Columns();
     await ensureTweetsTranslationColumn();
+    await ensureTweetsSpotifyTrackColumn();
     await ensureUsersPreferredLanguageColumn();
     await ensureScheduledTweetsTimeZoneColumn();
 

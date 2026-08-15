@@ -82,6 +82,7 @@ const userRoutes = require('./routes/userRoutes');
 const messageRoutes = require('./routes/messageRoutes');
 const storyRoutes = require('./routes/storyRoutes');
 const spotlightRoutes = require('./routes/spotlightRoutes');
+const spotifyRoutes = require('./routes/spotifyRoutes');
 const moderationRoutes = require('./routes/moderationRoutes');
 const recommendationRoutes = require('./routes/recommendationRoutes');
 const behaviorRoutes = require('./routes/behaviorRoutes');
@@ -443,6 +444,7 @@ app.use('/api/messages', messageRoutes);
 
 app.use('/api/stories', storyRoutes);
 app.use('/api/spotlight', spotlightRoutes);
+app.use('/api/spotify', spotifyRoutes);
 
 app.use('/api/moderation', moderationRoutes);
 

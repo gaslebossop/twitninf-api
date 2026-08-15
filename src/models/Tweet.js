@@ -446,6 +446,35 @@ const tweetSchema = {
     defaultValue: false
   },
 
+  /**
+   * Morceau Spotify attaché au tweet (La Forge : « mettre de la musique dans
+   * les tweets »). Toujours revalidé côté écriture par
+   * `spotifyService.sanitizeSpotifyTrack` avant `Tweet.create` — ne jamais
+   * faire confiance à cette forme telle quelle si elle vient du client.
+   */
+  spotify_track: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: null,
+    validate: {
+      isValidSpotifyTrack(value) {
+        if (value === null || value === undefined) return;
+        if (typeof value !== 'object' || Array.isArray(value)) {
+          throw new Error('spotify_track doit être un objet');
+        }
+        if (typeof value.id !== 'string' || !value.id) {
+          throw new Error('spotify_track.id est requis');
+        }
+        if (typeof value.name !== 'string' || !value.name) {
+          throw new Error('spotify_track.name est requis');
+        }
+        if (typeof value.externalUrl !== 'string' || !value.externalUrl.startsWith('https://open.spotify.com/')) {
+          throw new Error('spotify_track.externalUrl invalide');
+        }
+      }
+    }
+  },
+
   // Métadonnées du tweet
   metadata: {
     type: DataTypes.JSONB,
