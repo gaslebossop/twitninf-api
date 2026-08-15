@@ -22,6 +22,14 @@ const logger = require('../utils/logger');
 
 const TOKEN_URL = 'https://accounts.spotify.com/api/token';
 const SEARCH_URL = 'https://api.spotify.com/v1/search';
+/**
+ * Spotify a retiré `preview_url` de sa réponse de recherche pour la quasi
+ * totalité des morceaux (retrait du 27/11/2024, jamais réintroduit malgré
+ * les demandes de la communauté). L'API iTunes, elle, fournit encore
+ * gratuitement un extrait de 30s sans clé — on l'utilise en repli, matché
+ * par titre + artiste, uniquement quand Spotify n'a rien fourni.
+ */
+const ITUNES_SEARCH_URL = 'https://itunes.apple.com/search';
 
 /** Marge de sécurité avant l'expiration réelle du token, pour ne jamais l'utiliser périmé. */
 const TOKEN_EXPIRY_MARGIN_MS = 30 * 1000;
@@ -92,6 +100,26 @@ function mapSpotifyTrack(item) {
   };
 }
 
+/**
+ * Cherche un extrait 30s sur iTunes pour un morceau que Spotify n'en fournit
+ * plus. Best-effort : toute erreur ou absence de résultat renvoie `null`
+ * plutôt que de faire échouer la recherche Spotify qui l'appelle.
+ */
+async function fetchItunesPreviewUrl(name, artist) {
+  try {
+    const term = artist ? `${name} ${artist}` : name;
+    const response = await axios.get(ITUNES_SEARCH_URL, {
+      params: { term, media: 'music', entity: 'song', limit: 1 },
+      timeout: 4000,
+    });
+    const result = response.data?.results?.[0];
+    return typeof result?.previewUrl === 'string' ? result.previewUrl : null;
+  } catch (e) {
+    logger.warn('[spotifyService] fetchItunesPreviewUrl:', e.message);
+    return null;
+  }
+}
+
 async function searchTracks(query, { limit = 8 } = {}) {
   const token = await getAppAccessToken();
   const cappedLimit = Math.max(1, Math.min(Number(limit) || 8, 10));
@@ -103,7 +131,16 @@ async function searchTracks(query, { limit = 8 } = {}) {
   });
 
   const items = response.data?.tracks?.items || [];
-  return items.map(mapSpotifyTrack).filter((track) => track && track.id && track.externalUrl);
+  const tracks = items.map(mapSpotifyTrack).filter((track) => track && track.id && track.externalUrl);
+
+  await Promise.all(
+    tracks.map(async (track) => {
+      if (track.previewUrl) return;
+      track.previewUrl = await fetchItunesPreviewUrl(track.name, track.artist);
+    })
+  );
+
+  return tracks;
 }
 
 /**
@@ -127,7 +164,8 @@ function sanitizeSpotifyTrack(payload) {
   const albumArt = typeof payload.albumArt === 'string' && /^https:\/\/i\.scdn\.co\//.test(payload.albumArt)
     ? payload.albumArt
     : null;
-  const previewUrl = typeof payload.previewUrl === 'string' && /^https:\/\/p\.scdn\.co\//.test(payload.previewUrl)
+  const previewUrl = typeof payload.previewUrl === 'string'
+    && /^https:\/\/(p\.scdn\.co|audio-ssl\.itunes\.apple\.com)\//.test(payload.previewUrl)
     ? payload.previewUrl
     : null;
 

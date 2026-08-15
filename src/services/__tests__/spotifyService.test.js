@@ -1,4 +1,6 @@
-const { mapSpotifyTrack, sanitizeSpotifyTrack } = require('../spotifyService');
+jest.mock('axios');
+const axios = require('axios');
+const { mapSpotifyTrack, sanitizeSpotifyTrack, searchTracks } = require('../spotifyService');
 
 function spotifyApiItem(overrides = {}) {
   return {
@@ -94,5 +96,73 @@ describe('spotifyService — sanitizeSpotifyTrack', () => {
     expect(sanitizeSpotifyTrack({ externalUrl: 'https://open.spotify.com/track/1' })).toBeNull();
     expect(sanitizeSpotifyTrack(null)).toBeNull();
     expect(sanitizeSpotifyTrack('not an object')).toBeNull();
+  });
+
+  test('accepte un previewUrl iTunes (repli quand Spotify n\'en fournit pas)', () => {
+    const clean = sanitizeSpotifyTrack({
+      id: '1',
+      name: 'Track',
+      externalUrl: 'https://open.spotify.com/track/1',
+      previewUrl: 'https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview/abc.m4a',
+    });
+    expect(clean).not.toBeNull();
+    expect(clean.previewUrl).toBe('https://audio-ssl.itunes.apple.com/itunes-assets/AudioPreview/abc.m4a');
+  });
+});
+
+describe('spotifyService — searchTracks (repli iTunes)', () => {
+  const OLD_ENV = process.env;
+
+  beforeEach(() => {
+    jest.resetAllMocks();
+    process.env = { ...OLD_ENV, SPOTIFY_CLIENT_ID: 'id', SPOTIFY_CLIENT_SECRET: 'secret' };
+  });
+
+  afterAll(() => {
+    process.env = OLD_ENV;
+  });
+
+  test('complète previewUrl via iTunes quand Spotify ne le fournit pas', async () => {
+    axios.post.mockResolvedValue({ data: { access_token: 'tok', expires_in: 3600 } });
+    axios.get.mockImplementation((url) => {
+      if (url === 'https://api.spotify.com/v1/search') {
+        return Promise.resolve({
+          data: {
+            tracks: {
+              items: [spotifyApiItem({ preview_url: null })],
+            },
+          },
+        });
+      }
+      if (url === 'https://itunes.apple.com/search') {
+        return Promise.resolve({
+          data: { results: [{ previewUrl: 'https://audio-ssl.itunes.apple.com/itunes-assets/x.m4a' }] },
+        });
+      }
+      throw new Error(`URL inattendue: ${url}`);
+    });
+
+    const tracks = await searchTracks('mr brightside');
+    expect(tracks).toHaveLength(1);
+    expect(tracks[0].previewUrl).toBe('https://audio-ssl.itunes.apple.com/itunes-assets/x.m4a');
+  });
+
+  test('ne casse pas la recherche si le repli iTunes échoue', async () => {
+    axios.post.mockResolvedValue({ data: { access_token: 'tok', expires_in: 3600 } });
+    axios.get.mockImplementation((url) => {
+      if (url === 'https://api.spotify.com/v1/search') {
+        return Promise.resolve({
+          data: { tracks: { items: [spotifyApiItem({ preview_url: null })] } },
+        });
+      }
+      if (url === 'https://itunes.apple.com/search') {
+        return Promise.reject(new Error('timeout'));
+      }
+      throw new Error(`URL inattendue: ${url}`);
+    });
+
+    const tracks = await searchTracks('mr brightside');
+    expect(tracks).toHaveLength(1);
+    expect(tracks[0].previewUrl).toBeNull();
   });
 });
