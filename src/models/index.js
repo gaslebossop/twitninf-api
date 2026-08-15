@@ -1230,6 +1230,13 @@ async function ensureTweetLikesSuperColumn() {
       ALTER TABLE tweet_likes
         ADD COLUMN IF NOT EXISTS is_super BOOLEAN NOT NULL DEFAULT false;
     `);
+    // Horodatage de la pose du Super Cœur, distinct de created_at (un like
+    // classique peut être promu bien après sa création) — voir la migration
+    // 20260815d et spotlightService, qui l'utilise pour dater le boost.
+    await sequelize.query(`
+      ALTER TABLE tweet_likes
+        ADD COLUMN IF NOT EXISTS super_liked_at TIMESTAMPTZ;
+    `);
   } catch (e) {
     logger.error('[schema] ensureTweetLikesSuperColumn:', e.message);
     throw e;
