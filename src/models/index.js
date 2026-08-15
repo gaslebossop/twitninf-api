@@ -1165,6 +1165,77 @@ async function ensureUsersCityColumn() {
   }
 }
 
+/**
+ * Solde de Super Cœurs (La Forge : palier Pro, renouvelé tous les
+ * `SUPER_HEART_RENEW_DAYS` jours — voir `src/utils/superHeartHelpers.js`).
+ * Même garde-fou que `ensureUsersTweetGenerationCreditsColumn` : la migration
+ * reste la source de vérité, ce filet couvre les déploiements qui démarrent
+ * directement avec `sequelize.sync({ alter: false })`.
+ */
+async function ensureUsersSuperHeartsColumns() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'users'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) return;
+
+    await sequelize.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS super_hearts_remaining INTEGER NOT NULL DEFAULT 0;
+    `);
+    await sequelize.query(`
+      DO $constraint$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'users_super_hearts_remaining_nonnegative'
+        ) THEN
+          ALTER TABLE users
+            ADD CONSTRAINT users_super_hearts_remaining_nonnegative
+            CHECK (super_hearts_remaining >= 0);
+        END IF;
+      END
+      $constraint$;
+    `);
+    await sequelize.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS super_hearts_renew_at TIMESTAMPTZ;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureUsersSuperHeartsColumns:', e.message);
+    throw e;
+  }
+}
+
+/**
+ * Marque un like posé en pression longue (Super Cœur) sur `tweet_likes`,
+ * table préexistante — même raison d'être que ci-dessus.
+ */
+async function ensureTweetLikesSuperColumn() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'tweet_likes'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) return;
+
+    await sequelize.query(`
+      ALTER TABLE tweet_likes
+        ADD COLUMN IF NOT EXISTS is_super BOOLEAN NOT NULL DEFAULT false;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureTweetLikesSuperColumn:', e.message);
+    throw e;
+  }
+}
+
 /** Bannière profil : le modèle expose `banner` mais sync({ alter: false }) ne crée pas la colonne. */
 /**
  * Fuseau de l'auteur sur une publication programmée.
@@ -1553,6 +1624,8 @@ async function syncDatabase() {
     await ensureUsersSubscriptionColumns();
     await ensureUsersTweetGenerationCreditsColumn();
     await ensureUsersCityColumn();
+    await ensureUsersSuperHeartsColumns();
+    await ensureTweetLikesSuperColumn();
     await ensureUsersBannerColumn();
     await ensureUsersProfileCustomizationColumn();
     await ensureUsersPrivacyColumn();

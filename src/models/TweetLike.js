@@ -154,6 +154,14 @@ const tweetLikeSchema = {
     defaultValue: 'like'
   },
 
+  // Super Cœur : posé en pression longue, réservé au palier Pro, jamais
+  // remboursé si retiré (voir POST /api/tweets/:id/super-like). Un couple
+  // (user_id, tweet_id) reste unique : c'est le MÊME like, pas un second.
+  is_super: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+
   // Métadonnées du like
   metadata: {
     type: DataTypes.JSONB,
