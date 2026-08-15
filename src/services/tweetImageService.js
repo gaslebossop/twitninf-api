@@ -42,7 +42,7 @@ const MAX_IMAGES_PER_TWEET = 4;
  * en pleine largeur, assez petit pour ne pas facturer 8 Mo à chaque lecteur.
  */
 const MAX_DIMENSION = 1600;
-const JPEG_QUALITY = 82;
+const JPEG_QUALITY = 90;
 
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 
