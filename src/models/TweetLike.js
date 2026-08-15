@@ -162,6 +162,15 @@ const tweetLikeSchema = {
     defaultValue: false
   },
 
+  // Moment où le Super Cœur a été posé — distinct de `created_at` quand un
+  // like classique préexistant est promu. `spotlightService` s'appuie dessus
+  // (via COALESCE avec `created_at`) pour dater le boost au bon moment.
+  super_liked_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    defaultValue: null
+  },
+
   // Métadonnées du like
   metadata: {
     type: DataTypes.JSONB,

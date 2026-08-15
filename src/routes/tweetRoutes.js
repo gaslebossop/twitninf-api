@@ -2200,64 +2200,111 @@ router.post('/:id/super-like', [
       });
     }
 
-    const user = await User.findByPk(userId, {
-      attributes: ['id', 'premium', 'subscription_tier', 'subscription_expires_at', 'super_hearts_remaining', 'super_hearts_renew_at'],
-    });
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
-    }
+    // Vérification d'éligibilité + décompte du solde dans une transaction
+    // avec verrou de ligne : sans ça, deux poses concurrentes (sur deux
+    // tweets différents) partant d'un solde de 1 peuvent toutes les deux lire
+    // "il en reste" avant que l'une des deux n'écrive la décrémentation, et le
+    // solde final ne baisse que d'un cœur pour deux Super Cœurs posés.
+    let outcome;
+    try {
+      outcome = await sequelize.transaction(async (t) => {
+        const user = await User.findByPk(userId, {
+          attributes: ['id', 'premium', 'subscription_tier', 'subscription_expires_at', 'super_hearts_remaining', 'super_hearts_renew_at'],
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+        if (!user) {
+          const err = new Error('Utilisateur non trouvé');
+          err.statusCode = 404;
+          throw err;
+        }
 
-    await maybeExpireSubscription(user);
-    await maybeRenewSuperHearts(user);
+        await maybeExpireSubscription(user, t);
+        await maybeRenewSuperHearts(user, t);
 
-    if (!isSuperHeartEligible(user)) {
-      return res.status(403).json({
-        success: false,
-        message: 'Le Super Cœur est réservé aux abonnés Pro.',
-        code: 'SUPER_HEART_NOT_ELIGIBLE',
+        if (!isSuperHeartEligible(user)) {
+          const err = new Error('Le Super Cœur est réservé aux abonnés Pro.');
+          err.statusCode = 403;
+          err.code = 'SUPER_HEART_NOT_ELIGIBLE';
+          throw err;
+        }
+
+        const existingLike = await TweetLike.findOne({
+          where: { tweet_id: id, user_id: userId },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+
+        if (existingLike && existingLike.is_super) {
+          return { alreadySuper: true, created: false, remaining: user.super_hearts_remaining };
+        }
+
+        if (user.super_hearts_remaining <= 0) {
+          const renewsAt = user.super_hearts_renew_at ? new Date(user.super_hearts_renew_at) : null;
+          const err = new Error(
+            renewsAt
+              ? `Plus de Super Cœur disponible. Prochain renouvellement le ${renewsAt.toLocaleDateString('fr-FR')}.`
+              : 'Plus de Super Cœur disponible.'
+          );
+          err.statusCode = 403;
+          err.code = 'SUPER_HEART_EXHAUSTED';
+          throw err;
+        }
+
+        // Distinct de `created_at` : un like classique posé plus tôt peut
+        // être promu bien après sa création — voir spotlightService, qui
+        // s'appuie dessus pour dater le boost au bon moment.
+        const superLikedAt = new Date();
+        const created = !existingLike;
+
+        if (existingLike) {
+          // La pression longue fait passer un like classique préexistant en
+          // Super Cœur sans créer une seconde ligne (unicité user_id/tweet_id).
+          existingLike.is_super = true;
+          existingLike.super_liked_at = superLikedAt;
+          await existingLike.save({ transaction: t });
+        } else {
+          await TweetLike.create({
+            tweet_id: id,
+            user_id: userId,
+            is_super: true,
+            super_liked_at: superLikedAt,
+            metadata: {
+              source: req.userPlatform || 'web',
+              device: req.headers['user-agent'] || 'unknown',
+              ip_address: req.ip
+            }
+          }, { transaction: t });
+        }
+
+        user.super_hearts_remaining -= 1;
+        await user.save({ transaction: t });
+
+        return { alreadySuper: false, created, remaining: user.super_hearts_remaining };
       });
+    } catch (txError) {
+      if (txError.statusCode) {
+        return res.status(txError.statusCode).json({
+          success: false,
+          message: txError.message,
+          ...(txError.code ? { code: txError.code } : {}),
+        });
+      }
+      throw txError;
     }
 
-    const existingLike = await TweetLike.findOne({
-      where: { tweet_id: id, user_id: userId }
-    });
-
-    if (existingLike && existingLike.is_super) {
+    if (outcome.alreadySuper) {
       return res.json({
         success: true,
         message: 'Déjà en Super Cœur',
-        data: { liked: true, is_super: true, super_hearts_remaining: user.super_hearts_remaining },
+        data: { liked: true, is_super: true, super_hearts_remaining: outcome.remaining },
       });
     }
 
-    if (user.super_hearts_remaining <= 0) {
-      const renewsAt = user.super_hearts_renew_at ? new Date(user.super_hearts_renew_at) : null;
-      return res.status(403).json({
-        success: false,
-        message: renewsAt
-          ? `Plus de Super Cœur disponible. Prochain renouvellement le ${renewsAt.toLocaleDateString('fr-FR')}.`
-          : 'Plus de Super Cœur disponible.',
-        code: 'SUPER_HEART_EXHAUSTED',
-      });
-    }
-
-    if (existingLike) {
-      // Un like classique posé plus tôt : la pression longue le fait passer
-      // en Super Cœur sans créer une seconde ligne (unicité user_id/tweet_id).
-      existingLike.is_super = true;
-      await existingLike.save();
-    } else {
-      await TweetLike.create({
-        tweet_id: id,
-        user_id: userId,
-        is_super: true,
-        metadata: {
-          source: req.userPlatform || 'web',
-          device: req.headers['user-agent'] || 'unknown',
-          ip_address: req.ip
-        }
-      });
-
+    // Effets de bord non transactionnels (notifications, tracking, moteurs de
+    // recommandation) : uniquement à la création d'un like, jamais à la
+    // promotion d'un like déjà notifié — même règle que la route `like`.
+    if (outcome.created) {
       ctrTracker.trackTweetLike(userId, id).catch(err => {
         logger.warn(`CTR tracking error: ${err.message}`);
       });
@@ -2284,15 +2331,12 @@ router.post('/:id/super-like', [
       }
     }
 
-    user.super_hearts_remaining -= 1;
-    await user.save();
-
     logger.info(`Super Cœur posé: utilisateur ${userId} sur le tweet ${id}`);
 
     res.json({
       success: true,
       message: 'Super Cœur posé avec succès',
-      data: { liked: true, is_super: true, super_hearts_remaining: user.super_hearts_remaining },
+      data: { liked: true, is_super: true, super_hearts_remaining: outcome.remaining },
     });
 
   } catch (error) {

@@ -5,7 +5,7 @@
  * lecture côté client.
  */
 
-const { Op, col, literal } = require('sequelize');
+const { Op, col, fn, literal, where: sequelizeWhere } = require('sequelize');
 const logger = require('../utils/logger');
 const { instantForZonedHour, zonedDayKey } = require('../utils/timezone');
 const { SUPER_HEART_SPOTLIGHT_WEIGHT } = require('../utils/superHeartHelpers');
@@ -37,10 +37,16 @@ async function computeYesterdaySpotlight() {
     return existing;
   }
 
+  // Un Super Cœur posé sur un like plus ancien (unicité user_id/tweet_id, la
+  // pression longue promeut la ligne existante au lieu d'en créer une) doit
+  // compter au moment de la POSE, pas de la création du like d'origine —
+  // sans quoi promouvoir un vieux like ne le rend jamais éligible à la
+  // fenêtre du jour, et promouvoir un like d'hier avant le passage du cron
+  // changerait rétroactivement le score déjà figé de la veille.
+  const effectiveLikeTime = fn('COALESCE', col('TweetLike.super_liked_at'), col('TweetLike.created_at'));
+
   const winner = await TweetLike.findOne({
-    where: {
-      created_at: { [Op.gte]: yesterdayStart, [Op.lt]: todayStart }
-    },
+    where: sequelizeWhere(effectiveLikeTime, { [Op.gte]: yesterdayStart, [Op.lt]: todayStart }),
     include: [{
       model: Tweet,
       as: 'tweet',
