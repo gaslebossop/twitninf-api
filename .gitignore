@@ -31,6 +31,9 @@ src.zip
 test-*.js
 *test*.js
 *.sql
+# Version publique, sans IP/SSH/secrets, lue par la routine automatisee de
+# La Forge — CLAUDE.md complet (acces VPS) reste local, jamais commite.
+!CLAUDE_CENSORED.md
 
 
 # Session MegaLLM : cookie d'authentification complet, jamais dans le depot.
