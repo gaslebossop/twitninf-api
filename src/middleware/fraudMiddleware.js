@@ -36,6 +36,56 @@ const APP_NAVIGATION_NOISE_PATHS = [
   '/messages/conversations',
 ];
 
+/**
+ * Ressources de fond de la Carte NF.
+ *
+ * ── Pourquoi elles font bannir des gens ──
+ * Une SEULE ouverture de carte demande la page, le moteur MapLibre (1 Mo), le
+ * style, une centaine de tuiles vectorielles, les glyphes de chaque police, le
+ * sprite, puis jusqu'à deux cents images d'épingles. Plusieurs centaines de
+ * requêtes en quelques secondes, depuis une IP : c'est exactement la forme
+ * d'un pilonnage, et la réputation d'IP les comptait comme tel. Des comptes
+ * parfaitement normaux se retrouvaient en 403 sur toute l'API pour avoir
+ * regardé la carte.
+ *
+ * ── Pourquoi c'est sûr de les exempter ──
+ * Elles sont toutes en GET, sans jeton par conception (le chargeur d'images
+ * natif et les sous-ressources d'une `WebView` ne portent pas l'en-tête
+ * `Authorization`), sans effet de bord, et ne rendent AUCUNE donnée
+ * d'utilisateur : de la cartographie publique et des avatars déjà publics.
+ * Elles gardent par ailleurs leur propre limiteur de débit dans
+ * `nfMapRoutes` — l'exemption porte sur le SCORE de fraude, pas sur la
+ * cadence.
+ *
+ * ⚠️ Liste EXPLICITE, jamais un préfixe `/nf-map/` : le même routeur sert
+ * aussi `/position` (écrit une position), `/invite` (crée une notification),
+ * `/nearby` et `/friends` (rendent des données d'utilisateur). Ceux-là doivent
+ * rester surveillés. Le filtre sur GET ne suffirait pas — `/nearby` et
+ * `/friends` sont des GET.
+ */
+const NF_MAP_ASSET_PATHS = new Set([
+  '/nf-map/view',
+  '/nf-map/bridge.js',
+  '/nf-map/maplibre.js',
+  '/nf-map/maplibre-worker.js',
+  '/nf-map/maplibre.css',
+  '/nf-map/style.json',
+  '/nf-map/cluster.png',
+]);
+
+const NF_MAP_ASSET_PREFIXES = ['/nf-map/tiles/', '/nf-map/glyphs/', '/nf-map/pin/'];
+
+/** `sprite.json`, `sprite.png`, `sprite@2x.json`, `sprite@2x.png`. */
+const NF_MAP_SPRITE = /^\/nf-map\/sprite(@2x)?\.(json|png)$/;
+
+function isNfMapAsset(req) {
+  if (String(req.method || 'GET').toUpperCase() !== 'GET') return false;
+  const path = getApiScopedPath(req);
+  if (NF_MAP_ASSET_PATHS.has(path)) return true;
+  if (NF_MAP_SPRITE.test(path)) return true;
+  return NF_MAP_ASSET_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
 function getRequestPath(req) {
   return String(req.originalUrl || req.url || req.path || '').split('?')[0].toLowerCase();
 }
@@ -313,6 +363,9 @@ const blockBannedIp = async (req, res, next) => {
   if (isTrustedCapacityRequest(req)) return next();
   if (!fraudService.isReady()) return next();
   if (isAppNavigationNoise(req) && getVerifiedBearerUserId(req)) return next();
+  // Sans jeton par conception : la garde du porteur ci-dessus ne peut pas
+  // s appliquer, et une carte grise sans explication est le pire des retours.
+  if (isNfMapAsset(req)) return next();
 
   const ip = getIp(req);
   try {
@@ -501,6 +554,7 @@ const checkApiRequest = async (req, res, next) => {
   if (isTrustedFirstPartyClient(req)) return next();
   if (isTrustedCapacityRequest(req)) return next();
   if (isAppNavigationNoise(req)) return next();
+  if (isNfMapAsset(req)) return next();
 
   if (!fraudService.isReady()) return next();
 
