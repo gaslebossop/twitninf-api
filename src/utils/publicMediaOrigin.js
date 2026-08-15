@@ -29,7 +29,7 @@ function getPublicMediaOriginForUpload() {
 
 /**
  * URL absolue à persister en DB après upload fichier.
- * @param {'avatars'|'banners'|'stories'|'messages'|'tweets'} kind
+ * @param {'avatars'|'banners'|'stories'|'messages'|'tweets'|'audio'} kind
  * @param {string} filename
  */
 function buildStaticMediaPublicUrl(kind, filename) {
@@ -42,7 +42,7 @@ function resolvePublicMediaOrigin(_req) {
   return getPublicMediaOriginForUpload();
 }
 
-const STATIC_MEDIA_PATH = /(\/static\/(?:avatars|banners|stories|messages|tweets)\/[^\s?#]+)/i;
+const STATIC_MEDIA_PATH = /(\/static\/(?:avatars|banners|stories|messages|tweets|audio)\/[^\s?#]+)/i;
 
 /**
  * Normalise une URL de média vers le domaine public (remplace les URLs en IP).
@@ -65,6 +65,7 @@ function applyMediaUrlRewriteToPlainObject(obj) {
   const out = { ...obj };
   if (typeof out.avatar === 'string') out.avatar = rewriteMediaUrl(out.avatar);
   if (typeof out.banner === 'string') out.banner = rewriteMediaUrl(out.banner);
+  if (typeof out.audio_url === 'string') out.audio_url = rewriteMediaUrl(out.audio_url);
   if (Array.isArray(out.media_urls)) {
     out.media_urls = out.media_urls.map((u) => rewriteMediaUrl(u));
   }

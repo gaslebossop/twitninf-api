@@ -26,6 +26,7 @@ const RealtimeQueueService = require('../services/realtimeQueueService');
 const { upload, videoService } = require('../services/videoService');
 const { requireFlag } = require('../middleware/featureFlagMiddleware');
 const tweetImageService = require('../services/tweetImageService');
+const tweetAudioService = require('../services/tweetAudioService');
 const logger = require('../utils/logger');
 const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
 const { maybeRenewSuperHearts, isSuperHeartEligible } = require('../utils/superHeartHelpers');
@@ -41,6 +42,18 @@ const imageUpload = multer({
   fileFilter: (req, file, cb) => {
     if (!tweetImageService.isAcceptedMimetype(file.mimetype)) {
       return cb(new Error('Format d\'image non pris en charge'));
+    }
+    cb(null, true);
+  },
+});
+
+/** Même logique que `imageUpload`, pour les messages vocaux joints à un tweet. */
+const audioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: tweetAudioService.MAX_UPLOAD_BYTES, files: 1 },
+  fileFilter: (req, file, cb) => {
+    if (!tweetAudioService.isAcceptedMimetype(file.mimetype)) {
+      return cb(new Error('Format audio non pris en charge'));
     }
     cb(null, true);
   },
@@ -1147,6 +1160,29 @@ router.post(
 );
 
 /**
+ * Envoie un message vocal à joindre à un tweet, et renvoie son URL publique.
+ * Même découpage en deux temps que `POST /media` pour les images.
+ */
+router.post(
+  '/audio',
+  [authenticateToken, denySuspended, audioUpload.single('audio')],
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: 'Fichier manquant (champ "audio")' });
+      }
+
+      const url = await tweetAudioService.storeUploadedAudio(req.file.buffer, req.user.id, req.file.mimetype);
+      const duration = tweetAudioService.sanitizeAudioDuration(req.body?.duration);
+      return res.status(201).json({ success: true, data: { url, duration } });
+    } catch (error) {
+      logger.error('Erreur upload message vocal de tweet:', error);
+      return res.status(500).json({ success: false, message: 'Impossible d\'envoyer ce message vocal' });
+    }
+  }
+);
+
+/**
  * POST /api/tweets
  * Créer un nouveau tweet
  */
@@ -1158,7 +1194,8 @@ router.post('/', [
   // quelque chose par-dessus.
   body('content').trim().custom(async (value, meta) => {
     const images = tweetImageService.sanitizeMediaUrls(meta.req.body?.media_urls);
-    if (!value && images.length === 0) {
+    const audio = tweetAudioService.sanitizeAudioUrl(meta.req.body?.audio_url);
+    if (!value && images.length === 0 && !audio) {
       throw new Error('Le contenu ne peut pas être vide');
     }
     return assertTweetLength(value, meta);
@@ -1169,6 +1206,8 @@ router.post('/', [
   body('is_sensitive').optional().isBoolean().withMessage('Le statut sensible doit être un booléen'),
   body('translation_enabled').optional().isBoolean().withMessage('L\'option de traduction doit être un booléen'),
   body('spotify_track').optional().isObject().withMessage('spotify_track doit être un objet'),
+  body('audio_url').optional().isString().withMessage('audio_url doit être une chaîne'),
+  body('audio_duration').optional().isInt({ min: 1 }).withMessage('audio_duration doit être un entier positif'),
   handleValidationErrors,
   // Répondre à un contenu payant non acheté : la réponse s'afficherait sous
   // un texte que son auteur n'a jamais lu, et le fil de discussion d'un tweet
@@ -1209,7 +1248,9 @@ router.post('/', [
       language = 'fr',
       ab_test,
       translation_enabled = false,
-      spotify_track = null
+      spotify_track = null,
+      audio_url = null,
+      audio_duration = null
     } = req.body;
 
     const userId = req.user.id;
@@ -1218,6 +1259,11 @@ router.post('/', [
     // garde que la forme attendue, avec des URLs pointant réellement vers
     // Spotify (voir `spotifyService.sanitizeSpotifyTrack`).
     const sanitizedSpotifyTrack = spotify_track ? spotifyService.sanitizeSpotifyTrack(spotify_track) : null;
+
+    // Même raisonnement que pour `media_urls` : seule une URL émise par
+    // cette API (via `POST /api/tweets/audio`) entre dans `audio_url`.
+    const sanitizedAudioUrl = tweetAudioService.sanitizeAudioUrl(audio_url);
+    const sanitizedAudioDuration = sanitizedAudioUrl ? tweetAudioService.sanitizeAudioDuration(audio_duration) : null;
 
     /**
      * « Traduction (bêta) » : option Pro uniquement. Le palier est revérifié
@@ -1312,6 +1358,8 @@ router.post('/', [
         language,
         translation_enabled: translationEnabled,
         spotify_track: sanitizedSpotifyTrack,
+        audio_url: sanitizedAudioUrl,
+        audio_duration: sanitizedAudioDuration,
         moderation_status: 'pending', // En attente de traitement
         metadata: {
           source: req.userPlatform || 'web',

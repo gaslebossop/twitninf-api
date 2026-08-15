@@ -1639,6 +1639,35 @@ async function ensureTweetsSpotifyTrackColumn() {
   }
 }
 
+/**
+ * Message vocal attaché à un tweet (La Forge : « pouvoir ajouter un message
+ * vocal dans notre tweet »). Même garde-fou que `ensureTweetsSpotifyTrackColumn` :
+ * colonnes déclarées par le modèle `Tweet` mais que `sync({ alter: false })`
+ * n'ajoute pas sur la table `tweets` déjà existante.
+ */
+async function ensureTweetsAudioColumns() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'tweets'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) {
+      return;
+    }
+    await sequelize.query(`
+      ALTER TABLE tweets
+        ADD COLUMN IF NOT EXISTS audio_url TEXT NULL,
+        ADD COLUMN IF NOT EXISTS audio_duration INTEGER NULL;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureTweetsAudioColumns:', e.message);
+    throw e;
+  }
+}
+
 // Fonction pour synchroniser la base de données
 async function syncDatabase() {
   try {
@@ -1671,6 +1700,7 @@ async function syncDatabase() {
     await ensureReportsV2Columns();
     await ensureTweetsTranslationColumn();
     await ensureTweetsSpotifyTrackColumn();
+    await ensureTweetsAudioColumns();
     await ensureUsersPreferredLanguageColumn();
     await ensureScheduledTweetsTimeZoneColumn();
 

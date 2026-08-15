@@ -475,6 +475,25 @@ const tweetSchema = {
     }
   },
 
+  /**
+   * Message vocal joint au tweet (La Forge : « pouvoir ajouter un message
+   * vocal dans notre tweet »). Toujours revalidé côté écriture par
+   * `tweetAudioService.sanitizeAudioUrl` avant `Tweet.create` — ne jamais
+   * faire confiance à cette URL telle quelle si elle vient du client.
+   */
+  audio_url: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+    defaultValue: null,
+  },
+
+  /** Durée en secondes, uniquement pour l'affichage (voir `MAX_DURATION_SECONDS`). */
+  audio_duration: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: null,
+  },
+
   // Métadonnées du tweet
   metadata: {
     type: DataTypes.JSONB,
