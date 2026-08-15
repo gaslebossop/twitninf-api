@@ -1137,6 +1137,34 @@ async function ensureUsersTweetGenerationCreditsColumn() {
   }
 }
 
+/**
+ * Ville affichée sur le profil (« La Forge » : « pouvoir ajouter sa ville
+ * comme twitter »). Même garde-fou que `ensureUsersTweetGenerationCreditsColumn`
+ * juste au-dessus : `sequelize.sync({ alter: false })` ne touche jamais aux
+ * colonnes d'une table existante, donc une colonne ajoutée au modèle sans ce
+ * garde-fou n'atteint jamais la base toute seule.
+ */
+async function ensureUsersCityColumn() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'users'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) return;
+
+    await sequelize.query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS city VARCHAR(30);
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureUsersCityColumn:', e.message);
+    throw e;
+  }
+}
+
 /** Bannière profil : le modèle expose `banner` mais sync({ alter: false }) ne crée pas la colonne. */
 /**
  * Fuseau de l'auteur sur une publication programmée.
@@ -1524,6 +1552,7 @@ async function syncDatabase() {
 
     await ensureUsersSubscriptionColumns();
     await ensureUsersTweetGenerationCreditsColumn();
+    await ensureUsersCityColumn();
     await ensureUsersBannerColumn();
     await ensureUsersProfileCustomizationColumn();
     await ensureUsersPrivacyColumn();

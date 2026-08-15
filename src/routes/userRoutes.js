@@ -507,7 +507,7 @@ router.get('/profile/:username', [
         is_active: true,
         is_suspended: false
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium', 'subscription_tier', 'verification_style', 'stats', 'profile_customization', 'created_at', 'last_activity']
+      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'city', 'verified', 'premium', 'subscription_tier', 'verification_style', 'stats', 'profile_customization', 'created_at', 'last_activity']
     });
 
     if (!user) {
@@ -789,7 +789,7 @@ router.get('/:id', [
         is_active: true,
         is_suspended: false
       },
-      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium', 'verification_style', 'stats', 'profile_customization', 'is_private_account', 'created_at', 'last_activity']
+      attributes: ['id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'city', 'verified', 'premium', 'verification_style', 'stats', 'profile_customization', 'is_private_account', 'created_at', 'last_activity']
     });
 
     if (!user) {

@@ -38,6 +38,7 @@ class User extends Model {
       avatar: rewriteMediaUrl(this.avatar),
       banner: this.banner ? rewriteMediaUrl(this.banner) : null,
       bio: this.bio || null,
+      city: this.city || null,
       verified: this.verified,
       premium: this.premium,
       subscription_tier: this.subscription_tier || 'free',
@@ -191,6 +192,12 @@ const userSchema = {
 
   bio: {
     type: DataTypes.TEXT,
+    allowNull: true,
+    defaultValue: null
+  },
+
+  city: {
+    type: DataTypes.STRING(30),
     allowNull: true,
     defaultValue: null
   },

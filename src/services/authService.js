@@ -511,7 +511,7 @@ class AuthService {
     try {
       const user = await User.findByPk(userId, {
         attributes: [
-          'id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium',
+          'id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'city', 'verified', 'premium',
           'subscription_tier', 'subscription_expires_at',
           'role', 'moderation_permissions', 'is_private_account',
           'stats', 'created_at', 'last_activity', 'is_active',
@@ -537,7 +537,7 @@ class AuthService {
       // Recharger l'utilisateur pour avoir les données mises à jour
       const updatedUser = await User.findByPk(userId, {
         attributes: [
-          'id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium',
+          'id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'city', 'verified', 'premium',
           'subscription_tier', 'subscription_expires_at',
           'role', 'moderation_permissions', 'is_private_account',
           'stats', 'created_at', 'last_activity', 'is_active',
@@ -552,7 +552,7 @@ class AuthService {
       await maybeExpireSubscription(updatedUser);
       await updatedUser.reload({
         attributes: [
-          'id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'verified', 'premium',
+          'id', 'username', 'full_name', 'avatar', 'banner', 'bio', 'city', 'verified', 'premium',
           'subscription_tier', 'subscription_expires_at',
           'role', 'moderation_permissions', 'is_private_account',
           'stats', 'created_at', 'last_activity', 'is_active',
@@ -601,12 +601,15 @@ class AuthService {
       }
 
       // Mettre à jour les champs autorisés
-      const allowedFields = ['username', 'full_name', 'avatar', 'banner', 'bio', 'preferences', 'is_private_account'];
+      const allowedFields = ['username', 'full_name', 'avatar', 'banner', 'bio', 'city', 'preferences', 'is_private_account'];
       for (const field of allowedFields) {
         if (updateData[field] === undefined) continue;
         if (field === 'bio') {
           const v = updateData[field];
           user.bio = v == null || String(v).trim() === '' ? null : String(v).trim();
+        } else if (field === 'city') {
+          const v = updateData[field];
+          user.city = v == null || String(v).trim() === '' ? null : String(v).trim();
         } else if (field === 'banner') {
           const v = updateData[field];
           user.banner = v == null || String(v).trim() === '' ? null : String(v).trim();

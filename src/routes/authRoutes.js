@@ -96,7 +96,13 @@ const updateProfileValidation = [
     .trim()
     .isLength({ max: 500 })
     .withMessage('La bio ne peut pas dépasser 500 caractères'),
-  
+
+  body('city')
+    .optional({ nullable: true })
+    .trim()
+    .isLength({ max: 30 })
+    .withMessage('La ville ne peut pas dépasser 30 caractères'),
+
   body('avatar')
     .optional()
     .isURL()
