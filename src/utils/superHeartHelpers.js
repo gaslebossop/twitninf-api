@@ -1,7 +1,10 @@
 const { TIER, isSubscriptionActive } = require('./subscriptionHelpers');
 
-/** Solde accordé à chaque renouvellement — modeste, réservé au palier Pro. */
-const SUPER_HEART_CAP = 3;
+/** Solde accordé à chaque renouvellement, par palier. */
+const SUPER_HEART_CAPS = {
+  [TIER.PRO]: 10,
+  [TIER.PLUS]: 3,
+};
 
 /** Cadence de renouvellement, en jours (proposition La Forge : « tous les 5j »). */
 const SUPER_HEART_RENEW_DAYS = 5;
@@ -10,7 +13,7 @@ const SUPER_HEART_RENEW_DAYS = 5;
 const SUPER_HEART_SPOTLIGHT_WEIGHT = 3;
 
 function isSuperHeartEligible(user) {
-  return !!user && user.subscription_tier === TIER.PRO && isSubscriptionActive(user);
+  return !!user && !!SUPER_HEART_CAPS[user?.subscription_tier] && isSubscriptionActive(user);
 }
 
 /**
@@ -41,14 +44,14 @@ async function maybeRenewSuperHearts(user, dbTransaction) {
     return false;
   }
 
-  user.super_hearts_remaining = SUPER_HEART_CAP;
+  user.super_hearts_remaining = SUPER_HEART_CAPS[user.subscription_tier];
   user.super_hearts_renew_at = new Date(now.getTime() + SUPER_HEART_RENEW_DAYS * 86400000);
   await user.save(saveOpts);
   return true;
 }
 
 module.exports = {
-  SUPER_HEART_CAP,
+  SUPER_HEART_CAPS,
   SUPER_HEART_RENEW_DAYS,
   SUPER_HEART_SPOTLIGHT_WEIGHT,
   isSuperHeartEligible,

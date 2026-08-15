@@ -12,7 +12,7 @@ const {
 const {
   maybeRenewSuperHearts,
   isSuperHeartEligible,
-  SUPER_HEART_CAP,
+  SUPER_HEART_CAPS,
   SUPER_HEART_RENEW_DAYS,
 } = require('../utils/superHeartHelpers');
 
@@ -94,7 +94,7 @@ router.get('/super-hearts', async (req, res) => {
       data: {
         eligible: isSuperHeartEligible(user),
         remaining: user.super_hearts_remaining,
-        cap: SUPER_HEART_CAP,
+        cap: SUPER_HEART_CAPS[user.subscription_tier] || 0,
         renew_days: SUPER_HEART_RENEW_DAYS,
         renews_at: user.super_hearts_renew_at,
       },
