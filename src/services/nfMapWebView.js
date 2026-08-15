@@ -612,6 +612,40 @@ const MAPLIBRE_FILES = {
  */
 const MAPLIBRE_VERSION = require('maplibre-gl/package.json').version;
 
+/** Le pont, servi depuis le disque — voir `BRIDGE_VERSION`. */
+const BRIDGE_FILE = path.join(__dirname, '../web/nf-map/bridge.js');
+
+/**
+ * Empreinte du CONTENU du pont, et surtout pas la version de MapLibre.
+ *
+ * ── La panne que ça corrige ──
+ * `bridge.js` était servi sous `?v=<version de MapLibre>` avec un cache d'un an
+ * en `immutable`. Or ce numéro ne bouge que quand MapLibre change : modifier le
+ * pont ne changeait donc PAS son URL, et un appareil qui avait déjà ouvert la
+ * carte gardait l'ancien script — pour un an. Les corrections apportées au pont
+ * (le nom du lieu survolé, le premier cadrage instantané, le masquage d'une
+ * épingle dont l'image échoue) ne pouvaient atteindre personne, sans le moindre
+ * signe : la page se chargeait, la carte s'affichait, il manquait simplement
+ * tout ce qui avait été ajouté depuis.
+ *
+ * Une empreinte du contenu rend l'URL vraiment immuable : elle change si et
+ * seulement si le fichier change, ce qui est exactement la promesse que
+ * `immutable` fait au cache.
+ *
+ * Lue une fois au démarrage : le fichier est livré avec le code, il ne change
+ * pas en cours d'exécution.
+ */
+const BRIDGE_VERSION = (() => {
+  try {
+    return crypto.createHash('sha1').update(fs.readFileSync(BRIDGE_FILE)).digest('hex').slice(0, 12);
+  } catch (error) {
+    // Illisible : on retombe sur un cache court plutôt que de figer une URL
+    // sur une empreinte qu'on n'a pas pu calculer.
+    logger.warn(`[nfMap] empreinte du pont illisible: ${error.message}`);
+    return String(Date.now());
+  }
+})();
+
 function maplibreFile(name) {
   const file = MAPLIBRE_FILES[name];
   if (!file || !fs.existsSync(file)) return null;
@@ -728,7 +762,7 @@ function pageHtml({ base, nonce, theme: requestedTheme }) {
      négocier avec la CSP. -->
 <div id="map" data-base="${base}" data-version="${version}"></div>
 <script nonce="${nonce}" src="${base}/maplibre.js?v=${version}"></script>
-<script nonce="${nonce}" src="${base}/bridge.js?v=${version}"></script>
+<script nonce="${nonce}" src="${base}/bridge.js?v=${BRIDGE_VERSION}"></script>
 </body>
 </html>`;
 }
@@ -736,6 +770,8 @@ function pageHtml({ base, nonce, theme: requestedTheme }) {
 module.exports = {
   BACKGROUND_COLOR,
   MAPLIBRE_VERSION,
+  BRIDGE_FILE,
+  BRIDGE_VERSION,
   clientStyle,
   glyphUpstream,
   maplibreFile,

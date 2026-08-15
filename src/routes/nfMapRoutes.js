@@ -240,11 +240,18 @@ router.get('/view', tileLimiter, (req, res) => {
   );
 });
 
-/** GET /api/nf-map/bridge.js — le moteur de rendu, côté page. */
+/**
+ * GET /api/nf-map/bridge.js — le moteur de rendu, côté page.
+ *
+ * `immutable` n'est tenable que parce que l'URL porte une empreinte du CONTENU
+ * du fichier (`BRIDGE_VERSION`). Elle a d'abord porté la version de MapLibre,
+ * qui ne bouge pas quand ce fichier change : les appareils ont alors gardé un
+ * an durant un pont périmé, sans le moindre signe.
+ */
 router.get('/bridge.js', tileLimiter, (req, res) => {
   res.set('Content-Type', 'application/javascript; charset=utf-8');
   res.set('Cache-Control', `public, max-age=${ASSET_CACHE_SECONDS}, immutable`);
-  return res.sendFile(path.join(__dirname, '../web/nf-map/bridge.js'));
+  return res.sendFile(nfMapWebView.BRIDGE_FILE);
 });
 
 /** GET /api/nf-map/maplibre.js|maplibre-worker.js|maplibre.css */
