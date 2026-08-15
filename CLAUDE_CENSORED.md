@@ -19,6 +19,62 @@ similaire avant d'en écrire un nouveau — les conventions de forme de réponse
 (`{ success, message, data }` ou `{ success, ...}`), de gestion d'erreurs, et
 de validation sont cohérentes dans tout le repo.
 
+## Carte des routes — préfixe → fichier
+
+Chaque préfixe est monté dans `src/server.js` sur le fichier de
+`src/routes/` du même nom. Vérifier là avant de grep-explorer : c'est
+souvent le seul fichier à ouvrir pour situer un endpoint existant.
+
+| Préfixe | Fichier | Domaine |
+|---|---|---|
+| `/api/auth` | `authRoutes.js` | login/register/profil/session (voir aussi `authController.js` + `authService.js`) |
+| `/api/tweets` | `tweetRoutes.js` | tweets |
+| `/api/users` | `userRoutes.js` | profils publics, follow, recherche d'utilisateurs |
+| `/api/search` | `searchRoutes.js` | recherche |
+| `/api/notifications` | `notificationRoutes.js` | notifications |
+| `/api/messages` | `messageRoutes.js` | messagerie |
+| `/api/stories` | `storyRoutes.js` | stories |
+| `/api/spotlight` | `spotlightRoutes.js` | mise en avant |
+| `/api/moderation` | `moderationRoutes.js` | modération (voir aussi `moderationController.js`, qui contient plusieurs méthodes dupliquées — vérifier laquelle est vraiment appelée avant d'éditer) |
+| `/api/community-moderation` | `communityModerationRoutes.js` | signalements communautaires |
+| `/api/recommendations` | `recommendationRoutes.js` | recommandation legacy |
+| `/api/neural-rank` | `neuralRankRoutes.js` | recommandeur NeuralRank |
+| `/api/behavior` | `behaviorRoutes.js` | tracking comportemental |
+| `/api/monetization`, `/api/monetization-program`, `/api/tweet-monetization` | `monetizationRoutes.js`, `monetizationProgramRoutes.js`, `tweetMonetizationRoutes.js` | monétisation créateurs |
+| `/api/virtual-currency`, `/api/currencies` | `virtualCurrencyRoutes.js`, `userCurrencyRoutes.js` | monnaies (NF = monnaie système, voir `VirtualCurrency` model) |
+| `/api/new-economy` | `newEconomyRoutes.js` | grand livre / transferts NF |
+| `/api/wallet` | `walletRoutes.js` | portefeuille utilisateur |
+| `/api/payments` | `paymentRoutes.js` | paiements réels (hors NF) |
+| `/api/casino` | `casinoRoutes.js` | mini-jeux NF |
+| `/api/events`, `/api/functional-events` | `events/`, `functionalEventRoutes.js` | événements saisonniers / fonctionnels |
+| `/api/feature-flags` | `featureFlagRoutes.js` | feature flags (rollout progressif) |
+| `/api/forge` | `featureProposalRoutes.js` | La Forge — c'est ce fichier que la routine elle-même modifie si la tâche touche à la Forge |
+| `/api/nf-map` | `nfMapRoutes.js` | carte NF (positions géo) |
+| `/api/premium` | `premiumRoutes.js` | abonnement premium |
+| `/api/support` | `supportRoutes.js` | tickets support |
+| `/api/paid-content` | `paidContentRoutes.js` | contenu payant à l'unité |
+| `/api/scheduled-tweets` | `scheduledTweetRoutes.js` | publication programmée |
+| `/api/insights` | `insightsRoutes.js` | statistiques créateur |
+| `/api/username-market` | `usernameMarketRoutes.js` | marché des pseudos |
+| `/api/contests` | `contestRoutes.js` | concours |
+| `/api/verification`, `/api/verified-badges`, `/api/verification-style` | fichiers homonymes | certification de compte |
+| `/api/ads` | `adRoutes.js` (+ `advancedAdRoutes.js`) | publicité |
+| `/api/user-challenges` | `userChallengeRoutes.js` | défis utilisateur |
+| `/api/inventory` | `inventoryRoutes.js` | objets/cosmétiques possédés |
+| `/api/admin/*` | `economyAdminRoutes.js`, `similarityAdminRoutes.js`, `shadowbanAdminRoutes.js`, `developerAdminRoutes.js`, `infrastructureAdminRoutes.js` | panels admin — jamais le modèle de données brut, voir la règle UI admin ci-dessous |
+| `/api/user-stats`, `/api/creator-intelligence`, `/api/track` | fichiers homonymes | analytics |
+| `/api/legal` | `legalRoutes.js` | CGU/RGPD |
+
+Pas dans ce tableau → `grep -rn "app.use('/api" src/server.js` liste tout.
+
+## Un écran d'administration expose des décisions, pas le modèle
+
+Si la tâche touche un panel admin : les options proposées à l'écran doivent
+être des ACTIONS lisibles (« Construite — verser la récompense »), jamais les
+valeurs brutes de l'ENUM serveur (`built`) ni les noms de colonnes. Voir
+`featureProposalRoutes.js`/`forgeService.ts` (`DECISIONS`) comme référence
+de ce patron déjà appliqué.
+
 ## Piège n°1 — une colonne ajoutée à un modèle n'atteint jamais la base seule
 
 Le démarrage du serveur (`src/models/index.js`, fonction `syncDatabase`)
