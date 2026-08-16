@@ -377,6 +377,39 @@ app.use('/static/avatars', express.static(path.join(__dirname, './public/avatars
   etag: true
 }));
 
+/**
+ * Scènes animées de la mascotte, servies telles quelles à l'application.
+ *
+ * Elles vivent dans `src/anim/` et NON dans `src/public/` : ce dossier-là est
+ * de la production (avatars, médias téléversés), il ne se déploie pas et son
+ * contenu ne doit jamais partir dans un tar depuis un poste de dev. `src/anim/`
+ * est du code, versionné comme le reste.
+ *
+ * Servi sans jeton, comme les épingles de la Carte NF et pour la même raison :
+ * une `WebView` ne porte pas l'en-tête `Authorization` de l'app. Ce qui est
+ * exposé ici n'est qu'une illustration — aucune donnée de compte n'y entre.
+ *
+ * Le cache est volontairement à deux vitesses. Les SVG du personnage pèsent
+ * 800 Ko (≈250 Ko une fois gzippés par `compression`, monté plus haut) et ne
+ * bougent qu'à une refonte du personnage : un mois. Les pages, le CSS et les
+ * scripts font quelques kilo-octets et changent à chaque retouche de design :
+ * ils sont revalidés à chaque ouverture, ce qui coûte un 304 vide.
+ *
+ * Un `max-age` long sur les pages a déjà coûté une session de débogage : la
+ * correction était en ligne, le serveur la servait, et l'appareil continuait de
+ * peindre la version d'avant sans jamais redemander. Une page mise en cache un
+ * mois est une page qu'on ne peut plus corriger.
+ */
+app.use('/anim', express.static(path.join(__dirname, './anim'), {
+  etag: true,
+  setHeaders(res, filePath) {
+    res.setHeader(
+      'Cache-Control',
+      filePath.endsWith('.svg') ? 'public, max-age=2592000' : 'public, no-cache'
+    );
+  }
+}));
+
 // Route statique pour les vidéos uploadées
 const storageDir = path.join(__dirname, '../storage');
 if (!fs.existsSync(storageDir)) {

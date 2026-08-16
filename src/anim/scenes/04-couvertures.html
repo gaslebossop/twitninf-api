@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sous les couvertures</title>
+    <link rel="stylesheet" href="scene.css" />
+    <script src="plein.js"></script>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0e0b09;
+      }
+
+      /* On est DEDANS avec elle : une cabane de draps, une torche posee au
+         sol a sa gauche, et rien d'autre.
+
+         Deux regles ont coule les versions precedentes :
+
+         1. Un drap ne se lit pas a son aplat. Il se lit a ses GODETS (les
+            fuseaux qui partent du point d'accroche) et a son OURLET cousu.
+            Un degrade radial vert donnait « une piece verte », jamais
+            « une couverture ». Tout le tissu est donc construit en SVG.
+
+         2. Le decor ne doit pas porter le vert d'eau de son manteau, sinon
+            elle disparait dedans. Le fort est en tons chauds - toile ecrue,
+            laine ocre - et c'est ce contraste qui la detache. */
+      .cabane {
+        --teinte: rgba(255, 198, 132, 0.92);
+        --sens: 62deg;
+
+        /* Matieres du fort, relevees dans la meme famille que sa peluche. */
+        --toile: #6d5540;
+        --toile-nuit: #241a13;
+        --laine: #7d4f33;
+        --laine-nuit: #2b1a12;
+        --piqure: rgba(228, 214, 188, 0.38);
+        --rebord: rgba(255, 196, 134, 0.55);
+      }
+
+      .cabane .place { bottom: 22%; height: 57%; }
+
+      /* La torche est au sol a gauche : l'ombre part a droite et s'etire. */
+      .cabane .ombre {
+        bottom: 21%;
+        left: 54%;
+        width: 44%;
+        height: 3.4%;
+        background: radial-gradient(
+          ellipse at 20% center,
+          rgba(8, 5, 4, 0.94) 0%,
+          rgba(8, 5, 4, 0.46) 36%,
+          transparent 70%
+        );
+      }
+
+      /* ---------- le noir du fort ---------- */
+
+      /* Le noir du fond EST celui de la page : le cadre 4/5 ne dessine donc
+         aucun rectangle, et pose plein ecran dans une app il remplit l'ecran
+         avec le meme noir. La version precedente s'arretait a une ellipse
+         encore opaque sur son bord gauche - d'ou le rectangle vert. */
+      .antre {
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(
+            ellipse 44% 26% at 24% 76%,
+            rgba(255, 168, 88, 0.26) 0%,
+            transparent 70%
+          ),
+          radial-gradient(
+            ellipse 62% 52% at 44% 58%,
+            #2b1d13 0%,
+            #1b120c 44%,
+            #0e0b09 80%,
+            #0e0b09 100%
+          );
+      }
+
+      /* ---------- les draps ---------- */
+
+      /* Deux calques SVG : le tissu (fond, voute, pan droit) et le sol
+         matelasse. Chacun se dissout avant le bord du cadre, la ou le noir
+         du fort prend le relais. */
+      .toile,
+      .sol-tissu {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        overflow: visible;
+        pointer-events: none;
+      }
+
+      /* Le masque ne sert plus qu'aux cotes : le haut doit rester couvert,
+         c'est le drap au-dessus de nous. Il est assez sombre pour se
+         confondre avec le noir de la page. */
+      .toile {
+        -webkit-mask: radial-gradient(ellipse 68% 76% at 46% 52%, #000 0%, #000 26%, transparent 100%);
+        mask: radial-gradient(ellipse 68% 76% at 46% 52%, #000 0%, #000 26%, transparent 100%);
+      }
+
+      /* Profondeur de champ : ce qui est pres de nous n'est pas net. A
+         doser au gramme - au-dela, tout devient une bouillie brune. */
+      #pan-gauche { filter: blur(0.5px); }
+      #pan-droit { filter: blur(0.7px); }
+
+      .sol-tissu {
+        -webkit-mask: radial-gradient(ellipse 50% 62% at 42% 34%, #000 0%, #000 28%, transparent 100%);
+        mask: radial-gradient(ellipse 50% 62% at 42% 34%, #000 0%, #000 28%, transparent 100%);
+      }
+
+      /* Le tissu bouge de tres peu, et depuis son point d'accroche : c'est
+         ce qui evite l'effet « calque qui glisse ». */
+      /* Chaque drap respire depuis SON point d'accroche, sinon le tissu
+         glisse au lieu de se detendre. Les durees sont premieres entre
+         elles : la cabane ne doit jamais retomber sur un temps commun. */
+      /* Enfant direct seulement : les groupes que tissu.js pose a
+         l'interieur (plis, etoiles, lumiere) ne doivent surtout pas partir
+         chacun de leur cote. */
+      .toile > g {
+        transform-box: view-box;
+        animation: drap-respire 17s ease-in-out infinite;
+      }
+      #voute { transform-origin: 54px 46px; }
+      #retombee {
+        transform-origin: 54px -300px;
+        animation-duration: 15s;
+        animation-delay: -3s;
+      }
+      #fond-tissu {
+        transform-origin: 48px -640px;
+        animation-duration: 23s;
+        animation-delay: -6s;
+      }
+      #pan-gauche {
+        transform-origin: -74px -170px;
+        animation-duration: 19s;
+        animation-delay: -11s;
+      }
+      #pan-droit {
+        transform-origin: 172px -190px;
+        animation-duration: 29s;
+        animation-delay: -4s;
+      }
+      @keyframes drap-respire {
+        0%, 100% { scale: 1; }
+        50% { scale: 1.012; }
+      }
+
+      /* ---------- la lumiere qui traverse ---------- */
+
+      /* La signature de « sous une couverture » : le tissu est mince, la
+         torche le TRAVERSE. Sans ca on est dans une piece sombre, pas sous
+         un drap. */
+      .traverse {
+        position: absolute;
+        left: -8%;
+        bottom: 24%;
+        width: 48%;
+        height: 42%;
+        background: radial-gradient(
+          ellipse at 44% 62%,
+          rgba(255, 190, 118, 0.5) 0%,
+          rgba(255, 148, 72, 0.15) 40%,
+          transparent 72%
+        );
+        filter: blur(16px);
+        mix-blend-mode: screen;
+        animation: pile-faible 5.2s ease-in-out infinite;
+      }
+
+      /* ---------- ce qui reste du dehors ---------- */
+
+      /* Le froid n'entre que par la fente en haut a droite, la ou les draps
+         ne joignent pas. Seule note lilas de la scene, et la seule chose qui
+         dise qu'il y a un dehors. */
+      .fente {
+        position: absolute;
+        right: 4%;
+        top: -2%;
+        width: 30%;
+        height: 40%;
+        background: linear-gradient(
+          212deg,
+          rgba(168, 144, 216, 0.36) 0%,
+          rgba(120, 104, 160, 0.1) 28%,
+          transparent 54%
+        );
+        filter: blur(9px);
+        animation: fente 19s ease-in-out infinite;
+      }
+      @keyframes fente {
+        0%, 100% { opacity: 0.42; }
+        50% { opacity: 1; }
+      }
+
+      /* ---------- la torche ---------- */
+
+      .torche {
+        position: absolute;
+        left: 7%;
+        bottom: 20.5%;
+        width: 22%;
+        aspect-ratio: 7 / 2;
+        rotate: -8deg;
+      }
+      /* Cylindre couche : degrade VERTICAL pour le volume. */
+      .torche .corps {
+        position: absolute;
+        inset: 20% 30% 20% 2%;
+        border-radius: 3px;
+        background: linear-gradient(
+          180deg,
+          #2b2723 0%,
+          #6f675c 28%,
+          #8d8479 42%,
+          #4a443c 68%,
+          #1e1b18 100%
+        );
+      }
+      .torche .bague {
+        position: absolute;
+        right: 30%;
+        top: 14%;
+        bottom: 14%;
+        width: 5%;
+        border-radius: 2px;
+        background: linear-gradient(180deg, #3a352f, #a2988a 44%, #2a2622);
+      }
+      .torche .tete {
+        position: absolute;
+        right: 2%;
+        top: 5%;
+        bottom: 5%;
+        width: 30%;
+        border-radius: 4px 10px 10px 4px;
+        background: linear-gradient(
+          180deg,
+          #322d28 0%,
+          #7d7468 30%,
+          #9a9084 44%,
+          #4e4841 70%,
+          #221f1b 100%
+        );
+      }
+      .torche .verre {
+        position: absolute;
+        right: 2%;
+        top: 17%;
+        bottom: 17%;
+        width: 9%;
+        border-radius: 44%;
+        background: #ffeccb;
+        box-shadow: 0 0 26px 10px rgba(255, 194, 118, 0.9);
+        animation: pile-faible 5.2s ease-in-out infinite;
+      }
+      /* Une pile presque vide : la lumiere faiblit, se reprend, retombe. */
+      @keyframes pile-faible {
+        0%, 100% { opacity: 1; }
+        41% { opacity: 0.7; }
+        48% { opacity: 0.96; }
+        57% { opacity: 0.78; }
+        66% { opacity: 1; }
+      }
+
+      /* Le faisceau : coupe en polygone puis floute, pour que l'arete du
+         cone ne se voie jamais. */
+      .faisceau {
+        position: absolute;
+        left: 23%;
+        bottom: 12%;
+        width: 74%;
+        height: 74%;
+        background: linear-gradient(
+          58deg,
+          rgba(255, 208, 150, 0.46) 0%,
+          rgba(255, 172, 96, 0.13) 32%,
+          transparent 62%
+        );
+        clip-path: polygon(0% 82%, 0% 94%, 88% 4%, 58% 0%);
+        filter: blur(13px);
+        animation: pile-faible 5.2s ease-in-out infinite;
+      }
+
+      /* ---------- objets ---------- */
+
+      /* Un livre ouvert pose a plat, a sa droite. */
+      .livre {
+        position: absolute;
+        right: 11%;
+        bottom: 19%;
+        width: 20%;
+        aspect-ratio: 5 / 2;
+        rotate: 6deg;
+        filter: brightness(0.78);
+      }
+      .livre i {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 49%;
+        background: linear-gradient(180deg, #cfc4a8 0%, #9b9077 62%, #6d6553 100%);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.7);
+      }
+      .livre i:first-child { left: 0; border-radius: 3px 1px 1px 3px; rotate: -3deg; }
+      .livre i:last-child { right: 0; border-radius: 1px 3px 3px 1px; rotate: 3deg; }
+      .livre i::after {
+        content: "";
+        position: absolute;
+        inset: 18% 14%;
+        background: repeating-linear-gradient(
+          180deg,
+          rgba(60, 50, 36, 0.42) 0 1px,
+          transparent 1px 5px
+        );
+      }
+
+      /* Un coussin au fond : il etage la profondeur derriere elle. */
+      .coussin {
+        position: absolute;
+        left: 26%;
+        bottom: 36%;
+        width: 30%;
+        aspect-ratio: 2.4 / 1;
+        border-radius: 46% 46% 40% 40%;
+        background: linear-gradient(172deg, #6b4b34 0%, #3a2519 64%, #1d120c 100%);
+        filter: brightness(0.72) blur(0.8px);
+      }
+
+      /* ---------- garde-fou du cadre ---------- */
+
+      /* Le defaut qui a coule les deux premieres versions : un aplat encore
+         opaque au bord dessine un rectangle sur la page. Plutot que de
+         recalculer dix masques a chaque reglage, une seule couche ferme la
+         scene sur le noir exact du fond. */
+      .bord {
+        position: absolute;
+        inset: -1px;
+        background: radial-gradient(
+          ellipse 62% 60% at 46% 56%,
+          transparent 0%,
+          transparent 68%,
+          rgba(14, 11, 9, 0.7) 86%,
+          #0e0b09 100%
+        );
+      }
+
+      /* ---------- premier plan ---------- */
+
+      /* Le pli de couverture par-dessus lequel on regarde. Son rebord
+         attrape la torche : c'est ce qui dit qu'il est DEVANT nous. */
+      .pli-avant {
+        position: absolute;
+        left: -14%;
+        right: -14%;
+        bottom: -16%;
+        height: 34%;
+        border-radius: 48% 42% 0 0 / 78% 68% 0 0;
+        background: linear-gradient(0deg, #0b0807 38%, #241710 74%, #3f2a1c 100%);
+        box-shadow: 0 -1px 0 0 rgba(255, 188, 120, 0.2);
+        filter: blur(6px);
+        -webkit-mask: radial-gradient(ellipse 48% 92% at 46% 78%, #000 0%, #000 46%, transparent 100%);
+        mask: radial-gradient(ellipse 48% 92% at 46% 78%, #000 0%, #000 46%, transparent 100%);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="scene cabane">
+      <div class="antre"></div>
+
+      <svg class="toile" viewBox="0 0 100 125" preserveAspectRatio="none">
+        <defs>
+          <radialGradient id="lueur-toile" cx="0.5" cy="0.5" r="0.5">
+            <stop offset="0%" stop-color="#ffb469" stop-opacity="0.85" />
+            <stop offset="38%" stop-color="#c9702c" stop-opacity="0.34" />
+            <stop offset="100%" stop-color="#000" stop-opacity="0" />
+          </radialGradient>
+        </defs>
+        <g id="fond-tissu"></g>
+        <g id="retombee"></g>
+        <g id="voute"></g>
+        <g id="pan-gauche"></g>
+        <g id="pan-droit"></g>
+      </svg>
+
+      <div class="fente"></div>
+
+      <svg class="sol-tissu" viewBox="0 0 100 125" preserveAspectRatio="none">
+        <defs>
+          <radialGradient id="lueur-sol" cx="0.5" cy="0.5" r="0.5">
+            <stop offset="0%" stop-color="#ffc078" stop-opacity="0.8" />
+            <stop offset="40%" stop-color="#c0682a" stop-opacity="0.3" />
+            <stop offset="100%" stop-color="#000" stop-opacity="0" />
+          </radialGradient>
+        </defs>
+        <g id="matelas"></g>
+      </svg>
+
+      <div class="coussin"></div>
+      <div class="traverse"></div>
+      <div class="faisceau"></div>
+
+      <div class="ombre"></div>
+      <div class="place"><div class="perso" id="perso"></div></div>
+
+      <div class="livre"><i></i><i></i></div>
+
+      <div class="torche">
+        <div class="corps"></div>
+        <div class="bague"></div>
+        <div class="tete"></div>
+        <div class="verre"></div>
+      </div>
+
+      <div class="couche" id="particules"></div>
+      <div class="bord"></div>
+      <div class="pli-avant"></div>
+      <div class="couche grain"></div>
+    </div>
+
+    <script type="module" src="04-couvertures.boot.js"></script>
+  </body>
+</html>

@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Atelier de couture</title>
+    <link rel="stylesheet" href="scene.css" />
+    <script src="plein.js"></script>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        /* Fond de demonstration : la scene, elle, est transparente. */
+        background: #0e0b09;
+      }
+
+      /* La seule scene ou le lilas n'est pas une ambiance mais une matiere :
+         c'est la bobine du fil dont son oeil est brode. */
+      .atelier {
+        --teinte: rgba(255, 198, 132, 0.75);
+        --sens: 116deg;
+        --bois-clair: #7a5c40;
+        --bois: #55402e;
+        --bois-sombre: #2c2017;
+      }
+
+      /* Elle est debout SUR le plateau, pas devant. */
+      .atelier .place { bottom: 26%; height: 56%; }
+
+      /* Ombre de contact : courte, dense, juste sous ses pieds. C'est elle
+         qui la pose sur le bois ; l'ombre large de base la faisait leviter. */
+      .atelier .ombre {
+        bottom: 25.5%;
+        width: 34%;
+        height: 3.4%;
+        background: radial-gradient(
+          ellipse at center,
+          rgba(20, 12, 6, 0.85) 0%,
+          rgba(20, 12, 6, 0.4) 42%,
+          transparent 72%
+        );
+      }
+
+      /* ---------- l'etabli ---------- */
+
+      /* Le plateau n'est PAS un bloc : c'est le plan de travail qui occupe
+         tout le bas du cadre et en sort. Un trapeze avec sa tranche visible
+         fabriquait un socle de figurine, pas un atelier.
+         La profondeur vient du degrade (sombre au fond, chaud au milieu,
+         sombre au premier plan hors du faisceau) et de la taille des objets,
+         pas d'une arete dessinee. */
+      .plateau {
+        position: absolute;
+        /* Cale sur la scene, pas au-dela : un element plus large que le
+           cadre place sa zone de fondu hors champ, et .scene le recoupe
+           net. Le degrade doit s'eteindre DANS le cadre. */
+        left: 0;
+        right: 0;
+        top: 55%;
+        bottom: 0;
+        background: linear-gradient(
+          178deg,
+          #2a1f16 0%,
+          #40301f 6%,
+          var(--bois) 22%,
+          var(--bois-clair) 46%,
+          #5c4531 68%,
+          #33261a 88%,
+          #1a130d 100%
+        );
+        /* Une seule ellipse : elle eteint le plateau a gauche, a droite et
+           en bas d'un coup. Deux couches + mask-composite ne passaient pas,
+           la version prefixee et la version standard s'annulent. */
+        -webkit-mask: radial-gradient(
+          ellipse 54% 62% at 50% 20%,
+          #000 0%,
+          #000 36%,
+          transparent 100%
+        );
+        mask: radial-gradient(
+          ellipse 54% 62% at 50% 20%,
+          #000 0%,
+          #000 36%,
+          transparent 100%
+        );
+      }
+      /* Veinage : des fuyantes qui convergent, elles seules disent la
+         perspective. */
+      .plateau::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          linear-gradient(93deg, transparent 27%, rgba(255, 220, 170, 0.06) 28%, transparent 29.5%),
+          linear-gradient(87deg, transparent 58%, rgba(0, 0, 0, 0.16) 59%, transparent 60.5%),
+          linear-gradient(95deg, transparent 71%, rgba(255, 220, 170, 0.04) 72%, transparent 73%);
+      }
+      /* L'arete du fond : une simple ligne de lumiere, la ou le plateau
+         rencontre l'ombre de la piece. */
+      .plateau::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 0;
+        height: 3px;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(255, 206, 146, 0.32) 32%,
+          rgba(255, 206, 146, 0.14) 68%,
+          transparent
+        );
+      }
+
+      /* ---------- bobines ---------- */
+
+      /* Cylindre : le degrade HORIZONTAL fait le volume, les rainures
+         horizontales font l'enroulement du fil. */
+      .bobine { position: absolute; }
+      .bobine .corps {
+        position: absolute;
+        inset: 9% 0;
+        background:
+          repeating-linear-gradient(
+            0deg,
+            rgba(0, 0, 0, 0.2) 0 1px,
+            transparent 1px 3.5px
+          ),
+          linear-gradient(
+            90deg,
+            rgba(0, 0, 0, 0.62) 0%,
+            rgba(0, 0, 0, 0.1) 26%,
+            rgba(255, 255, 255, 0.22) 42%,
+            rgba(0, 0, 0, 0.12) 62%,
+            rgba(0, 0, 0, 0.66) 100%
+          ),
+          var(--fil, #8c7d6a);
+        border-radius: 14% / 5%;
+      }
+      .bobine .joue {
+        position: absolute;
+        left: -11%;
+        right: -11%;
+        height: 11%;
+        border-radius: 50% / 50%;
+        background: linear-gradient(90deg, #3a2a1c, #a07a52 40%, #6b4f36 72%, #2e2116);
+      }
+      .bobine .joue.haut { top: 0; }
+      .bobine .joue.bas { bottom: 0; }
+
+      /* Au fond, juste sous l'arete : petites, sombres, un peu floues.
+         C'est l'echelon le plus lointain de la profondeur. */
+      .b1 {
+        left: 21%;
+        bottom: 41%;
+        width: 5.2%;
+        aspect-ratio: 1 / 1.6;
+        --fil: #5d7a6f;
+        filter: brightness(0.5) blur(0.6px);
+      }
+      .b2 {
+        right: 24%;
+        bottom: 42.5%;
+        width: 4.4%;
+        aspect-ratio: 1 / 1.5;
+        --fil: #97907f;
+        filter: brightness(0.44) blur(0.7px);
+      }
+
+      /* Devant, la sienne : plus basse dans le cadre donc plus proche, plus
+         grande, nette, et la seule qui luit. */
+      .b3 {
+        right: 14%;
+        bottom: 21%;
+        width: 11.5%;
+        aspect-ratio: 1 / 1.55;
+        --fil: #86729a;
+        animation: bobine-vit 13s ease-in-out infinite;
+      }
+      @keyframes bobine-vit {
+        0%, 100% { rotate: 0deg; }
+        50% { rotate: -2.5deg; }
+      }
+      .b3 .corps {
+        box-shadow: 0 0 20px rgba(134, 114, 154, 0.5);
+      }
+
+      /* ---------- pelote a epingles ---------- */
+
+      .pelote {
+        position: absolute;
+        left: 14%;
+        bottom: 22%;
+        width: 14%;
+        aspect-ratio: 1.5 / 1;
+        border-radius: 50% 50% 46% 46%;
+        background:
+          radial-gradient(ellipse at 34% 26%, rgba(255, 190, 150, 0.28) 0%, transparent 46%),
+          linear-gradient(160deg, #7d3f38 0%, #5a2a26 52%, #331714 100%);
+        box-shadow: inset -3px -4px 8px rgba(0, 0, 0, 0.5);
+      }
+      /* Coutures qui la sectionnent, comme une vraie tomate a epingles. */
+      .pelote::before {
+        content: "";
+        position: absolute;
+        inset: 8% 12%;
+        border-radius: inherit;
+        background:
+          linear-gradient(92deg, transparent 48%, rgba(0, 0, 0, 0.35) 49.5%, transparent 51%),
+          linear-gradient(52deg, transparent 48%, rgba(0, 0, 0, 0.28) 49.5%, transparent 51%);
+      }
+      .epingle {
+        position: absolute;
+        width: 1.5px;
+        background: linear-gradient(180deg, #d9d2c4, #6f6a60);
+        transform-origin: 50% 100%;
+      }
+      .epingle::after {
+        content: "";
+        position: absolute;
+        top: -3px;
+        left: -1.5px;
+        width: 4.5px;
+        height: 4.5px;
+        border-radius: 50%;
+      }
+      .e1 { left: 26%; bottom: 62%; height: 22%; rotate: -18deg; }
+      .e1::after { background: #b98cff; box-shadow: 0 0 5px rgba(185, 140, 255, 0.8); }
+      .e2 { left: 48%; bottom: 66%; height: 26%; rotate: 6deg; }
+      .e2::after { background: #d9c8a0; }
+      .e3 { left: 66%; bottom: 60%; height: 18%; rotate: 24deg; }
+      .e3::after { background: #7ea998; }
+
+      /* ---------- le de a coudre ---------- */
+
+      .de {
+        position: absolute;
+        right: 33%;
+        bottom: 23.5%;
+        width: 5.4%;
+        aspect-ratio: 4 / 5;
+        border-radius: 46% 46% 14% 14%;
+        background: linear-gradient(
+          96deg,
+          #4a3520 0%,
+          #b08d58 34%,
+          #e6c894 48%,
+          #9a7748 66%,
+          #3d2b1a 100%
+        );
+      }
+      .de::after {
+        content: "";
+        position: absolute;
+        inset: 10% 16% 26% 16%;
+        border-radius: 44% 44% 8% 8%;
+        background-image: radial-gradient(circle, rgba(60, 42, 22, 0.55) 0.7px, transparent 1.1px);
+        background-size: 3.5px 3.5px;
+      }
+
+      /* ---------- pile de tissu pliee ---------- */
+
+      /* Pliee, pas en flaque : trois bandes empilees et decalees. */
+      .pile {
+        position: absolute;
+        left: 33%;
+        bottom: 22.5%;
+        width: 18%;
+        aspect-ratio: 4 / 1.5;
+      }
+      .pile i {
+        position: absolute;
+        left: 0;
+        right: 0;
+        height: 34%;
+        border-radius: 3px 5px 4px 2px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+      }
+      .pile i:nth-child(1) { bottom: 0; background: linear-gradient(170deg, #6d9285, #3d5a51); }
+      .pile i:nth-child(2) { bottom: 26%; left: 4%; right: 3%; background: linear-gradient(170deg, #c6bba4, #8b8272); }
+      .pile i:nth-child(3) { bottom: 52%; left: 9%; right: 8%; background: linear-gradient(170deg, #7ea998, #4a6d62); }
+
+      /* ---------- le fil ---------- */
+
+      /* Fin. Le precedent faisait 2,2 unites dans un viewBox etire : un
+         boudin. Ici le viewBox suit le format de la scene et le trait fait
+         0,45 unite. */
+      .fil {
+        position: absolute;
+        inset: 0;
+        overflow: visible;
+      }
+      .fil path { fill: none; stroke-linecap: round; }
+      .fil .brin { stroke: #7c6b90; stroke-width: 0.45; opacity: 0.9; }
+      .fil .lueur {
+        stroke: #cbb3ff;
+        stroke-width: 0.75;
+        stroke-dasharray: 5 96;
+        filter: drop-shadow(0 0 1.2px rgba(185, 140, 255, 0.95));
+        animation: fil-court 8s linear infinite;
+      }
+      @keyframes fil-court {
+        to { stroke-dashoffset: -101; }
+      }
+
+      /* ---------- lumiere ---------- */
+
+      /* La lampe est un objet, pas seulement une lueur : abat-jour en haut
+         a gauche, hors du cadre a moitie. */
+      .abat-jour {
+        position: absolute;
+        left: 6%;
+        top: -4%;
+        width: 26%;
+        aspect-ratio: 2 / 1;
+        border-radius: 0 0 50% 50% / 0 0 88% 88%;
+        background: linear-gradient(178deg, #4a3a2a 0%, #2a2018 62%, #171009 100%);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.6);
+      }
+      .abat-jour::after {
+        content: "";
+        position: absolute;
+        left: 26%;
+        right: 26%;
+        bottom: -6%;
+        height: 16%;
+        border-radius: 50%;
+        background: #ffe0ac;
+        box-shadow: 0 0 30px 12px rgba(255, 186, 110, 0.75);
+        animation: lampe 5.8s ease-in-out infinite;
+      }
+      @keyframes lampe {
+        0%, 100% { opacity: 0.9; }
+        38% { opacity: 1; }
+        70% { opacity: 0.94; }
+      }
+
+      /* Flaque de lumiere sur le bois. Masquee en ovale pour ne jamais
+         atteindre les bords : sinon le rectangle de la scene apparait. */
+      .flaque {
+        background: radial-gradient(
+          ellipse 46% 34% at 34% 22%,
+          rgba(255, 198, 130, 0.5) 0%,
+          rgba(255, 162, 84, 0.16) 40%,
+          transparent 72%
+        );
+        -webkit-mask: radial-gradient(ellipse 62% 62% at 42% 40%, #000 0%, #000 42%, transparent 82%);
+        mask: radial-gradient(ellipse 62% 62% at 42% 40%, #000 0%, #000 42%, transparent 82%);
+        animation: lampe 5.8s ease-in-out infinite;
+      }
+
+      /* ---------- premier plan ---------- */
+
+      /* Chute de tissu au bord, floue : elle range la mascotte dans la
+         profondeur au lieu de la coller a plat. */
+      .avant-plan {
+        position: absolute;
+        left: -8%;
+        bottom: -6%;
+        width: 42%;
+        height: 20%;
+        border-radius: 42% 60% 10% 20% / 60% 40% 20% 30%;
+        background: linear-gradient(200deg, #4a3a2a, #1c1410);
+        filter: blur(8px);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="scene atelier">
+      <div class="abat-jour"></div>
+      <div class="couche flaque"></div>
+
+      <div class="plateau"></div>
+
+      <div class="bobine b1"><div class="joue haut"></div><div class="corps"></div><div class="joue bas"></div></div>
+      <div class="bobine b2"><div class="joue haut"></div><div class="corps"></div><div class="joue bas"></div></div>
+
+      <div class="ombre"></div>
+      <div class="place"><div class="perso" id="perso"></div></div>
+
+      <div class="pile"><i></i><i></i><i></i></div>
+      <div class="de"></div>
+
+      <div class="pelote">
+        <span class="epingle e1"></span>
+        <span class="epingle e2"></span>
+        <span class="epingle e3"></span>
+      </div>
+
+      <div class="bobine b3"><div class="joue haut"></div><div class="corps"></div><div class="joue bas"></div></div>
+
+      <svg class="fil" viewBox="0 0 100 125" preserveAspectRatio="xMidYMid slice">
+        <path class="brin" d="M 82 88 C 76 90, 71 93, 64 93 C 56 93, 51 89.5, 44 90 C 38 90.5, 34 94, 28 93.5 C 23 93, 20 91, 16 91.5"/>
+        <path class="lueur" d="M 82 88 C 76 90, 71 93, 64 93 C 56 93, 51 89.5, 44 90 C 38 90.5, 34 94, 28 93.5 C 23 93, 20 91, 16 91.5"/>
+      </svg>
+
+      <div class="couche" id="particules"></div>
+      <div class="avant-plan"></div>
+      <div class="couche grain"></div>
+    </div>
+
+    <script type="module" src="03-atelier.boot.js"></script>
+  </body>
+</html>

@@ -1,0 +1,303 @@
+/* ============================================================
+   Socle commun des cinq scenes.
+
+   Regles de la DA :
+   - fond transparent, la scene se pose sur la page ;
+   - elle est posee sur un sol et porte une ombre ;
+   - chaud (ambre, or patine) en tension avec le lilas de son fil ;
+   - lent : la boucle de base fait 9 s ;
+   - elle joue : tete, corps, queue. Ni le manteau (vert d'eau sur vert
+     d'eau, toute couture se voit), ni les oreilles (elles font partie du
+     meme polygone que le crane), ni l'oeil (brode ferme).
+   ============================================================ */
+
+:root {
+  /* Palette relevee au pixel sur le personnage lui-meme. */
+  --suie: #110f0d;
+  --brun: #412e23;
+  --brun-clair: #514339;
+  --eau: #7ea998;
+  --eau-sombre: #3a574f;
+  --ivoire: #dad3c3;
+  --beige: #b2916e;
+  --or: #c9a97a;
+  --or-sombre: #947352;
+
+  /* Le fil de son oeil : seule note froide et saturee du personnage. */
+  --lilas: #86729a;
+  --lilas-vif: #b98cff;
+  --lilas-sombre: #54465f;
+
+  --ambre: #ffb765;
+  --ambre-chaud: #ff9340;
+
+  --boucle: 9s;
+  --doux: cubic-bezier(0.45, 0, 0.35, 1);
+}
+
+.scene {
+  position: relative;
+  width: 100%;
+  max-width: 540px;
+  aspect-ratio: 4 / 5;
+  margin: 0 auto;
+  /* Rien ici : le fond de la page doit passer au travers. */
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.couche {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* ---------- le sol et l'ombre ---------- */
+
+/* Surface sur laquelle elle est posee. Chaque scene la redefinit
+   (tapis, rebord, table, tissu, terre) mais garde la meme assise. */
+.sol {
+  position: absolute;
+  left: 50%;
+  bottom: 12%;
+  translate: -50% 0;
+  width: 78%;
+  height: 13%;
+  border-radius: 50%;
+}
+
+/* L'ombre portee respire avec elle : elle se resserre quand la mascotte
+   se souleve. Sans ca, le flottement ressemble a un calque qui glisse. */
+.ombre {
+  position: absolute;
+  left: 50%;
+  bottom: 14.5%;
+  translate: -50% 0;
+  width: 46%;
+  height: 5.5%;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(12, 9, 7, 0.72) 0%,
+    rgba(12, 9, 7, 0.34) 45%,
+    transparent 72%
+  );
+  animation: ombre-respire var(--boucle) var(--doux) infinite;
+}
+
+@keyframes ombre-respire {
+  0%, 100% { scale: 1 1; opacity: 0.9; }
+  28% { scale: 0.93 0.86; opacity: 0.72; }
+  62% { scale: 1.03 1.06; opacity: 1; }
+}
+
+/* ---------- la mascotte ---------- */
+
+/* Placement et mouvement sont separes : la boucle « souffle » anime
+   translate, et ecraserait le translate:-50% qui assure le centrage. */
+.place {
+  position: absolute;
+  left: 50%;
+  bottom: 15%;
+  translate: -50% 0;
+  height: 68%;
+  aspect-ratio: 685.56 / 1270.06;
+}
+
+.perso {
+  position: absolute;
+  inset: 0;
+  animation: souffle var(--boucle) var(--doux) infinite;
+}
+
+.perso svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+
+/* Respiration + tres leger balancement du corps entier. C'est ce qui fait
+   bouger le manteau sans jamais ouvrir de couture dedans. */
+@keyframes souffle {
+  0%, 100% { translate: 0 0; scale: 1 1; rotate: 0deg; }
+  28% { translate: 0 -1.1%; scale: 1.004 1.012; rotate: -0.5deg; }
+  62% { translate: 0 0.3%; scale: 1.002 0.996; rotate: 0.4deg; }
+}
+
+/* Amplitudes validees au banc : au-dela, la doublure ne suit plus. */
+#tete { animation: tete var(--boucle) var(--doux) infinite; }
+@keyframes tete {
+  0%, 100% { rotate: 0deg; }
+  22% { rotate: -1.6deg; }
+  46% { rotate: -2.4deg; }
+  74% { rotate: 1.1deg; }
+}
+
+/* Pas d'animation d'oreilles : la vectorisation a trace le crane et ses deux
+   pointes en un seul polygone, il n'y a rien a isoler. La tete entiere porte
+   le mouvement. */
+
+/* L'ourlet : copie floutee et agrandie d'une partie, posee DANS son groupe.
+   Il subit donc la meme rotation qu'elle et bouche le jour qu'elle ouvre,
+   au lieu de trainer en arriere comme une doublure figee. */
+.ourlet {
+  filter: blur(7px);
+  scale: 1.05;
+  pointer-events: none;
+}
+
+#queue { animation: queue calc(var(--boucle) * 0.62) ease-in-out infinite; }
+@keyframes queue {
+  0%, 100% { rotate: -2deg; }
+  50% { rotate: 7deg; }
+}
+
+/* L'oeil n'est pas anime. Il est brode ferme sur le personnage, et lui en
+   rapporter un ouvert par-dessus donnait une bille posee sur le crane.
+   #oeil reste dans la tete, immobile, et suit ses mouvements. */
+
+/* ---------- eclairage porte par la scene ---------- */
+
+/* Un calque teinte decoupe a la silhouette : la lumiere de la scene se
+   pose SUR elle au lieu de flotter a cote. Chaque scene choisit sa teinte
+   via --teinte et son cote via --sens.
+   Il vit DANS .perso : il doit respirer avec elle, sinon la lumiere glisse
+   sur le personnage a chaque inspiration. */
+.eclairage {
+  position: absolute;
+  inset: 0;
+  /* Masque par le personnage LUI-MEME, pas par sa silhouette : le contour
+     exterieur deborde de quelques pixels et fabriquait un halo blanc colle
+     au bord, qui faisait « glow » d'editeur d'images. */
+  -webkit-mask: url("../perso/ninf.svg") center / contain no-repeat;
+  mask: url("../perso/ninf.svg") center / contain no-repeat;
+  background: linear-gradient(
+    var(--sens, 100deg),
+    var(--teinte, rgba(255, 183, 101, 0.55)) 0%,
+    transparent 62%
+  );
+  /* soft-light eclaire sans bruler : screen delave le vert d'eau. */
+  mix-blend-mode: soft-light;
+  opacity: 0.9;
+}
+
+/* ---------- grain ---------- */
+
+/* Le grain est masque en ovale : sur un fond transparent, une nappe de bruit
+   plein cadre dessinerait un rectangle gris sur la page. */
+.grain {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.09;
+  mix-blend-mode: overlay;
+  -webkit-mask: radial-gradient(ellipse at 50% 58%, #000 0%, #000 42%, transparent 76%);
+  mask: radial-gradient(ellipse at 50% 58%, #000 0%, #000 42%, transparent 76%);
+}
+
+/* ---------- poussieres ---------- */
+
+.poussiere {
+  position: absolute;
+  border-radius: 50%;
+  background: var(--grain-teinte, var(--ambre));
+  filter: blur(0.4px);
+  animation: monte linear infinite;
+}
+@keyframes monte {
+  0% { transform: translateY(0) translateX(0); opacity: 0; }
+  12% { opacity: var(--pic, 0.7); }
+  78% { opacity: var(--pic, 0.7); }
+  100% { transform: translateY(-160px) translateX(var(--derive, 12px)); opacity: 0; }
+}
+
+/* ---------- pluie ---------- */
+
+.trait-pluie {
+  position: absolute;
+  top: -12%;
+  width: 1.2px;
+  border-radius: 1px;
+  animation-name: tombe;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+/* --chute-pluie : hauteur a parcourir, posee par la scene selon la taille
+   de sa vitre. Un pourcentage ne marcherait pas, il se rapporterait a la
+   hauteur du trait lui-meme. */
+@keyframes tombe {
+  to { translate: 0 var(--chute-pluie, 560px); }
+}
+
+/* Une goutte sur une vitre ne descend pas d'un trait : elle retient, cede,
+   file, puis retient a nouveau. Les paliers de la courbe font ca. */
+.goutte {
+  position: absolute;
+  border-radius: 50% 50% 58% 58%;
+  background: linear-gradient(
+    160deg,
+    rgba(228, 224, 245, 0.85),
+    rgba(150, 142, 185, 0.5)
+  );
+  box-shadow: 0 0 3px rgba(210, 204, 236, 0.35);
+  animation-name: ruisselle;
+  animation-timing-function: cubic-bezier(0.85, 0, 0.3, 1);
+  animation-iteration-count: infinite;
+}
+@keyframes ruisselle {
+  0% { translate: 0 0; opacity: 0; }
+  8% { opacity: 0.9; }
+  22% { translate: 0 6%; }
+  46% { translate: 0 12%; }
+  86% { translate: 1px var(--chute, 200px); opacity: 0.75; }
+  100% { translate: 1px calc(var(--chute, 200px) * 1.1); opacity: 0; }
+}
+
+/* Trainee laissee par la goutte : elle « essuie » la buee au passage. */
+.goutte::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  translate: -50% 0;
+  width: 55%;
+  height: var(--chute, 200px);
+  background: linear-gradient(
+    to top,
+    rgba(220, 215, 240, 0.28),
+    transparent 70%
+  );
+}
+
+/* ---------- mode plein cadre ---------- */
+
+/* Les pages de ce dossier sont des maquettes : une scene au rapport 4/5,
+   centree sur un fond de demonstration. Embarquee dans l'app, la meme page
+   doit REMPLIR la vue - d'ou cette variante, activee par `?plein` dans l'URL.
+
+   Rien d'autre n'est a recalculer : toutes les couches sont posees en
+   pourcentages, elles suivent donc le nouveau rapport. Seul le personnage
+   garde ses proportions, son `aspect-ratio` etant porte par .place. */
+html.plein,
+html.plein body {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+html.plein .scene {
+  max-width: none;
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scene *, .scene *::before, .scene *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

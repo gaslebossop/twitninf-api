@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chambre</title>
+    <link rel="stylesheet" href="scene.css" />
+    <script src="plein.js"></script>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        /* Fond de demonstration : la scene, elle, est transparente. */
+        background: #0e0b09;
+      }
+
+      .chambre {
+        --teinte: rgba(255, 183, 101, 0.75);
+        --sens: 104deg;
+      }
+
+      /* ---------- la lumiere de la piece ---------- */
+
+      /* Le halo de la veilleuse. Battement a temps inegaux : une mèche ne
+         pulse pas en rythme, sinon on voit la boucle. */
+      .halo {
+        background: radial-gradient(
+          ellipse 56% 44% at 24% 76%,
+          rgba(255, 172, 84, 0.55) 0%,
+          rgba(255, 138, 56, 0.22) 36%,
+          transparent 70%
+        );
+        animation: meche 4.3s ease-in-out infinite;
+      }
+      @keyframes meche {
+        0%, 100% { opacity: 0.84; scale: 1; }
+        17% { opacity: 1; scale: 1.035; }
+        29% { opacity: 0.8; scale: 0.995; }
+        53% { opacity: 0.97; scale: 1.02; }
+        71% { opacity: 0.86; scale: 1.005; }
+        88% { opacity: 1; scale: 1.03; }
+      }
+
+      /* Contre-jour froid venu d'une fenetre hors champ, a droite.
+         C'est la tension chaud / lilas : la piece est ambre, la nuit est froide. */
+      .nuit {
+        background: linear-gradient(
+          255deg,
+          rgba(134, 114, 154, 0.3) 0%,
+          rgba(134, 114, 154, 0.08) 26%,
+          transparent 52%
+        );
+      }
+
+      /* Rayons de la veilleuse, tres tenus, qui balayent. */
+      .rais {
+        background: conic-gradient(
+          from 190deg at 24% 78%,
+          transparent 0deg,
+          rgba(255, 190, 120, 0.11) 14deg,
+          transparent 26deg,
+          transparent 40deg,
+          rgba(255, 190, 120, 0.07) 52deg,
+          transparent 66deg
+        );
+        animation: rais 11s ease-in-out infinite;
+      }
+      @keyframes rais {
+        0%, 100% { opacity: 0.55; rotate: 0deg; }
+        50% { opacity: 0.9; rotate: 2.5deg; }
+      }
+
+      /* ---------- le sol ---------- */
+
+      /* Plinthe : sans elle le tapis flotte dans le noir et rien ne dit
+         qu'on est dans une piece. */
+      .plinthe {
+        position: absolute;
+        left: 4%;
+        right: 4%;
+        bottom: 27%;
+        height: 1.6%;
+        border-radius: 2px;
+        background: linear-gradient(
+          90deg,
+          transparent 0%,
+          rgba(90, 68, 50, 0.55) 18%,
+          rgba(120, 92, 66, 0.6) 32%,
+          rgba(70, 53, 40, 0.45) 62%,
+          transparent 92%
+        );
+      }
+      .parquet {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 28%;
+        background: linear-gradient(
+          180deg,
+          rgba(58, 42, 31, 0.55) 0%,
+          rgba(30, 22, 17, 0.35) 60%,
+          transparent 100%
+        );
+        -webkit-mask: radial-gradient(ellipse 70% 120% at 40% 20%, #000 0%, #000 40%, transparent 82%);
+        mask: radial-gradient(ellipse 70% 120% at 40% 20%, #000 0%, #000 40%, transparent 82%);
+      }
+
+      .tapis {
+        background: radial-gradient(
+          ellipse at 32% 38%,
+          #55402f 0%,
+          #3a2b21 44%,
+          #241a15 72%,
+          transparent 88%
+        );
+      }
+      .tapis::after {
+        content: "";
+        position: absolute;
+        inset: 14% 12%;
+        border-radius: 50%;
+        border: 1.5px solid rgba(218, 211, 195, 0.09);
+      }
+
+      /* ---------- la veilleuse ---------- */
+
+      .veilleuse {
+        position: absolute;
+        left: 12%;
+        bottom: 16.5%;
+        width: 12.5%;
+        aspect-ratio: 5 / 8;
+      }
+      .veilleuse > * { position: absolute; }
+
+      .veilleuse .anse {
+        left: 30%;
+        top: 0;
+        width: 40%;
+        height: 13%;
+        border: 2px solid #55402f;
+        border-bottom: none;
+        border-radius: 50% 50% 0 0;
+      }
+      .veilleuse .chapeau {
+        left: 6%;
+        top: 11%;
+        width: 88%;
+        height: 13%;
+        border-radius: 40% 40% 12% 12%;
+        background: linear-gradient(180deg, #7a5f45, #43331f);
+      }
+      .veilleuse .verre {
+        left: 14%;
+        top: 22%;
+        width: 72%;
+        height: 56%;
+        border-radius: 22% 22% 30% 30%;
+        background: linear-gradient(
+          172deg,
+          rgba(255, 226, 172, 0.98),
+          rgba(255, 158, 66, 0.92) 58%,
+          rgba(176, 82, 26, 0.95)
+        );
+        box-shadow: 0 0 32px 10px rgba(255, 158, 70, 0.6);
+        animation: meche 4.3s ease-in-out infinite;
+      }
+      /* Montants du verre : c'est ce qui fait lanterne plutot que gelule. */
+      .veilleuse .verre::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        background: linear-gradient(
+          90deg,
+          rgba(67, 51, 31, 0.85) 0 7%,
+          transparent 7% 46%,
+          rgba(67, 51, 31, 0.5) 46% 52%,
+          transparent 52% 93%,
+          rgba(67, 51, 31, 0.85) 93% 100%
+        );
+      }
+      .veilleuse .flamme {
+        left: 40%;
+        top: 40%;
+        width: 20%;
+        height: 22%;
+        border-radius: 50% 50% 42% 42%;
+        background: #fff4dc;
+        filter: blur(2px);
+        animation: flamme 1.9s ease-in-out infinite;
+      }
+      @keyframes flamme {
+        0%, 100% { scale: 1 1; opacity: 0.95; translate: 0 0; }
+        33% { scale: 0.88 1.14; opacity: 1; translate: -4% -3%; }
+        66% { scale: 1.06 0.92; opacity: 0.85; translate: 3% 1%; }
+      }
+      .veilleuse .socle {
+        left: 16%;
+        bottom: 0;
+        width: 68%;
+        height: 12%;
+        border-radius: 3px 3px 6px 6px;
+        background: linear-gradient(180deg, #6b5540, #33261c);
+      }
+
+      /* ---------- premier plan ---------- */
+
+      /* Un coin de coussin flou en bas a droite : la profondeur de champ
+         range la mascotte DANS la piece au lieu de la coller devant. */
+      .coussin {
+        position: absolute;
+        right: -8%;
+        bottom: -6%;
+        width: 46%;
+        height: 22%;
+        border-radius: 46% 30% 12% 40%;
+        background: linear-gradient(
+          200deg,
+          rgba(74, 58, 44, 0.95),
+          rgba(38, 28, 21, 0.98)
+        );
+        filter: blur(9px);
+      }
+
+      /* ---------- la bascule vers le lilas ---------- */
+
+      /* Quand son oeil s'ouvre, le froid gagne la piece une seconde, puis
+         l'ambre reprend. C'est le seul evenement de la boucle. */
+      /* Surtout PAS un radial centre sur elle : ca ne lit pas « la piece se
+         refroidit », ca lit « le personnage brille ». C'est la nuit qui
+         gagne du terrain depuis la fenetre hors champ, puis reflue.
+         Marée lente sur toute la boucle, sans a-coup : il n'y a plus
+         d'evenement (l'oeil) auquel se raccrocher. */
+      .bascule {
+        background: linear-gradient(
+          252deg,
+          rgba(158, 130, 200, 0.34) 0%,
+          rgba(134, 114, 154, 0.16) 30%,
+          rgba(134, 114, 154, 0.05) 55%,
+          transparent 78%
+        );
+        animation: bascule calc(var(--boucle) * 2.4) ease-in-out infinite;
+      }
+      @keyframes bascule {
+        0%, 100% { opacity: 0.25; translate: 3% 0; }
+        50% { opacity: 1; translate: 0 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="scene chambre">
+      <div class="couche nuit"></div>
+      <div class="couche halo"></div>
+      <div class="couche rais"></div>
+
+      <div class="parquet"></div>
+      <div class="plinthe"></div>
+      <div class="sol tapis"></div>
+      <div class="ombre"></div>
+
+      <div class="veilleuse">
+        <div class="anse"></div>
+        <div class="chapeau"></div>
+        <div class="verre"></div>
+        <div class="flamme"></div>
+        <div class="socle"></div>
+      </div>
+
+      <div class="place"><div class="perso" id="perso"></div></div>
+
+      <div class="couche bascule"></div>
+      <div class="couche" id="particules"></div>
+      <div class="coussin"></div>
+      <div class="couche grain"></div>
+    </div>
+
+    <script type="module" src="01-chambre.boot.js"></script>
+  </body>
+</html>

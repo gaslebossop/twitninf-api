@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Feu de camp</title>
+    <link rel="stylesheet" href="scene.css" />
+    <script src="plein.js"></script>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0e0b09;
+      }
+
+      /* La seule scene des cinq qui se passe dehors. Tout y repose sur une
+         tension unique : l'ambre du feu contre le lilas de la nuit - qui est
+         aussi la couleur du fil de son oeil.
+
+         Le feu est DEVANT elle et plus bas que ses pieds : c'est ce qui
+         donne la profondeur et ce qui justifie un eclairage par en dessous.
+         Toute la lumiere de la scene bat sur le meme temps que lui. */
+      .camp {
+        --teinte: rgba(255, 176, 88, 0.7);
+        --sens: 28deg;
+        --nuit: #0e0b09;
+      }
+
+      .camp .place { bottom: 27%; height: 54%; }
+
+      /* Le feu est en bas a gauche : l'ombre part vers le fond a droite et
+         se perd dans la nuit - dehors, rien ne la recoit. */
+      .camp .ombre {
+        bottom: 27%;
+        left: 56%;
+        width: 40%;
+        height: 3%;
+        background: radial-gradient(
+          ellipse at 18% center,
+          rgba(6, 4, 3, 0.9) 0%,
+          rgba(6, 4, 3, 0.4) 34%,
+          transparent 68%
+        );
+        animation: ombre-feu 3.7s ease-in-out infinite;
+      }
+      /* L'ombre d'un feu ne respire pas : elle tremble. */
+      @keyframes ombre-feu {
+        0%, 100% { opacity: 0.92; scale: 1 1; }
+        23% { opacity: 0.7; scale: 1.05 0.94; }
+        51% { opacity: 1; scale: 0.97 1.04; }
+        78% { opacity: 0.8; scale: 1.03 0.97; }
+      }
+
+      /* ---------- la nuit ---------- */
+
+      /* Pas de bleu de dessin anime : la nuit est un lilas tres desature qui
+         vire au noir de la page bien avant les bords. */
+      .nuit {
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(
+            ellipse 52% 30% at 34% 84%,
+            rgba(255, 150, 66, 0.28) 0%,
+            transparent 72%
+          ),
+          radial-gradient(
+            ellipse 64% 56% at 46% 46%,
+            #241f30 0%,
+            #191627 40%,
+            #100d15 68%,
+            #0e0b09 100%
+          );
+      }
+
+      /* Le champ d'etoiles. Deux tailles a des pas differents : une seule
+         grille se lit comme un motif de papier peint. */
+      .ciel {
+        background-image:
+          radial-gradient(circle, rgba(226, 220, 244, 0.9) 1.1px, transparent 1.6px),
+          radial-gradient(circle, rgba(198, 190, 226, 0.7) 0.7px, transparent 1.1px);
+        background-size: 74px 81px, 47px 53px;
+        background-position: 0 0, 23px 29px;
+        -webkit-mask: radial-gradient(ellipse 54% 34% at 50% 16%, #000 0%, transparent 88%);
+        mask: radial-gradient(ellipse 54% 34% at 50% 16%, #000 0%, transparent 88%);
+        animation: ciel 11s ease-in-out infinite;
+      }
+      @keyframes ciel {
+        0%, 100% { opacity: 0.5; }
+        50% { opacity: 0.85; }
+      }
+
+      /* La lune est hors champ : il n'en reste qu'un lavis froid qui tombe
+         de la droite. C'est lui qui detache son crane du fond. */
+      .lune {
+        position: absolute;
+        right: -4%;
+        top: -12%;
+        width: 66%;
+        height: 62%;
+        background: radial-gradient(
+          ellipse at 58% 34%,
+          rgba(176, 158, 220, 0.24) 0%,
+          rgba(120, 108, 158, 0.08) 38%,
+          transparent 70%
+        );
+        filter: blur(10px);
+      }
+
+      /* La masse noire du dehors : des buissons sans contour net, juste des
+         bosses plus sombres que la nuit. Un contour dessine ferait decoupe
+         en carton. */
+      .broussailles {
+        position: absolute;
+        left: -12%;
+        right: -12%;
+        bottom: 28%;
+        height: 26%;
+        background:
+          radial-gradient(ellipse 22% 62% at 12% 100%, #0b0910 0%, transparent 72%),
+          radial-gradient(ellipse 16% 48% at 30% 100%, #0d0b13 0%, transparent 70%),
+          radial-gradient(ellipse 26% 74% at 62% 100%, #0a0810 0%, transparent 74%),
+          radial-gradient(ellipse 18% 54% at 86% 100%, #0c0a12 0%, transparent 70%);
+        filter: blur(5px);
+      }
+
+      /* ---------- le sol ---------- */
+
+      .sol-tissu {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        overflow: visible;
+        pointer-events: none;
+        -webkit-mask: radial-gradient(ellipse 34% 40% at 44% 46%, #000 0%, #000 18%, transparent 100%);
+        mask: radial-gradient(ellipse 34% 40% at 44% 46%, #000 0%, #000 18%, transparent 100%);
+      }
+
+      /* La terre autour de la couverture : elle ne doit se voir qu'a la
+         limite du halo, sinon elle avale la scene. */
+      .terre {
+        position: absolute;
+        left: -10%;
+        right: -10%;
+        bottom: 0;
+        height: 40%;
+        background: linear-gradient(180deg, transparent 0%, #1d1510 16%, #150f0b 52%, #0e0b09 100%);
+        -webkit-mask: radial-gradient(ellipse 46% 74% at 42% 22%, #000 0%, #000 30%, transparent 100%);
+        mask: radial-gradient(ellipse 46% 74% at 42% 22%, #000 0%, #000 30%, transparent 100%);
+      }
+
+      /* ---------- la lumiere du feu ---------- */
+
+      /* Le halo au sol. Il bat sur le meme temps que les flammes : c'est
+         cette solidarite qui fait qu'un feu eclaire une scene au lieu d'y
+         etre pose. */
+      /* Surtout pas la classe .couche ici : elle pose inset:0, et un bloc
+         qui a top, height ET bottom voit son bottom ignore - le halo se
+         dessinait alors en haut a gauche. */
+      .halo {
+        position: absolute;
+        left: 4%;
+        bottom: 4%;
+        width: 76%;
+        height: 46%;
+        background: radial-gradient(
+          ellipse at 34% 72%,
+          rgba(255, 186, 104, 0.5) 0%,
+          rgba(255, 138, 56, 0.18) 34%,
+          transparent 70%
+        );
+        filter: blur(14px);
+        mix-blend-mode: screen;
+        animation: braise 3.7s ease-in-out infinite;
+      }
+      /* Une braise ne clignote pas : elle monte, tient, retombe, se reprend
+         a contretemps. Les paliers inegaux font ca. */
+      @keyframes braise {
+        0%, 100% { opacity: 0.86; }
+        18% { opacity: 1; }
+        37% { opacity: 0.78; }
+        58% { opacity: 0.98; }
+        74% { opacity: 0.84; }
+      }
+
+      /* ---------- le feu ---------- */
+
+      .feu {
+        position: absolute;
+        left: 13%;
+        bottom: 12%;
+        width: 44%;
+        aspect-ratio: 1 / 0.92;
+      }
+
+      /* La lueur qui enveloppe le foyer. Posee DERRIERE les flammes : c'est
+         elle qui empeche de voir ou chaque langue s'arrete. */
+      .lueur-feu {
+        position: absolute;
+        left: 50%;
+        bottom: 2%;
+        width: 130%;
+        height: 90%;
+        translate: -50% 0;
+        background: radial-gradient(
+          ellipse at 50% 74%,
+          rgba(255, 176, 88, 0.5) 0%,
+          rgba(255, 128, 44, 0.2) 34%,
+          transparent 68%
+        );
+        filter: blur(12px);
+        mix-blend-mode: screen;
+        animation: braise 3.7s ease-in-out infinite;
+      }
+
+      /* Le lit de braises : la partie la plus chaude, donc la plus PALE. Un
+         feu au coeur orange et a la flamme jaune se lit a l'envers. */
+      .braises {
+        position: absolute;
+        left: 50%;
+        bottom: 7%;
+        width: 52%;
+        height: 11%;
+        translate: -50% 0;
+        border-radius: 50%;
+        background: radial-gradient(
+          ellipse at center,
+          #fff2d6 0%,
+          #ffb85e 30%,
+          rgba(214, 96, 24, 0.55) 60%,
+          transparent 84%
+        );
+        filter: blur(3px);
+        mix-blend-mode: screen;
+        animation: braise 2.3s ease-in-out infinite;
+      }
+
+      .flammes {
+        position: absolute;
+        inset: 0;
+        mix-blend-mode: screen;
+      }
+
+      /* Une langue de feu, decoupee en polygone : c'est la dissymetrie du
+         contour qui la fait lire comme une flamme. Une goutte floutee, elle,
+         fond dans ses voisines - c'est comme ca qu'on obtient un cone de
+         chantier au lieu d'un feu. Le flou reste faible pour cette raison.
+
+         transform-origin en bas : une flamme est accrochee a sa braise. */
+      .flammes i {
+        position: absolute;
+        bottom: var(--bas, 8%);
+        left: var(--x, 50%);
+        width: var(--l, 16%);
+        height: var(--h, 34%);
+        translate: -50% 0;
+        transform-origin: 50% 100%;
+        border-radius: 50% 50% 44% 44% / 92% 92% 8% 8%;
+        background: radial-gradient(
+          ellipse 74% 92% at 50% 84%,
+          #fff4d6 0%,
+          rgba(255, 208, 120, 0.97) 24%,
+          rgba(255, 146, 48, 0.88) 54%,
+          rgba(214, 80, 16, 0.62) 80%,
+          rgba(150, 44, 8, 0) 100%
+        );
+        filter: blur(var(--flou, 2px));
+        animation: flamme var(--d, 1.3s) ease-in-out infinite var(--t, 0s);
+      }
+      @keyframes flamme {
+        0%, 100% { scale: 1 1; rotate: 0deg; opacity: 0.8; }
+        22% { scale: 0.86 1.2; rotate: 3.5deg; opacity: 1; }
+        46% { scale: 1.12 0.88; rotate: -3deg; opacity: 0.84; }
+        71% { scale: 0.92 1.14; rotate: 2deg; opacity: 0.96; }
+      }
+
+      /* Les buches passent DEVANT la base des flammes : c'est le croisement
+         de deux silhouettes noires sur le feu qui dit « feu de camp » et non
+         « feu de cheminee ». Seule leur arete tournee vers le foyer est
+         eclairee. */
+      .buche {
+        position: absolute;
+        border-radius: 999px;
+        background:
+          linear-gradient(
+            180deg,
+            #3f2f22 0%,
+            #7a5a3c 20%,
+            #4a3626 46%,
+            #241a13 74%,
+            #0f0b08 100%
+          );
+        box-shadow:
+          inset 0 2px 2px -1px rgba(255, 186, 106, 0.65),
+          0 3px 8px -3px rgba(0, 0, 0, 0.9);
+      }
+      /* Le bout de coupe : un disque clair au bout du cylindre. C'est le
+         detail qui dit « buche fendue » plutot que « barre marron ». */
+      .buche::after {
+        content: "";
+        position: absolute;
+        top: -2%;
+        bottom: -2%;
+        width: 9%;
+        border-radius: 50%;
+        background: radial-gradient(ellipse at 40% 40%, #a07a52 0%, #6b4e33 52%, #33251a 100%);
+      }
+      .buche.g::after { right: -1%; }
+      .buche.d::after { left: -1%; }
+      .buche.f::after { right: -1%; }
+
+      .buche.g { left: 0%; bottom: 2%; width: 58%; height: 14%; rotate: -19deg; }
+      .buche.d { right: 0%; bottom: 1%; width: 56%; height: 13%; rotate: 17deg; }
+      .buche.f { left: 16%; bottom: -4%; width: 64%; height: 12%; rotate: 3deg; }
+
+      /* Une fumee, a peine : elle monte, se tord, et disparait avant le haut
+         du cadre. Sans elle le feu n'a pas de suite. */
+      .fumee {
+        position: absolute;
+        left: 46%;
+        bottom: 34%;
+        width: 34%;
+        height: 78%;
+        translate: -50% 0;
+        background: radial-gradient(
+          ellipse 42% 48% at 50% 82%,
+          rgba(196, 178, 168, 0.16) 0%,
+          transparent 72%
+        );
+        filter: blur(9px);
+        animation: fumee 9s ease-in-out infinite;
+      }
+      @keyframes fumee {
+        0%, 100% { opacity: 0.5; translate: -50% 0; scale: 1 1; }
+        50% { opacity: 0.85; translate: -46% -6%; scale: 1.14 1.1; }
+      }
+
+      /* ---------- objets ---------- */
+
+      /* La reserve de bois, a sa droite : elle dit que la nuit va durer. */
+      .reserve {
+        position: absolute;
+        right: 9%;
+        bottom: 23%;
+        width: 19%;
+        aspect-ratio: 3 / 1.4;
+        filter: brightness(0.8);
+      }
+      .reserve i {
+        position: absolute;
+        left: 0;
+        right: 0;
+        height: 26%;
+        border-radius: 999px;
+        background: linear-gradient(180deg, #3a2b20 0%, #6b4f36 22%, #40301f 52%, #1d1610 78%, #100c09 100%);
+      }
+      .reserve i::after {
+        content: "";
+        position: absolute;
+        top: -3%;
+        bottom: -3%;
+        left: -2%;
+        width: 13%;
+        border-radius: 50%;
+        background: radial-gradient(ellipse at 40% 40%, #8d6a47 0%, #5b422c 54%, #2b1f16 100%);
+      }
+      .reserve i:nth-child(1) { bottom: 0; rotate: -3deg; }
+      .reserve i:nth-child(2) { bottom: 22%; left: 8%; right: 4%; rotate: 4deg; }
+      .reserve i:nth-child(3) { bottom: 44%; left: 3%; right: 12%; rotate: -6deg; }
+
+      /* ---------- premier plan ---------- */
+
+      /* Des herbes hautes, seulement sur les bords : au centre elles
+         couperaient le feu. Elles ne sont la que pour dire qu'on est
+         accroupi dans l'herbe, pas sur une scene de theatre. */
+      .herbes {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: -2%;
+        height: 26%;
+        background:
+          repeating-linear-gradient(84deg, #0b0908 0 2px, transparent 2px 13px),
+          repeating-linear-gradient(96deg, #0d0b09 0 1px, transparent 1px 9px);
+        -webkit-mask:
+          radial-gradient(ellipse 26% 90% at 4% 100%, #000 0%, transparent 84%),
+          radial-gradient(ellipse 30% 80% at 98% 100%, #000 0%, transparent 84%);
+        mask:
+          radial-gradient(ellipse 26% 90% at 4% 100%, #000 0%, transparent 84%),
+          radial-gradient(ellipse 30% 80% at 98% 100%, #000 0%, transparent 84%);
+        filter: blur(2px);
+      }
+
+      /* ---------- garde-fou du cadre ---------- */
+
+      /* Meme regle que la scene 4 : la scene rejoint le noir exact de la
+         page avant son bord, sinon un rectangle se dessine dessus. */
+      .bord {
+        position: absolute;
+        inset: -1px;
+        background: radial-gradient(
+          ellipse 62% 62% at 46% 54%,
+          transparent 0%,
+          transparent 68%,
+          rgba(14, 11, 9, 0.7) 86%,
+          #0e0b09 100%
+        );
+      }
+    </style>
+  </head>
+  <body>
+    <div class="scene camp">
+      <div class="nuit"></div>
+      <div class="couche ciel"></div>
+      <div class="lune"></div>
+      <div class="broussailles"></div>
+
+      <div class="terre"></div>
+      <svg class="sol-tissu" viewBox="0 0 100 125" preserveAspectRatio="none">
+        <defs>
+          <radialGradient id="lueur-sol" cx="0.5" cy="0.5" r="0.5">
+            <stop offset="0%" stop-color="#ffc078" stop-opacity="0.85" />
+            <stop offset="40%" stop-color="#c0682a" stop-opacity="0.32" />
+            <stop offset="100%" stop-color="#000" stop-opacity="0" />
+          </radialGradient>
+        </defs>
+        <g id="couverture"></g>
+      </svg>
+
+      <div class="halo"></div>
+      <div class="ombre"></div>
+      <div class="place"><div class="perso" id="perso"></div></div>
+
+      <div class="reserve"><i></i><i></i><i></i></div>
+
+      <div class="feu">
+        <div class="lueur-feu"></div>
+        <div class="fumee"></div>
+        <div class="flammes">
+          <i style="--x: 50%; --l: 48%; --h: 42%; --d: 1.7s; --t: -0.4s; --flou: 2px"></i>
+          <i style="--x: 31%; --l: 32%; --h: 30%; --d: 1.3s; --t: -0.9s; --flou: 1.6px"></i>
+          <i style="--x: 68%; --l: 29%; --h: 26%; --d: 1.1s; --t: -0.2s; --flou: 1.6px"></i>
+          <i style="--x: 44%; --l: 17%; --h: 58%; --d: 2.1s; --t: -1.3s; --flou: 2.4px; --bas: 22%"></i>
+          <i style="--x: 59%; --l: 13%; --h: 48%; --d: 2.7s; --t: -1.9s; --flou: 3px; --bas: 26%"></i>
+          <i style="--x: 22%; --l: 19%; --h: 15%; --d: 0.9s; --t: -0.6s; --flou: 2px"></i>
+          <i style="--x: 78%; --l: 17%; --h: 13%; --d: 1.5s; --t: -1.1s; --flou: 2px"></i>
+        </div>
+        <div class="braises"></div>
+        <div class="buche g"></div>
+        <div class="buche d"></div>
+        <div class="buche f"></div>
+      </div>
+
+      <div class="couche" id="etincelles"></div>
+      <div class="herbes"></div>
+      <div class="bord"></div>
+      <div class="couche grain"></div>
+    </div>
+
+    <script type="module" src="05-feu-de-camp.boot.js"></script>
+  </body>
+</html>
