@@ -5,7 +5,7 @@
    sans erreur visible, et la scene s'affiche alors sans personnage ni
    animation - juste le decor, qui lui est en CSS. */
 
-import { poser, pleuvoir, ruisseler } from "./ninf.js";
+import { poser, pleuvoir, ruisseler, montrer } from "./ninf.js";
 
 const perso = document.getElementById("perso");
 await poser(perso);
@@ -19,3 +19,7 @@ perso.appendChild(chaud);
 
 pleuvoir(document.getElementById("rideau"), 90);
 ruisseler(document.getElementById("ruissellement"), 9);
+
+/* Tout est monte : la scene peut se montrer. Avant cet appel elle est a
+   `opacity: 0` - voir `.scene.prete` dans scene.css. */
+montrer(document.getElementById("perso"));

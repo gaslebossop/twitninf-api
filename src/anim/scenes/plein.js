@@ -9,3 +9,14 @@
    est bloque SANS ERREUR VISIBLE dans la page - le decor s'affiche, et tout ce
    qui depend du JS manque simplement a l'appel. */
 if (location.search.includes("plein")) document.documentElement.className = "plein";
+
+/* Filet de securite.
+
+   La scene est a `opacity: 0` jusqu'a l'appel de `montrer()`. Si l'amorcage
+   echoue - fichier manquant, reseau coupe en plein chargement - cet appel
+   n'arrive jamais et le cadre reste vide pour toujours. Passe ce delai on
+   montre ce qu'on a : le decor seul vaut mieux que rien. */
+setTimeout(function () {
+  var scene = document.querySelector(".scene");
+  if (scene) scene.classList.add("prete");
+}, 4000);

@@ -35,6 +35,24 @@
   --doux: cubic-bezier(0.45, 0, 0.35, 1);
 }
 
+/* Une scene ne se montre qu'ENTIERE.
+
+   Le decor est du CSS : il est peint des la premiere image. La mascotte est un
+   SVG de 800 Ko charge ensuite, et le masque de l'eclairage un SECOND fichier
+   de 500 Ko. Sans ce verrou, on voit arriver le decor, puis elle, puis sa
+   lumiere - trois etats intermediaires, exactement ce qu'on s'interdit.
+
+   La classe est posee par `montrer()` (ninf.js), que chaque scene appelle
+   quand tout ce qu'elle avait a faire est fait. Filet de securite dans
+   plein.js : sans lui, un chargement rate laisserait un cadre vide a vie. */
+.scene {
+  opacity: 0;
+}
+.scene.prete {
+  opacity: 1;
+  transition: opacity 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
 .scene {
   position: relative;
   width: 100%;

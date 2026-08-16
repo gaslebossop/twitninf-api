@@ -5,7 +5,7 @@
    sans erreur visible, et la scene s'affiche alors sans personnage ni
    animation - juste le decor, qui lui est en CSS. */
 
-import { poser, semer } from "./ninf.js";
+import { poser, semer, montrer } from "./ninf.js";
 await poser(document.getElementById("perso"));
 semer(document.getElementById("particules"), 20, {
   teinte: "rgba(255, 214, 160, 0.9)",
@@ -15,3 +15,7 @@ semer(document.getElementById("particules"), 20, {
   dureeMax: 21,
   pic: 0.45,
 });
+
+/* Tout est monte : la scene peut se montrer. Avant cet appel elle est a
+   `opacity: 0` - voir `.scene.prete` dans scene.css. */
+montrer(document.getElementById("perso"));

@@ -5,6 +5,43 @@
    comme une bille posee sur le crane. Le groupe #oeil reste donc dans la
    tete, immobile, tel qu'il a ete brode. */
 
+/* Deux images d'attente : inserer le SVG dans le DOM ne veut pas dire qu'il
+   est dessine. Un fichier de cette taille demande une mise en page et un
+   rendu, et annoncer « prete » a l'insertion laisse voir la scene sans elle. */
+const deuxImages = () =>
+  new Promise((suite) => {
+    let fait = false;
+    const finir = () => {
+      if (fait) return;
+      fait = true;
+      suite();
+    };
+    requestAnimationFrame(() => requestAnimationFrame(finir));
+    /* Filet indispensable : `requestAnimationFrame` ne se declenche PAS dans
+       une vue qui ne compose aucune image - onglet en arriere-plan, WebView
+       pas encore a l'ecran. Sans ce delai, l'amorcage de la scene reste
+       suspendu pour toujours, et la scene ne se montre jamais. */
+    setTimeout(finir, 300);
+  });
+
+/* Le masque de `.eclairage` est un SECOND fichier (ninf.svg, 500 Ko). Le CSS
+   ne le charge qu'au moment de peindre la couche : sans cette attente, la
+   lumiere de la scene se pose sur la mascotte apres elle. On echoue en
+   silence - une scene sans son calque de lumiere reste une scene. */
+const masqueCharge = (url) =>
+  new Promise((suite) => {
+    const img = new Image();
+    img.onload = img.onerror = suite;
+    img.src = url;
+  });
+
+/* Devoile la scene. A appeler quand la scene a fini TOUT son montage, pluie
+   et poussieres comprises : sinon elles apparaissent apres coup. */
+export function montrer(conteneur) {
+  const scene = conteneur.closest(".scene") || document.querySelector(".scene");
+  if (scene) scene.classList.add("prete");
+}
+
 export async function poser(conteneur, chemin = "../perso/ninf-parties.svg") {
   const texte = await (await fetch(chemin)).text();
   conteneur.innerHTML = texte;
@@ -16,6 +53,9 @@ export async function poser(conteneur, chemin = "../perso/ninf-parties.svg") {
   const lumiere = document.createElement("div");
   lumiere.className = "eclairage";
   conteneur.appendChild(lumiere);
+
+  await masqueCharge("../perso/ninf.svg");
+  await deuxImages();
 
   return {
     svg,

@@ -5,7 +5,7 @@
    sans erreur visible, et la scene s'affiche alors sans personnage ni
    animation - juste le decor, qui lui est en CSS. */
 
-import { poser, semer } from "./ninf.js";
+import { poser, semer, montrer } from "./ninf.js";
 import { drap, matelassage } from "./tissu.js";
 
 /* La torche, en coordonnees du viewBox : tout le tissu s'eclaire
@@ -160,3 +160,7 @@ semer(document.getElementById("particules"), 26, {
   pic: 0.7,
   derive: 22,
 });
+
+/* Tout est monte : la scene peut se montrer. Avant cet appel elle est a
+   `opacity: 0` - voir `.scene.prete` dans scene.css. */
+montrer(document.getElementById("perso"));

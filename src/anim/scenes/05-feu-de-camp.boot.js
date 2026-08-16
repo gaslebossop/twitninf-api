@@ -5,7 +5,7 @@
    sans erreur visible, et la scene s'affiche alors sans personnage ni
    animation - juste le decor, qui lui est en CSS. */
 
-import { poser, semer } from "./ninf.js";
+import { poser, semer, montrer } from "./ninf.js";
 import { matelassage } from "./tissu.js";
 
 /* Le foyer, en coordonnees du viewBox. Tout part de ce point : le
@@ -61,3 +61,7 @@ semer(document.getElementById("etincelles"), 30, {
   pic: 0.85,
   derive: 34,
 });
+
+/* Tout est monte : la scene peut se montrer. Avant cet appel elle est a
+   `opacity: 0` - voir `.scene.prete` dans scene.css. */
+montrer(document.getElementById("perso"));
