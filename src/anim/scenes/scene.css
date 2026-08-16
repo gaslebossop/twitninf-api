@@ -285,6 +285,12 @@ html.plein body {
   margin: 0;
   padding: 0;
   overflow: hidden;
+  /* Fond TRANSPARENT, et c'est le point de ce mode : embarquee, la scene doit
+     se fondre dans l'ecran de l'app au lieu d'y poser un rectangle. Chaque
+     page pose son propre `body { background: … }` de demonstration, mais il
+     est moins specifique que ce selecteur - il perd, sans qu'on ait a toucher
+     les cinq pages. */
+  background: transparent;
 }
 
 html.plein .scene {
