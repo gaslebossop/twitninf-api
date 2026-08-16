@@ -299,6 +299,29 @@ html.plein .scene {
   height: 100%;
   aspect-ratio: auto;
   margin: 0;
+
+  /* Les bords s'eteignent au lieu de se couper.
+
+     Une scene remplit son cadre, mais ses lueurs et ses sols, eux, arrivent
+     au bord encore opaques : on lit alors une arete franche en travers de
+     l'ecran, et la scene redevient une vignette collee.
+
+     Deux masques lineaires CROISES, pas un radial : un radial capable
+     d'eteindre le bas au bord eteindrait aussi les cotes bien avant, et le
+     cadre deviendrait un ovale. L'intersection de deux degrades, elle, donne
+     un rectangle a bords adoucis.
+
+     `mask-composite` s'ecrit deux fois et PAS avec les memes valeurs
+     (`source-in` prefixe, `intersect` standard). Ecrire le standard en
+     dernier : c'est lui qui doit gagner la ou il est compris. */
+  -webkit-mask-image:
+    linear-gradient(to bottom, transparent 0%, #000 9%, #000 87%, transparent 100%),
+    linear-gradient(to right, transparent 0%, #000 7%, #000 93%, transparent 100%);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(to bottom, transparent 0%, #000 9%, #000 87%, transparent 100%),
+    linear-gradient(to right, transparent 0%, #000 7%, #000 93%, transparent 100%);
+  mask-composite: intersect;
 }
 
 @media (prefers-reduced-motion: reduce) {
