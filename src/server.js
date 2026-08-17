@@ -97,6 +97,10 @@ const tweetMonetizationRoutes = require('./routes/tweetMonetizationRoutes');
 const monetizationProgramRoutes = require('./routes/monetizationProgramRoutes');
 const eventRoutes = require('./routes/events');
 const functionalEventRoutes = require('./routes/functionalEventRoutes');
+// Places d'invitation : administration/contrôle sous /api, page du billet à la
+// racine (voir eventPassPageRoutes pour la raison).
+const eventPassRoutes = require('./routes/eventPassRoutes');
+const eventPassPageRoutes = require('./routes/eventPassPageRoutes');
 const featureFlagRoutes = require('./routes/featureFlagRoutes');
 const nfMapRoutes = require('./routes/nfMapRoutes');
 const themePresetRoutes = require('./routes/themePresets');
@@ -410,6 +414,17 @@ app.use('/anim', express.static(path.join(__dirname, './anim'), {
   }
 }));
 
+/**
+ * Place d'invitation, telle que la voit celui qui la scanne : `/i/<jeton>`.
+ *
+ * Montée à la RACINE, pas sous `/api` : cette URL est inscrite dans le code
+ * QR, et vingt caractères de préfixe en plus coûtent une version entière de
+ * code — des modules plus petits, un scan plus laborieux. Elle est aussi
+ * volontairement hors des contrôles `/api` (bannissement, quotas) : un invité
+ * qui regarde son propre billet n'est pas un appel d'API.
+ */
+app.use('/i', eventPassPageRoutes);
+
 // Route statique pour les vidéos uploadées
 const storageDir = path.join(__dirname, '../storage');
 if (!fs.existsSync(storageDir)) {
@@ -504,6 +519,8 @@ app.use('/api/tweet-monetization', tweetMonetizationRoutes);
 app.use('/api/monetization-program', monetizationProgramRoutes);
 
 app.use('/api/events', eventRoutes);
+
+app.use('/api/event-passes', eventPassRoutes);
 
 app.use('/api/functional-events', functionalEventRoutes);
 

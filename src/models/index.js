@@ -81,6 +81,9 @@ const DailySpotlight = require('./DailySpotlight');
 const Contest = require('./Contest');
 const FeatureProposal = require('./FeatureProposal');
 const ContestEntry = require('./ContestEntry');
+// Places d'invitation : le billet signé et le journal des passages a l'entree.
+const EventPassModule = require('./EventPass');
+const EventPassScanModule = require('./EventPassScan');
 
 // Créer l'instance Sequelize
 const sequelize = new Sequelize(config.database);
@@ -186,6 +189,8 @@ const TweetVelocityAlertModel = TweetVelocityAlertModule(sequelize);
 const UsernameListingModel = UsernameListingModule(sequelize);
 const UsernameSaleModel = UsernameSaleModule(sequelize);
 const UsernameReservationModel = UsernameReservationModule(sequelize);
+const EventPassModel = EventPassModule(sequelize);
+const EventPassScanModel = EventPassScanModule(sequelize);
 
 // Définir les associations entre les modèles
 
@@ -951,6 +956,26 @@ Contest.hasMany(ContestEntry, {
 });
 ContestEntry.belongsTo(Contest, { foreignKey: 'contest_id', as: 'contest' });
 ContestEntry.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+// Associations des places d'invitation. `guest_user_id` est en SET NULL : un
+// compte supprimé ne doit pas emporter la place qu'on a distribuée, sinon le
+// compteur d'entrées de l'événement change tout seul après coup.
+EventPassModel.belongsTo(User, { foreignKey: 'guest_user_id', as: 'guest' });
+EventPassModel.belongsTo(User, { foreignKey: 'created_by', as: 'issuer' });
+EventPassModel.belongsTo(User, { foreignKey: 'scanned_by', as: 'lastScanner' });
+User.hasMany(EventPassModel, {
+  foreignKey: 'guest_user_id',
+  as: 'eventPasses',
+  onDelete: 'SET NULL',
+});
+
+EventPassScanModel.belongsTo(EventPassModel, { foreignKey: 'pass_id', as: 'pass' });
+EventPassScanModel.belongsTo(User, { foreignKey: 'scanned_by', as: 'scanner' });
+EventPassModel.hasMany(EventPassScanModel, {
+  foreignKey: 'pass_id',
+  as: 'scans',
+  onDelete: 'CASCADE',
+});
 
 // Associations Forge (fonctionnalites proposees par les utilisateurs)
 FeatureProposal.belongsTo(User, { foreignKey: 'author_id', as: 'author' });
@@ -2023,6 +2048,8 @@ module.exports = {
   Contest,
   ContestEntry,
   FeatureProposal,
+  EventPass: EventPassModel,
+  EventPassScan: EventPassScanModel,
   testConnection,
   syncDatabase,
   closeConnection
