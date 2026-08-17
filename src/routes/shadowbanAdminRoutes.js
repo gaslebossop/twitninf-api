@@ -4,6 +4,8 @@ const { body, param, query, validationResult } = require('express-validator');
 const { authenticateToken, requireAdminRole } = require('../middleware/authMiddleware');
 const { User, FeedHashtagRule } = require('../models');
 const similarity = require('../services/similarity');
+const rustClient = require('../services/rustRecommenderClient');
+const { STRIKE_POLICIES } = require('../config/strikePolicies');
 const logger = require('../utils/logger');
 
 const router = express.Router();
@@ -245,5 +247,117 @@ router.post('/reload-maps', async (req, res) => {
     return res.status(500).json({ success: false, message: 'Erreur serveur' });
   }
 });
+
+// ===== REGISTRE D'AVERTISSEMENTS (moteur Rust) =====
+//
+// Distinct de tout ce qui précède : les routes ci-dessus pilotent le levier
+// JS historique (`algorithmic_visibility_multiplier` + règles de hashtag),
+// consommé par le classement de secours. Celles-ci parlent au registre
+// d'avertissements du moteur Rust (`rust-recommender/src/shadowban/`), qui
+// pilote le classement réellement servi en production. Les deux systèmes
+// coexistent : rien ici ne remplace l'existant.
+
+// État de distribution d'un compte quelconque — vue admin, pas de restriction
+// à l'utilisateur authentifié (contrairement à GET /api/neural-rank/account-status).
+router.get(
+  '/account/:userId/status',
+  [param('userId').isUUID()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    try {
+      const status = await rustClient.getAccountStatus(req.params.userId);
+      return res.json({ success: true, data: status });
+    } catch (e) {
+      logger.error('shadowban account status:', e);
+      return res.status(502).json({ success: false, message: 'Moteur de recommandation indisponible' });
+    }
+  }
+);
+
+// Émet un avertissement daté, rattaché à un domaine de règle.
+router.post(
+  '/strike',
+  [
+    body('userId').isUUID(),
+    body('policy').isIn(STRIKE_POLICIES),
+    body('tweetId').optional({ nullable: true }).isUUID(),
+    body('reason').optional({ nullable: true }).isString().isLength({ max: 500 }),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    try {
+      const status = await rustClient.issueStrike(
+        req.body.userId,
+        req.body.policy,
+        req.body.tweetId || null,
+        req.body.reason || null
+      );
+      logger.info(`[shadowban] avertissement ${req.body.policy} posé sur ${req.body.userId} par ${req.user.username}`);
+      return res.json({ success: true, data: status });
+    } catch (e) {
+      logger.error('shadowban issue strike:', e);
+      return res.status(502).json({ success: false, message: 'Moteur de recommandation indisponible' });
+    }
+  }
+);
+
+// Recours accepté : retire les avertissements liés à un tweet, ou tout le registre.
+router.post(
+  '/strike/revoke',
+  [
+    body('userId').isUUID(),
+    body('tweetId').optional({ nullable: true }).isUUID(),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    try {
+      const status = await rustClient.revokeStrike(req.body.userId, req.body.tweetId || null);
+      logger.info(`[shadowban] avertissements révoqués pour ${req.body.userId} par ${req.user.username}`);
+      return res.json({ success: true, data: status });
+    } catch (e) {
+      logger.error('shadowban revoke strike:', e);
+      return res.status(502).json({ success: false, message: 'Moteur de recommandation indisponible' });
+    }
+  }
+);
+
+// Décision manuelle de restriction — hors registre, prime sur le calcul automatique.
+router.post(
+  '/level',
+  [
+    body('userId').isUUID(),
+    body('level').isIn(['clean', 'monitoring', 'suppressed', 'ghosted']),
+    body('reason').optional({ nullable: true }).isString().isLength({ max: 500 }),
+    body('expiresInDays').optional({ nullable: true }).isInt({ min: 1, max: 365 }),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    try {
+      const result = await rustClient.setShadowban(
+        req.body.userId,
+        req.body.level,
+        req.body.reason || null,
+        req.body.expiresInDays || null
+      );
+      logger.info(`[shadowban] niveau ${req.body.level} posé à la main sur ${req.body.userId} par ${req.user.username}`);
+      return res.json(result);
+    } catch (e) {
+      logger.error('shadowban set level:', e);
+      return res.status(502).json({ success: false, message: 'Moteur de recommandation indisponible' });
+    }
+  }
+);
 
 module.exports = router;

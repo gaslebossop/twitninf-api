@@ -37,6 +37,14 @@ function rustTarget() {
 
 /** Clé service-à-service, lue au moment de l'appel (voir le commentaire ci-dessus). */
 const internalSecret = () => process.env.INTERNAL_SECRET || '';
+/**
+ * Clé distincte de `INTERNAL_SECRET` : les routes `/admin/*` du moteur Rust
+ * vérifient `X-Admin-Key` contre son propre `ADMIN_SECRET`, pas le secret
+ * service-à-service utilisé par `/track`/`/recommendations`/`/account-status`.
+ * Doit être la MÊME valeur que `ADMIN_SECRET` sur le service Rust, sinon
+ * chaque appel d'admin (avertissement, retrait, décision manuelle) échoue en 401.
+ */
+const adminSecret = () => process.env.RUST_ADMIN_SECRET || '';
 const TIMEOUT_MS = 4000; // 4s max — sinon fallback JS
 
 // Clé interne service-to-service attendue par le moteur Rust sur /track,
@@ -105,6 +113,47 @@ async function rustPost(path, body) {
   });
 }
 
+/**
+ * Requête admin vers le moteur Rust — même transport que `rustPost`, mais
+ * authentifiée par `X-Admin-Key` plutôt que `X-Service-Key`.
+ */
+async function rustAdminPost(path, body) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body);
+    const { hostname, port } = rustTarget();
+    const options = {
+      hostname,
+      port,
+      path,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+        'X-Admin-Key': adminSecret(),
+      },
+      timeout: TIMEOUT_MS,
+      agent: keepAliveAgent,
+    };
+
+    const req = http.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          resolve({ status: res.statusCode, body: JSON.parse(data) });
+        } catch {
+          reject(new Error(`Invalid JSON from Rust service: ${data.slice(0, 200)}`));
+        }
+      });
+    });
+
+    req.on('timeout', () => { req.destroy(); reject(new Error('Rust recommender timeout')); });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
 async function rustGet(path) {
   return new Promise((resolve, reject) => {
     const req = http.get(
@@ -139,15 +188,29 @@ async function rustGet(path) {
  * @returns {Promise<{tweetIds: number[], latencyMs: number, cacheHit: boolean}>}
  */
 async function getRecommendations(userId, opts = {}) {
-  const { mode = 'for_you', limit = 50, offset = 0, enableExperiments = false } = opts;
+  const {
+    mode = 'for_you', limit = 50, offset = 0,
+    enableExperiments = false, forceRefresh = false, excludeSeen = false,
+  } = opts;
 
   const result = await rustPost('/recommendations', {
     user_id: userId,
     mode,
     limit,
     offset,
-    exclude_seen: true,
+    // ⚠ Ce champ était envoyé en dur à `true`, mais le moteur Rust ne le lisait
+    // nulle part : il n'a jamais rien fait. Maintenant qu'il est implémenté
+    // (`recommend()` écarte les tweets du set `twitninf:seen:<user>`), le
+    // laisser à `true` pour tout le monde changerait d'un coup le comportement
+    // de « Pour toi » et du fil, qui n'ont rien demandé. Il devient donc
+    // explicite et par défaut FAUX — même règle que `force_refresh` : seule la
+    // page Explorer le demande.
+    exclude_seen: Boolean(excludeSeen),
     enable_experiments: Boolean(enableExperiments),
+    // Le moteur Rust supporte déjà ce champ (voir `recommender.rs`) : quand
+    // vrai, il saute la lecture du cache `twitninf:reco:{userId}:{mode}` et
+    // recalcule, tout en réécrivant le cache avec le nouveau classement.
+    force_refresh: Boolean(forceRefresh),
   });
 
   if (!result.success) {
@@ -172,13 +235,27 @@ async function getRecommendations(userId, opts = {}) {
  * @param {number} tweetId
  * @param {string} interactionType - 'like', 'comment', 'retweet', 'share', 'view', 'skip', 'report', 'block', etc.
  * @param {number|null} dwellMs - Temps passé sur le contenu en ms (optionnel)
+ * @param {object|null} experiment - Affectation A/B ({ experiment_id, variant_id })
+ * @param {object|null} dwellContext - Nature du contenu regardé :
+ *   `{ media: 'text'|'image'|'video', contentChars: number, videoDurationMs: number|null }`.
+ *   Sans lui, le moteur interprète `dwellMs` à l'aveugle et confond le temps
+ *   passé avec la LONGUEUR du contenu (voir `algorithm/dwell.rs`).
  */
-async function trackInteraction(userId, tweetId, interactionType, dwellMs = null, experiment = null) {
+async function trackInteraction(
+  userId, tweetId, interactionType, dwellMs = null, experiment = null, dwellContext = null,
+  authorId = null,
+) {
   const result = await rustPost('/track', {
     user_id: userId,
     tweet_id: tweetId,
     interaction_type: interactionType,
     dwell_ms: dwellMs,
+    // Sans lui, un « ça ne m'intéresse pas » ne porte que sur le tweet refusé
+    // et reste imperceptible dans le fil (voir `track_handler` côté Rust).
+    author_id: authorId,
+    dwell_media: dwellContext?.media || null,
+    content_chars: Number.isFinite(dwellContext?.contentChars) ? dwellContext.contentChars : null,
+    video_duration_ms: Number.isFinite(dwellContext?.videoDurationMs) ? dwellContext.videoDurationMs : null,
     experiment_id: experiment?.experiment_id || null,
     variant_id: experiment?.variant_id || null,
   });
@@ -201,6 +278,99 @@ async function invalidateUser(userId) {
   } catch {
     // Non-fatal
   }
+}
+
+/**
+ * État de distribution d'un compte : avertissements actifs, surfaces fermées,
+ * date de retour à la normale.
+ *
+ * L'appelant est responsable de ne demander que le compte authentifié — le
+ * moteur Rust ne voit qu'une clé de service, pas un utilisateur.
+ *
+ * @param {string} userId
+ * @returns {Promise<object>}
+ */
+async function getAccountStatus(userId) {
+  const result = await rustGet(`/account-status?user_id=${encodeURIComponent(userId)}`);
+  if (!result.success) {
+    throw new Error(`Account status error: ${result.error || 'unknown'}`);
+  }
+  return result.data;
+}
+
+/**
+ * Émet un avertissement daté sur un compte, rattaché à un domaine de règle.
+ *
+ * C'est le chemin normal pour sanctionner un compte — à préférer à
+ * `setShadowban` : l'avertissement expire seul au bout de 90 jours et le
+ * niveau de restriction se déduit du nombre d'avertissements actifs dans CE
+ * domaine, avec des seuils propres à chaque domaine (voir `StrikePolicy` côté
+ * Rust). `tweetId`, quand fourni, permet à un recours accepté de retirer
+ * précisément cet avertissement plus tard.
+ *
+ * @param {string} userId
+ * @param {'spam'|'engagement_bait'|'unoriginal'|'misinformation'|'harassment'|'adult_content'|'hateful_conduct'|'violent_threat'} policy
+ * @param {string|null} tweetId
+ * @param {string|null} reason
+ * @returns {Promise<object>} L'état de compte à jour (niveau, avertissements actifs, date de retour)
+ */
+async function issueStrike(userId, policy, tweetId = null, reason = null) {
+  const { status, body } = await rustAdminPost('/admin/strike', {
+    user_id: userId,
+    policy,
+    tweet_id: tweetId,
+    reason,
+  });
+  if (status !== 200 || !body.success) {
+    throw new Error(`Issue strike error (${status}): ${body.error || 'unknown'}`);
+  }
+  return body.data;
+}
+
+/**
+ * Recours accepté : retire les avertissements liés à un tweet précis, ou tout
+ * le registre du compte si `tweetId` est omis.
+ *
+ * @param {string} userId
+ * @param {string|null} tweetId
+ * @returns {Promise<object>} L'état de compte à jour
+ */
+async function revokeStrike(userId, tweetId = null) {
+  const { status, body } = await rustAdminPost('/admin/strike/revoke', {
+    user_id: userId,
+    tweet_id: tweetId,
+  });
+  if (status !== 200 || !body.success) {
+    throw new Error(`Revoke strike error (${status}): ${body.error || 'unknown'}`);
+  }
+  return body.data;
+}
+
+/**
+ * Pose une décision manuelle de restriction, en dehors du registre
+ * d'avertissements — prime sur le calcul automatique, dans les deux sens
+ * (peut durcir comme blanchir un compte que l'heuristique a mal jugé).
+ *
+ * Réservé aux cas où `issueStrike` ne convient pas (blanchiment d'un compte,
+ * restriction hors des 8 domaines existants) : une décision sans
+ * `expiresInDays` reste posée jusqu'à ce que quelqu'un pense à la lever.
+ *
+ * @param {string} userId
+ * @param {'clean'|'monitoring'|'suppressed'|'ghosted'} level
+ * @param {string|null} reason
+ * @param {number|null} expiresInDays
+ */
+async function setShadowban(userId, level, reason = null, expiresInDays = null) {
+  const { status, body } = await rustAdminPost('/admin/shadowban', {
+    user_id: userId,
+    level,
+    reason,
+    expires_in_days: expiresInDays,
+  });
+  if (status !== 200 || !body.success) {
+    throw new Error(`Set shadowban error (${status}): ${body.error || 'unknown'}`);
+  }
+  return body;
 }
 
 /**
@@ -228,5 +398,9 @@ module.exports = {
   getRecommendations,
   trackInteraction,
   invalidateUser,
+  getAccountStatus,
+  issueStrike,
+  revokeStrike,
+  setShadowban,
   healthCheck,
 };

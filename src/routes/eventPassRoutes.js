@@ -20,6 +20,7 @@ const router = express.Router();
 const eventPassService = require('../services/eventPassService');
 const { renderPassSvg } = require('../services/eventPass/passArt');
 const { scannerPageHtml, scannerScript } = require('../services/eventPass/pages');
+const wallet = require('../services/eventPass/wallet');
 const {
   authenticateToken,
   requireAdminRole,
@@ -57,6 +58,50 @@ router.get('/scanner.js', (req, res) => {
   res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
   return res.send(scannerScript());
+});
+
+// ── Portefeuille (Apple Wallet / Google Wallet) ─────────────────────────────
+//
+// Deux routes PUBLIQUES ici, et deux routes authentifiées plus bas (section
+// Invité). Ce qui est public ne l'est pas par accident :
+//   • l'image de marque, parce que Google Wallet exige une vraie URL HTTPS
+//     dans `sourceUri.uri` (pas de data URI possible) ;
+//   • le fichier .pkpass, parce que `Linking.openURL` et Safari n'envoient
+//     jamais l'en-tête `Authorization` de l'app — voir le jeton court dans
+//     `services/eventPass/wallet.js`. Ce jeton, pas un compte, est ce qui
+//     protège ce fichier.
+
+router.get('/wallet/logo.png', async (req, res) => {
+  try {
+    const png = await wallet.brandLogoPng(660);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.send(png);
+  } catch (error) {
+    return fail(res, error, 'Image indisponible.');
+  }
+});
+
+router.get('/wallet/apple/:token', async (req, res) => {
+  const raw = req.params.token;
+  const token = raw.endsWith('.pkpass') ? raw.slice(0, -'.pkpass'.length) : raw;
+  const payload = wallet.verifyWalletToken(token, 'apple');
+  if (!payload) {
+    return res.status(404).json({ success: false, message: 'Lien expiré ou invalide. Redemande-le depuis l’app.' });
+  }
+
+  try {
+    const pass = await EventPass.findByPk(payload.id);
+    if (!pass) return res.status(404).json({ success: false, message: 'Place introuvable.' });
+
+    const buffer = await wallet.buildApplePkpass(pass);
+    res.setHeader('Content-Type', 'application/vnd.apple.pkpass');
+    res.setHeader('Content-Disposition', `attachment; filename="${pass.code}.pkpass"`);
+    res.setHeader('Cache-Control', 'no-store, private');
+    return res.send(buffer);
+  } catch (error) {
+    return fail(res, error, 'Ajout à Apple Wallet impossible.');
+  }
 });
 
 // ── Contrôle à l'entrée ─────────────────────────────────────────────────────
@@ -159,6 +204,69 @@ router.get('/mine', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     return fail(res, error, 'Places indisponibles.');
+  }
+});
+
+/** Quels portefeuilles sont activés — l'app s'en sert pour savoir quels boutons afficher. */
+router.get('/wallet-status', authenticateToken, (req, res) => {
+  return res.json({
+    success: true,
+    data: {
+      apple: wallet.appleWalletConfigured(),
+      google: wallet.googleWalletConfigured(),
+    },
+  });
+});
+
+async function loadOwnedPass(req) {
+  const pass = await EventPass.findByPk(req.params.id);
+  if (!pass || pass.guest_user_id !== req.user.id) return null;
+  return pass;
+}
+
+/**
+ * Lien Apple Wallet à durée limitée. La demande est authentifiée ; le lien
+ * renvoyé, lui, ne l'est pas — voir la route publique `/wallet/apple/:token`
+ * et le commentaire de `wallet.js` sur pourquoi.
+ */
+router.get('/:id/wallet/apple-link', authenticateToken, async (req, res) => {
+  try {
+    if (!wallet.appleWalletConfigured()) {
+      return res.status(503).json({
+        success: false,
+        message: 'Apple Wallet n’est pas encore activé.',
+        code: 'WALLET_NOT_CONFIGURED',
+      });
+    }
+    const pass = await loadOwnedPass(req);
+    if (!pass) return res.status(404).json({ success: false, message: 'Place introuvable.' });
+
+    const token = wallet.createWalletToken(pass.id, 'apple');
+    return res.json({
+      success: true,
+      data: { url: `${eventPassService.passOrigin()}/api/event-passes/wallet/apple/${token}.pkpass` },
+    });
+  } catch (error) {
+    return fail(res, error, 'Lien Apple Wallet impossible.');
+  }
+});
+
+/** Lien Google Wallet — celui-ci pointe directement vers pay.google.com, aucun second aller-retour. */
+router.get('/:id/wallet/google', authenticateToken, async (req, res) => {
+  try {
+    if (!wallet.googleWalletConfigured()) {
+      return res.status(503).json({
+        success: false,
+        message: 'Google Wallet n’est pas encore activé.',
+        code: 'WALLET_NOT_CONFIGURED',
+      });
+    }
+    const pass = await loadOwnedPass(req);
+    if (!pass) return res.status(404).json({ success: false, message: 'Place introuvable.' });
+
+    return res.json({ success: true, data: { url: wallet.buildGoogleSaveUrl(pass) } });
+  } catch (error) {
+    return fail(res, error, 'Lien Google Wallet impossible.');
   }
 });
 

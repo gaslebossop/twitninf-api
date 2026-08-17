@@ -363,9 +363,20 @@ function withThreadContext(feed) {
  */
 router.get('/recommendations', authenticateToken, async (req, res) => {
   const userId = req.user.id;
-  const { mode = 'for_you', limit = 50, offset = 0 } = req.query;
+  const { mode = 'for_you', limit = 50, offset = 0, force_refresh, exclude_seen } = req.query;
   const limitInt = Math.min(parseInt(limit) || 50, 200);
   const offsetInt = parseInt(offset) || 0;
+  // Uniquement envoyé par l'onglet Explorer au rafraîchissement (voir
+  // `ExploreGrid`/`fetchExplore` côté mobile) : ignore le cache Rust
+  // `trending` (jusqu'à 60 s) ET le cache de cette route, pour que
+  // « actualiser » change vraiment le feed au lieu de resservir le même
+  // classement. Absent partout ailleurs, donc sans effet sur les autres modes.
+  const forceRefresh = force_refresh === 'true' || force_refresh === '1';
+  // Écarte ce que ce lecteur a déjà vu dans les dernières 24 h (set Redis
+  // `twitninf:seen:<user>`). Comme `force_refresh`, envoyé par la seule page
+  // Explorer : c'est elle qui doit être neuve à chaque visite, alors que le fil
+  // et « Pour toi » assument de resservir un tweet manqué.
+  const excludeSeen = exclude_seen === 'true' || exclude_seen === '1';
 
   // Les expériences ne sont activées que pour le client Windows : deux clients
   // différents ne doivent donc PAS partager une réponse cachée, sinon
@@ -375,14 +386,14 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
 
   try {
     let refusedByPaidContent = false;
-    const { payload } = await withFeedCache(
-      { scope: 'neural', userId, params: { mode, limit: limitInt, offset: offsetInt, exp: enableExperiments ? 1 : 0 } },
-      async () => {
+    const producer = async () => {
         const result = await rustClient.getRecommendations(userId, {
           mode,
           limit: limitInt,
           offset: offsetInt,
           enableExperiments,
+          forceRefresh,
+          excludeSeen,
         });
 
         logger.info(`[NeuralRank] user=${userId} mode=${mode} count=${result.count} latency=${result.latencyMs}ms cache=${result.cacheHit}`);
@@ -416,8 +427,16 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
             },
           },
         };
-      }
-    );
+      };
+
+    const payload = forceRefresh
+      ? await producer()
+      : (await withFeedCache(
+          // `seen` fait partie de la clé : deux appels qui ne demandent pas le
+          // même filtrage ne doivent pas se partager une charge cachée.
+          { scope: 'neural', userId, params: { mode, limit: limitInt, offset: offsetInt, exp: enableExperiments ? 1 : 0, seen: excludeSeen ? 1 : 0 } },
+          producer
+        )).payload;
 
     if (refusedByPaidContent) return;
     return res.json(payload);
@@ -442,7 +461,10 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
  */
 router.post('/track', authenticateToken, async (req, res) => {
   const userId = req.user.id;
-  const { tweetId, interactionType, dwellMs, experimentId, variantId } = req.body;
+  const {
+    tweetId, interactionType, dwellMs, experimentId, variantId,
+    dwellMedia, contentChars, videoDurationMs, authorId,
+  } = req.body;
 
   if (!tweetId || !interactionType) {
     return res.status(400).json({ success: false, error: 'tweetId et interactionType sont requis' });
@@ -461,6 +483,11 @@ router.post('/track', authenticateToken, async (req, res) => {
     content_skip: 'skip', skip: 'skip',
     tweet_report: 'report', report: 'report',
     user_block: 'block', block: 'block',
+    // Réponses à la question posée dans le fil (« ça t'intéresse ? »).
+    // Distinctes d'un like : elles portent sur le GENRE de contenu, et
+    // `not_interested` met en plus l'auteur en sourdine côté moteur.
+    interested: 'interested',
+    not_interested: 'not_interested',
   };
 
   const mappedType = typeMap[interactionType];
@@ -469,6 +496,18 @@ router.post('/track', authenticateToken, async (req, res) => {
   }
 
   try {
+    // Nature du contenu : sans elle, le moteur ne peut pas distinguer « lu en
+    // entier » de « survolé », et confond le temps passé avec la longueur du
+    // tweet. On ne transmet que des valeurs reconnues.
+    const DWELL_MEDIA = ['text', 'image', 'video'];
+    const dwellContext = DWELL_MEDIA.includes(dwellMedia)
+      ? {
+          media: dwellMedia,
+          contentChars: Number.isFinite(Number(contentChars)) ? Math.max(0, Number(contentChars)) : 0,
+          videoDurationMs: Number.isFinite(Number(videoDurationMs)) ? Math.max(0, Number(videoDurationMs)) : null,
+        }
+      : null;
+
     const result = await rustClient.trackInteraction(
       userId,
       tweetId,
@@ -477,6 +516,8 @@ router.post('/track', authenticateToken, async (req, res) => {
       experimentId && variantId
         ? { experiment_id: experimentId, variant_id: variantId }
         : null,
+      dwellContext,
+      UUID_RE.test(String(authorId || '')) ? String(authorId) : null,
     );
     return res.json({ success: true, data: result });
   } catch (err) {
@@ -521,6 +562,38 @@ router.post('/on-publish', authenticateToken, async (req, res) => {
   }
 
   return res.json({ success: true, message: 'Caches NeuralRank invalidés' });
+});
+
+/**
+ * GET /api/neural-rank/account-status
+ *
+ * État de distribution du compte appelant : avertissements actifs, motif,
+ * surfaces actuellement fermées et date à laquelle la restriction s'allège.
+ *
+ * Toujours l'utilisateur authentifié, jamais un identifiant fourni par le
+ * client : cet état dit quels avertissements pèsent sur un compte, ce qui n'a
+ * pas à être lisible par des tiers. Le moteur Rust n'a aucun moyen de vérifier
+ * de qui vient la demande — c'est ici que ça se joue.
+ *
+ * L'intérêt de l'exposer plutôt que de le garder silencieux : un compte qui ne
+ * peut ni voir ni dater sa restriction ne la corrige pas. C'est le constat qui
+ * a conduit TikTok à doubler son système de sanctions d'une page « état du
+ * compte » au lieu de le laisser deviner.
+ */
+router.get('/account-status', authenticateToken, async (req, res) => {
+  try {
+    const status = await rustClient.getAccountStatus(req.user.id);
+    return res.json({ success: true, data: status });
+  } catch (err) {
+    logger.warn(`[NeuralRank] account-status indisponible: ${err.message}`);
+    // Le moteur est injoignable : on ne peut pas conclure que le compte est
+    // sain, seulement qu'on ne sait pas. Le dire, plutôt que d'afficher un
+    // « tout va bien » inventé.
+    return res.status(503).json({
+      success: false,
+      error: 'État du compte temporairement indisponible',
+    });
+  }
 });
 
 /**

@@ -6,6 +6,8 @@ const ctrTracker = require('../services/ctrTracker');
 const reportScoring = require('../services/reportScoringService');
 const modNotif = require('../services/moderationNotificationService');
 const communityModeration = require('../services/communityModerationService');
+const rustClient = require('../services/rustRecommenderClient');
+const { strikePolicyForCategory } = require('../config/strikePolicies');
 const { REPORT_CATEGORIES, categoriesFor } = require('../config/reportCategories');
 
 class ModerationController {
@@ -2780,20 +2782,28 @@ class ModerationController {
       // suspend/ban/delete, il n'existe qu'à travers la clôture d'un
       // signalement. On le matérialise ici, sinon « avertir » ne fait
       // strictement rien : ni trace, ni message à l'intéressé.
-      if (resolution_action === 'warn') {
-        try {
-          let warnedUserId = null;
-          let warnedTweetId = null;
+      //
+      // Un signalement RETENU (warn/suspend/ban/delete, jamais 'none') pose
+      // en plus un avertissement daté dans le moteur de recommandation, quelle
+      // que soit l'action prise sur le contenu : suspendre ou supprimer agit
+      // sur CE post, mais ne change rien à la distribution du compte pour ses
+      // prochains posts sans ce second effet. C'est ce registre-là (pas
+      // l'ancien `algorithmic_visibility_multiplier`) qui pilote le classement
+      // réellement servi — voir `rust-recommender/src/shadowban/`.
+      if (resolution_action && resolution_action !== 'none') {
+        let warnedUserId = null;
+        let warnedTweetId = null;
 
-          if (report.target_type === 'tweet') {
-            const t = await Tweet.findByPk(report.target_id, { attributes: ['id', 'user_id'] });
-            warnedUserId = t?.user_id || null;
-            warnedTweetId = t?.id || null;
-          } else if (report.target_type === 'user') {
-            warnedUserId = report.target_id;
-          }
+        if (report.target_type === 'tweet') {
+          const t = await Tweet.findByPk(report.target_id, { attributes: ['id', 'user_id'] });
+          warnedUserId = t?.user_id || null;
+          warnedTweetId = t?.id || null;
+        } else if (report.target_type === 'user') {
+          warnedUserId = report.target_id;
+        }
 
-          if (warnedUserId) {
+        if (resolution_action === 'warn' && warnedUserId) {
+          try {
             await ModerationAction.create({
               type: 'warn',
               target_type: 'user',
@@ -2807,10 +2817,28 @@ class ModerationController {
               reason: resolution_reason || moderator_notes || null,
               tweetId: warnedTweetId
             });
+          } catch (warnError) {
+            // Un avertissement raté ne doit pas empêcher la clôture.
+            logger.warn(`[modNotif] avertissement non appliqué (${reportId}): ${warnError.message}`);
           }
-        } catch (warnError) {
-          // Un avertissement raté ne doit pas empêcher la clôture.
-          logger.warn(`[modNotif] avertissement non appliqué (${reportId}): ${warnError.message}`);
+        }
+
+        if (warnedUserId) {
+          const policy = strikePolicyForCategory(report.category);
+          if (policy) {
+            try {
+              await rustClient.issueStrike(
+                warnedUserId,
+                policy,
+                warnedTweetId,
+                resolution_reason || moderator_notes || `Signalement retenu (${report.category})`
+              );
+            } catch (strikeError) {
+              // Le moteur Rust est peut-être indisponible : la clôture du
+              // signalement ne doit pas en dépendre, mais la perte doit se voir.
+              logger.warn(`[shadowban] avertissement non posé pour le signalement ${reportId}: ${strikeError.message}`);
+            }
+          }
         }
       }
 
