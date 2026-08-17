@@ -611,6 +611,9 @@ app.use('/api/detection', detectionRoutes);
 // 👥 Route de similarité utilisateur
 app.use('/api/user-similarity', userSimilarityRoutes);
 
+// 🔥 Swipe or Follow — découverte de comptes façon swipe (moteur Scala, port 3003)
+app.use('/api/swipe', require('./routes/swipeRoutes'));
+
 // Endpoint pour déclencher manuellement l'analyse intelligente PolicierCongo
 app.post('/api/policiercongo/analyze', authenticateToken, requireAdminRole, async (req, res) => {
   try {
