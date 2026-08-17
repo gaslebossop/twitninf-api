@@ -252,10 +252,15 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
     });
 
     const viewCounts = await sequelize.query(`
-      SELECT 
+      SELECT
         DATE(created_at) as date,
-        SUM(view_count) as views
-      FROM tweets 
+        -- Sans COALESCE, un jour dont TOUS les tweets ont view_count NULL
+        -- renvoie NULL ici : parseInt(null) donne NaN, sérialisé en null
+        -- dans le JSON. Le client lisait ce null comme une COUPURE de série
+        -- et scindait la courbe en morceaux (bord vertical franc au milieu
+        -- du graphique). Un jour sans vue vaut 0, pas un trou.
+        COALESCE(SUM(view_count), 0) as views
+      FROM tweets
       WHERE user_id::text = :userId
         AND created_at >= :startDate 
         AND created_at <= :endDate
