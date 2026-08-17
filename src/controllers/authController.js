@@ -1,6 +1,7 @@
 const authService = require('../services/authService');
 const { validationResult } = require('express-validator');
 const logger = require('../utils/logger');
+const rustClient = require('../services/rustRecommenderClient');
 
 /**
  * Contexte d'appareil attaché à une session, pour que l'utilisateur puisse
@@ -283,6 +284,16 @@ class AuthController {
       const updateData = req.body;
 
       const result = await authService.updateProfile(userId, updateData);
+
+      // Frein de vélocité (1h, ×0.5) — un changement d'avatar ou de bio isolé
+      // est légitime la plupart du temps, mais c'est aussi le geste d'un
+      // compte qui change d'identité après coup. Uniquement ces deux champs :
+      // pas de frein pour un changement de ville ou de préférences. Un seul
+      // frein posé même si les deux changent dans la même requête.
+      if (result?.success && (updateData.avatar !== undefined || updateData.bio !== undefined)) {
+        rustClient.triggerVelocityThrottle(String(userId), updateData.avatar !== undefined ? 'avatar_change' : 'bio_change');
+      }
+
       res.status(200).json(result);
     } catch (error) {
       logger.error('Erreur dans updateProfile:', error);

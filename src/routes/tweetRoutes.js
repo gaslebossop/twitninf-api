@@ -85,6 +85,7 @@ const realtimeQueueService = new RealtimeQueueService();
 
 // 🚀 Nouveaux moteurs de recommandation (remplacent BERT)
 const similarity = require('../services/similarity');
+const rustClient = require('../services/rustRecommenderClient');
 const videoRecommendationService = require('../services/videoRecommendationService');
 
 // 📊 Tracking CTR pour l'algorithme Rust
@@ -1729,6 +1730,12 @@ router.post('/', [
       similarity.getEngine().onNewTweet(String(tweet.id), String(userId), content || '', tweet.media_urls || [], tweet.parent_tweet_id);
     }
 
+    // Rafale de publication : un post isolé ne déclenche rien, seul le
+    // rythme compte — la décision (10 tweets / 10 min) se prend côté Rust,
+    // voir `rustRecommenderClient.recordPostForVelocity`. Fire-and-forget :
+    // ne doit jamais retarder ni faire échouer la publication elle-même.
+    rustClient.recordPostForVelocity(String(userId));
+
     res.status(201).json({
       success: true,
       message: 'Tweet créé avec succès',
@@ -2085,6 +2092,11 @@ router.delete('/:id', [
     await tweet.destroy();
 
     logger.info(`Tweet supprimé: ${id} par l'utilisateur ${userId}`);
+
+    // Frein de vélocité (1h, ×0.5) — supprimer un tweet est légitime la
+    // plupart du temps, mais c'est aussi le geste d'un nettoyage après coup.
+    // Fire-and-forget, ne doit jamais retarder la réponse.
+    rustClient.triggerVelocityThrottle(String(userId), 'tweet_delete');
 
     res.json({
       success: true,

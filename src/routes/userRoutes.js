@@ -60,6 +60,7 @@ const {
 } = require('../utils/profileCustomization');
 
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
+const rustClient = require('../services/rustRecommenderClient');
 const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
 
 // Middleware de validation des erreurs
@@ -1398,6 +1399,10 @@ router.post('/me/avatar', [
     user.avatar = publicUrl;
     logger.info(`Avatar DB URL: ${publicUrl}`);
     await user.save();
+
+    // Frein de vélocité (1h, ×0.5) — voir authController.updateProfile pour
+    // le même frein posé quand l'avatar change via l'URL brute.
+    rustClient.triggerVelocityThrottle(String(userId), 'avatar_change');
 
     return res.status(201).json({
       success: true,

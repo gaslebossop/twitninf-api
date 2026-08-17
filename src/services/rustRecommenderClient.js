@@ -361,9 +361,16 @@ async function revokeStrike(userId, tweetId = null) {
  * @param {number|null} expiresInDays
  */
 async function setShadowban(userId, level, reason = null, expiresInDays = null) {
+  // `ShadowbanLevel` n'a PAS de `rename_all` côté Rust (voir shadowban/models.rs,
+  // commentaire explicite à ce sujet) : la désérialisation de `SetShadowbanRequest`
+  // attend "Clean"/"Monitoring"/"Suppressed"/"Ghosted", capitale initiale —
+  // contrairement à `StrikePolicy` (issueStrike), qui lui est en snake_case.
+  // Envoyer la valeur minuscule utilisée partout ailleurs dans cette API fait
+  // échouer la désérialisation.
+  const rustLevel = String(level).charAt(0).toUpperCase() + String(level).slice(1).toLowerCase();
   const { status, body } = await rustAdminPost('/admin/shadowban', {
     user_id: userId,
-    level,
+    level: rustLevel,
     reason,
     expires_in_days: expiresInDays,
   });
@@ -371,6 +378,43 @@ async function setShadowban(userId, level, reason = null, expiresInDays = null) 
     throw new Error(`Set shadowban error (${status}): ${body.error || 'unknown'}`);
   }
   return body;
+}
+
+/**
+ * Pose un frein temporaire (1h, ×0.5) — jamais un avertissement de
+ * modération. Réservé aux quatre déclencheurs identifiés : suppression d'un
+ * tweet, changement d'avatar, changement de bio. La rafale de publication ne
+ * passe pas par ici, voir `recordPostForVelocity`.
+ *
+ * Fire-and-forget par construction : un frein raté ne doit jamais faire
+ * échouer l'action de l'utilisateur (supprimer son tweet, changer sa bio...).
+ * L'appelant n'a pas à attendre la promesse.
+ *
+ * @param {string} userId
+ * @param {string} reason - 'tweet_delete' | 'avatar_change' | 'bio_change'
+ */
+async function triggerVelocityThrottle(userId, reason) {
+  try {
+    await rustPost('/velocity-throttle', { user_id: userId, reason });
+  } catch (e) {
+    logger.warn(`[RustRecommender] velocity-throttle (${reason}) non posé pour ${userId}: ${e.message}`);
+  }
+}
+
+/**
+ * Compte une publication dans la fenêtre de rafale (10 tweets / 10 min) et
+ * pose le frein si le seuil est franchi — la décision se prend côté Rust,
+ * voir `crate::velocity::record_post_and_maybe_throttle`. Fire-and-forget,
+ * même raison qu'au-dessus.
+ *
+ * @param {string} userId
+ */
+async function recordPostForVelocity(userId) {
+  try {
+    await rustPost('/velocity/post-burst', { user_id: userId, reason: 'tweet_create' });
+  } catch (e) {
+    logger.warn(`[RustRecommender] velocity/post-burst non enregistré pour ${userId}: ${e.message}`);
+  }
 }
 
 /**
@@ -402,5 +446,7 @@ module.exports = {
   issueStrike,
   revokeStrike,
   setShadowban,
+  triggerVelocityThrottle,
+  recordPostForVelocity,
   healthCheck,
 };
