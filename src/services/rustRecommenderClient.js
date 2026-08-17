@@ -418,6 +418,28 @@ async function recordPostForVelocity(userId) {
 }
 
 /**
+ * Calcule et stocke l'embedding sémantique d'un tweet — voir
+ * `rust-recommender/src/embeddings.rs`. C'est ce qui alimente la nouvelle
+ * source de candidats par similarité de contenu, et le vecteur de goût des
+ * lecteurs qui aiment ce tweet plus tard.
+ *
+ * Fire-and-forget, même raison que les autres hooks de cette section : un
+ * tweet reste publié même si l'embedding échoue (modèle désactivé, panne
+ * transitoire) — le rattrapage côté Rust reprendra les tweets manqués.
+ *
+ * @param {string} tweetId
+ * @param {string} content
+ */
+async function embedTweet(tweetId, content) {
+  if (!content || !content.trim()) return; // rien à embedder pour un tweet image-seule
+  try {
+    await rustPost('/embed-tweet', { tweet_id: tweetId, content });
+  } catch (e) {
+    logger.warn(`[RustRecommender] embed-tweet non enregistré pour ${tweetId}: ${e.message}`);
+  }
+}
+
+/**
  * Vérifie la santé du service Rust.
  * @returns {Promise<{healthy: boolean, latencyMs: number}>}
  */
@@ -448,5 +470,6 @@ module.exports = {
   setShadowban,
   triggerVelocityThrottle,
   recordPostForVelocity,
+  embedTweet,
   healthCheck,
 };

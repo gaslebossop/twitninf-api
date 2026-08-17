@@ -1736,6 +1736,11 @@ router.post('/', [
     // ne doit jamais retarder ni faire échouer la publication elle-même.
     rustClient.recordPostForVelocity(String(userId));
 
+    // Embedding sémantique — alimente la nouvelle source de candidats par
+    // similarité de contenu (voir rust-recommender/src/embeddings.rs).
+    // Fire-and-forget, même raison que ci-dessus.
+    rustClient.embedTweet(String(tweet.id), content || '');
+
     res.status(201).json({
       success: true,
       message: 'Tweet créé avec succès',
