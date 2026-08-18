@@ -6,6 +6,8 @@
  * Endpoints :
  *   GET  /api/neural-rank/recommendations          → Feed personnalisé (tweets complets)
  *   POST /api/neural-rank/track                    → Tracker une interaction
+ *   POST /api/neural-rank/calibration/round         → Tour de recalibration (Paramètres, manuel)
+ *   POST /api/neural-rank/calibration/finish        → Applique une session de recalibration
  *   GET  /api/neural-rank/health                   → Santé du service Rust
  */
 const express = require('express');
@@ -593,6 +595,58 @@ router.get('/account-status', authenticateToken, async (req, res) => {
       success: false,
       error: 'État du compte temporairement indisponible',
     });
+  }
+});
+
+/**
+ * POST /api/neural-rank/calibration/round
+ *
+ * Un tour de la page « Recalibrer l'algorithme » (Paramètres — jamais proposée
+ * automatiquement). Body :
+ *   round            {number}   — 1 à 5
+ *   likedTweetIds    {string[]} — cumulés depuis le tour 1 de CETTE session
+ *   skippedTweetIds  {string[]} — idem, côté rejetés
+ */
+router.post('/calibration/round', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const round = parseInt(req.body?.round, 10);
+  if (!Number.isInteger(round) || round < 1 || round > 5) {
+    return res.status(400).json({ success: false, error: 'round doit être un entier entre 1 et 5' });
+  }
+  const likedTweetIds = Array.isArray(req.body?.likedTweetIds) ? req.body.likedTweetIds.map(String) : [];
+  const skippedTweetIds = Array.isArray(req.body?.skippedTweetIds) ? req.body.skippedTweetIds.map(String) : [];
+
+  try {
+    const tweetIds = await rustClient.getCalibrationRound(userId, round, likedTweetIds, skippedTweetIds);
+    // Même hydratation que le fil normal : la carte de recalibration doit
+    // pouvoir s'afficher avec le même composant que n'importe quel tweet.
+    const tweets = await fetchTweetsByIds(tweetIds, userId);
+    if (!(await paidContentService.maskTweetsOrFail(tweets, userId, res))) return;
+
+    return res.json({ success: true, data: { round, tweets } });
+  } catch (err) {
+    logger.error(`[NeuralRank] calibration/round indisponible: ${err.message}`);
+    return res.status(503).json({ success: false, error: 'Recalibration temporairement indisponible' });
+  }
+});
+
+/**
+ * POST /api/neural-rank/calibration/finish
+ *
+ * Termine une session de recalibration. Body : likedTweetIds {string[]} — tous
+ * les choix, tous tours confondus. N'écrit AUCUN like public (voir
+ * `calibration.rs`) : seul l'algorithme en tient compte.
+ */
+router.post('/calibration/finish', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const likedTweetIds = Array.isArray(req.body?.likedTweetIds) ? req.body.likedTweetIds.map(String) : [];
+
+  try {
+    const applied = await rustClient.finishCalibration(userId, likedTweetIds);
+    return res.json({ success: true, data: { applied } });
+  } catch (err) {
+    logger.error(`[NeuralRank] calibration/finish indisponible: ${err.message}`);
+    return res.status(503).json({ success: false, error: 'Recalibration temporairement indisponible' });
   }
 });
 

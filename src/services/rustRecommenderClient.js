@@ -440,6 +440,48 @@ async function embedTweet(tweetId, content) {
 }
 
 /**
+ * Récupère les 6 tweets d'un tour de recalibration de l'algorithme.
+ *
+ * @param {string} userId
+ * @param {number} round - 1 à 5
+ * @param {string[]} likedTweetIds - Cumulés depuis le tour 1 de CETTE session
+ * @param {string[]} skippedTweetIds - Idem, côté rejetés
+ * @returns {Promise<string[]>} - IDs des tweets à afficher pour ce tour
+ */
+async function getCalibrationRound(userId, round, likedTweetIds = [], skippedTweetIds = []) {
+  const result = await rustPost('/calibration/round', {
+    user_id: userId,
+    round,
+    liked_tweet_ids: likedTweetIds,
+    skipped_tweet_ids: skippedTweetIds,
+  });
+  if (!result.success) {
+    throw new Error(`Rust calibration error: ${result.error}`);
+  }
+  return Array.isArray(result.data?.tweet_ids) ? result.data.tweet_ids : [];
+}
+
+/**
+ * Termine une session de recalibration : les tweets choisis sur les 5 tours
+ * deviennent un signal algorithmique (voir `calibration.rs`), jamais un like
+ * public — pas de notification à l'auteur, pas de compteur qui bouge.
+ *
+ * @param {string} userId
+ * @param {string[]} likedTweetIds - Tous les tweets choisis, tous tours confondus
+ * @returns {Promise<number>} - Nombre de choix effectivement pris en compte
+ */
+async function finishCalibration(userId, likedTweetIds) {
+  const result = await rustPost('/calibration/finish', {
+    user_id: userId,
+    liked_tweet_ids: likedTweetIds,
+  });
+  if (!result.success) {
+    throw new Error(`Rust calibration error: ${result.error}`);
+  }
+  return result.data?.applied || 0;
+}
+
+/**
  * Vérifie la santé du service Rust.
  * @returns {Promise<{healthy: boolean, latencyMs: number}>}
  */
@@ -471,5 +513,7 @@ module.exports = {
   triggerVelocityThrottle,
   recordPostForVelocity,
   embedTweet,
+  getCalibrationRound,
+  finishCalibration,
   healthCheck,
 };
