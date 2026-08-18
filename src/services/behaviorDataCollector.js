@@ -10,6 +10,21 @@ const { UserBehaviorData, UserPreferences, User, Tweet, TweetLike, TweetRetweet 
 const { Op } = require('sequelize');
 const videoRecommendationService = require('./videoRecommendationService');
 
+/**
+ * Valeurs acceptees par la colonne `action_type`, LUES SUR LE MODELE.
+ *
+ * Volontairement derive de la definition Sequelize plutot que recopie ici :
+ * deux listes finissent toujours par diverger, et la divergence se paierait en
+ * donnees perdues (voir `toKnownActionType`).
+ *
+ * Ensemble vide = on ne sait pas ce qui est valide : dans ce cas on ne
+ * reecrit rien et on laisse passer, pour ne jamais degrader une valeur
+ * legitime a cause d'une introspection ratee.
+ */
+const KNOWN_ACTION_TYPES = new Set(
+  UserBehaviorData?.rawAttributes?.action_type?.values || []
+);
+
 class BehaviorDataCollector {
   constructor() {
     this.batchSize = 100;
@@ -27,6 +42,39 @@ class BehaviorDataCollector {
     
     // Démarrer le traitement en batch
     this.startBatchProcessing();
+  }
+
+  /**
+   * Ramene un type d'action inconnu vers `custom_action`, sans perdre le nom
+   * d'origine.
+   *
+   * `trackCustomAction()` cote mobile passe une chaine LIBRE en `action_type`.
+   * Toute valeur absente de l'enum PostgreSQL fait echouer l'INSERT entier :
+   * l'action n'est pas degradee, elle est PERDUE, et l'erreur ne remonte qu'en
+   * log serveur — l'app, elle, ne voit rien. C'est ainsi que 145 ouvertures de
+   * tweet depuis la grille Explorer et 20 reponses au controle d'algorithme
+   * ont disparu avant qu'on ne s'en apercoive.
+   *
+   * Une application deja installee ne peut pas etre corrigee a distance : ce
+   * garde-fou est donc cote serveur, et il vaut aussi pour toutes les valeurs
+   * qu'un client futur inventera. Le nom d'origine part dans le contexte, donc
+   * rien n'est perdu pour l'analyse, et il suffira de l'ajouter a l'enum plus
+   * tard pour retrouver une colonne propre.
+   *
+   * @param {string} actionType Ce que le client a envoye.
+   * @param {object} context Contexte enrichi, modifie sur place si repli.
+   * @returns {string} Une valeur que l'enum accepte.
+   */
+  toKnownActionType(actionType, context) {
+    if (KNOWN_ACTION_TYPES.size === 0) return actionType;
+    if (KNOWN_ACTION_TYPES.has(actionType)) return actionType;
+
+    logger.warn(
+      `Type d'action inconnu « ${actionType} » ramene a custom_action ` +
+      '— a ajouter dans UserBehaviorData.action_type si legitime'
+    );
+    context.original_action_type = actionType;
+    return 'custom_action';
   }
 
   /**
@@ -55,7 +103,7 @@ class BehaviorDataCollector {
       // Créer l'enregistrement
       const behaviorData = await UserBehaviorData.create({
         user_id: userId,
-        action_type: actionType,
+        action_type: this.toKnownActionType(actionType, enrichedContext),
         target_id: targetId ? targetId.toString() : null,
         target_type: targetType,
         context_data: enrichedContext,
