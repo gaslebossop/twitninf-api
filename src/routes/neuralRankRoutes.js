@@ -490,6 +490,11 @@ async function injectAds(tweets, placements, userId) {
         id: p.advertisement_id,
         match_score: p.match_score,
         target_type: p.target_type || 'tweet',
+        // Le tweet promu ré-utilise son id réel comme clé de liste — voir plus
+        // haut — donc rien ici ne le redit. Ce champ existe pour le client :
+        // c'est ce qu'il faut ouvrir au clic, sans avoir à deviner que
+        // `tweet.id` EST déjà le bon id pour ce cas précis.
+        tweet_id: p.target_type === 'profile' ? null : p.tweet_id,
       },
     });
     shown.push(p);
