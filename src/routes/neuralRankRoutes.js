@@ -609,9 +609,14 @@ router.get('/account-status', authenticateToken, async (req, res) => {
  */
 router.post('/calibration/round', authenticateToken, async (req, res) => {
   const userId = req.user.id;
+  // Borne large à dessein : c'est le client qui décide du nombre de tours
+  // (c'est lui qui appelle `/finish`), et une app déjà installée ne se met
+  // pas à jour en même temps que le serveur. Une borne serrée ici rejetait
+  // le dernier tour de tout client encore réglé sur l'ancien compte — voir
+  // `MAX_ACCEPTED_ROUND` côté moteur, qui applique la même tolérance.
   const round = parseInt(req.body?.round, 10);
-  if (!Number.isInteger(round) || round < 1 || round > 5) {
-    return res.status(400).json({ success: false, error: 'round doit être un entier entre 1 et 5' });
+  if (!Number.isInteger(round) || round < 1 || round > 10) {
+    return res.status(400).json({ success: false, error: 'round doit être un entier entre 1 et 10' });
   }
   const likedTweetIds = Array.isArray(req.body?.likedTweetIds) ? req.body.likedTweetIds.map(String) : [];
   const skippedTweetIds = Array.isArray(req.body?.skippedTweetIds) ? req.body.skippedTweetIds.map(String) : [];
@@ -643,6 +648,13 @@ router.post('/calibration/finish', authenticateToken, async (req, res) => {
 
   try {
     const applied = await rustClient.finishCalibration(userId, likedTweetIds);
+    // Le moteur Rust invalide déjà son propre cache (profil + liste classée),
+    // mais ce cache-ci (`withFeedCache`, 30s) est un étage au-dessus et ne le
+    // sait pas : sans ce second appel, une recalibration resterait invisible
+    // jusqu'à 30s de plus après que le moteur ait fini de la traiter.
+    await require('../services/feedCache')
+      .invalidateUserFeed(userId)
+      .catch((e) => logger.warn(`[NeuralRank] invalidation feedCache après calibration en échec: ${e.message}`));
     return res.json({ success: true, data: { applied } });
   } catch (err) {
     logger.error(`[NeuralRank] calibration/finish indisponible: ${err.message}`);
