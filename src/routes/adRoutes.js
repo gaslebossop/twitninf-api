@@ -145,13 +145,13 @@ router.post('/advertisements', authenticateToken, async (req, res) => {
       data: advertisement
     });
   } catch (error) {
-    // Un solde insuffisant n'est pas une panne du serveur : le renvoyer en
-    // 500 avec un message générique empêchait le client de dire à
-    // l'utilisateur ce qui manquait — il ne voyait qu'une erreur inexpliquée.
-    // Même raison pour `error.status` : une cible refusée est un refus, pas
-    // un incident.
+    // Un solde insuffisant, une cible refusée ou un portefeuille en revue
+    // anti-fraude ne sont pas des pannes du serveur : les renvoyer en 500
+    // avec un message générique empêchait le client de dire à l'utilisateur
+    // ce qui bloquait — il ne voyait qu'une erreur inexpliquée, et retentait
+    // en boucle, ce qui côté anti-fraude aggrave justement la revue en cours.
     const insufficient = /solde insuffisant/i.test(error.message || '');
-    const status = error.status || (insufficient ? 402 : 500);
+    const status = error.status || error.httpStatus || (insufficient ? 402 : 500);
     if (status >= 500) logger.error('❌ Erreur lors de la création de publicité:', error);
     res.status(status).json({
       success: false,
@@ -1062,7 +1062,7 @@ router.post('/targeted', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     const insufficient = /solde insuffisant/i.test(error.message || '');
-    const status = error.status || (insufficient ? 402 : 500);
+    const status = error.status || error.httpStatus || (insufficient ? 402 : 500);
     if (status >= 500) logger.error('❌ Création de publicité ciblée en échec:', error);
     return res.status(status).json({
       success: false,
