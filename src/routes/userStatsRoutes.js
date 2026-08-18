@@ -223,6 +223,16 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
     const startDate = new Date();
     startDate.setDate(now.getDate() - days);
 
+    // Toutes les requêtes qui suivent bornaient `endDate` avec
+    // `now.toISOString().split('T')[0]` — une date SANS heure, donc comparée
+    // par Postgres à minuit UTC de ce jour. `timestamp <= '2026-08-18'`
+    // exclut ainsi TOUTE l'activité d'aujourd'hui, du début de journée
+    // jusqu'à l'instant présent : le jour le plus récent de n'importe quelle
+    // fenêtre retombait systématiquement à 0, quelle que soit l'activité
+    // réelle. `endDateIso` porte l'heure exacte pour que « aujourd'hui »
+    // compte ce qui s'y est réellement passé.
+    const endDateIso = now.toISOString();
+
     // Générer les dates manuellement
     const dates = [];
     const currentDate = new Date(startDate);
@@ -246,31 +256,47 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       replacements: { 
         userId, 
         startDate: startDate.toISOString().split('T')[0],
-        endDate: now.toISOString().split('T')[0]
+        endDate: endDateIso
       },
       type: sequelize.QueryTypes.SELECT
     });
 
+    // Groupé par le jour où la vue a EU LIEU (`user_behavior_data.timestamp`),
+    // pas par le jour où le tweet a été PUBLIÉ (`tweets.created_at`).
+    //
+    // La requête groupait auparavant `SUM(tweets.view_count)` par date de
+    // création du tweet : un tweet publié le 15 mais toujours vu aujourd'hui
+    // voyait TOUTES ses vues (passées et à venir) créditées au 15, jamais aux
+    // jours suivants. Résultat pour quelqu'un qui n'a rien publié depuis
+    // 3 jours : la courbe des 3 derniers jours affiche 0, alors que ses
+    // anciens tweets continuent d'accumuler de vraies vues chaque jour — elles
+    // sont juste comptées ailleurs, sur la date de publication.
+    //
+    // `user_behavior_data` journalise chaque vue avec l'instant où elle s'est
+    // produite (voir `behaviorRoutes.js` → `recordTweetInteraction`) : c'est
+    // la seule source qui permette de répartir les vues sur le bon jour.
     const viewCounts = await sequelize.query(`
       SELECT
-        DATE(created_at) as date,
-        -- Sans COALESCE, un jour dont TOUS les tweets ont view_count NULL
-        -- renvoie NULL ici : parseInt(null) donne NaN, sérialisé en null
-        -- dans le JSON. Le client lisait ce null comme une COUPURE de série
-        -- et scindait la courbe en morceaux (bord vertical franc au milieu
-        -- du graphique). Un jour sans vue vaut 0, pas un trou.
-        COALESCE(SUM(view_count), 0) as views
-      FROM tweets
-      WHERE user_id::text = :userId
-        AND created_at >= :startDate 
-        AND created_at <= :endDate
-        AND deleted_at IS NULL
-      GROUP BY DATE(created_at)
+        DATE(ubd.timestamp) as date,
+        -- Sans COALESCE, un jour sans aucune vue renvoie NULL ici :
+        -- parseInt(null) donne NaN, sérialisé en null dans le JSON. Le client
+        -- lisait ce null comme une COUPURE de série et scindait la courbe en
+        -- morceaux (bord vertical franc au milieu du graphique). Un jour sans
+        -- vue vaut 0, pas un trou.
+        COALESCE(COUNT(*), 0) as views
+      FROM user_behavior_data ubd
+      JOIN tweets t ON t.id::text = ubd.target_id AND ubd.target_type = 'tweet'
+      WHERE t.user_id::text = :userId
+        AND ubd.action_type IN ('tweet_view', 'media_view')
+        AND ubd.timestamp >= :startDate 
+        AND ubd.timestamp <= :endDate
+        AND t.deleted_at IS NULL
+      GROUP BY DATE(ubd.timestamp)
     `, {
       replacements: { 
         userId, 
         startDate: startDate.toISOString().split('T')[0],
-        endDate: now.toISOString().split('T')[0]
+        endDate: endDateIso
       },
       type: sequelize.QueryTypes.SELECT
     });
@@ -291,7 +317,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       replacements: { 
         userId, 
         startDate: startDate.toISOString().split('T')[0],
-        endDate: now.toISOString().split('T')[0]
+        endDate: endDateIso
       },
       type: sequelize.QueryTypes.SELECT
     });
@@ -311,7 +337,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       replacements: { 
         userId, 
         startDate: startDate.toISOString().split('T')[0],
-        endDate: now.toISOString().split('T')[0]
+        endDate: endDateIso
       },
       type: sequelize.QueryTypes.SELECT
     });
@@ -331,7 +357,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       replacements: { 
         userId, 
         startDate: startDate.toISOString().split('T')[0],
-        endDate: now.toISOString().split('T')[0]
+        endDate: endDateIso
       },
       type: sequelize.QueryTypes.SELECT
     });
@@ -353,7 +379,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       replacements: {
         userId,
         startDate: startDate.toISOString().split('T')[0],
-        endDate: now.toISOString().split('T')[0]
+        endDate: endDateIso
       },
       type: sequelize.QueryTypes.SELECT
     });
@@ -373,7 +399,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       replacements: { 
         userId, 
         startDate: startDate.toISOString().split('T')[0],
-        endDate: now.toISOString().split('T')[0]
+        endDate: endDateIso
       },
       type: sequelize.QueryTypes.SELECT
     });
@@ -392,7 +418,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       replacements: {
         userId,
         startDate: startDate.toISOString().split('T')[0],
-        endDate: now.toISOString().split('T')[0]
+        endDate: endDateIso
       },
       type: sequelize.QueryTypes.SELECT
     });
