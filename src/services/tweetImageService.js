@@ -30,6 +30,7 @@ const sharp = require('sharp');
 const { v4: uuidv4 } = require('uuid');
 
 const { buildStaticMediaPublicUrl, getPublicMediaOrigin } = require('../utils/publicMediaOrigin');
+const { toDecodableBuffer } = require('./heifDecoder');
 
 /** Servi par `app.use('/static', express.static(src/public))`. */
 const TWEET_IMAGES_DIR = path.join(__dirname, '../public/tweets');
@@ -67,7 +68,12 @@ async function storeUploadedImage(buffer, userId) {
   const filename = `tweet-${userId}-${Date.now()}-${uuidv4().slice(0, 8)}.jpg`;
   const outputPath = path.join(TWEET_IMAGES_DIR, filename);
 
-  await sharp(buffer)
+  // Une photo prise sur iPhone arrive en HEIC, que le libvips embarqué par
+  // `sharp` ne sait pas décoder — voir `heifDecoder`. Sans cette conversion,
+  // tout envoi depuis un iPhone échouait sur « bad seek ».
+  const decodable = await toDecodableBuffer(buffer);
+
+  await sharp(decodable)
     .rotate()
     .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true })
     .jpeg({ quality: JPEG_QUALITY, mozjpeg: true })
