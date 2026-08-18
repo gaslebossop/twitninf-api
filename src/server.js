@@ -51,6 +51,7 @@ const config = require('./config/config');
 // et des migrations quand l'API tourne sur plusieurs machines. Voir config/role.js.
 const { role: nodeRole, isWorker, runMigrations, instanceId } = require('./config/role');
 const logger = require('./utils/logger');
+const { unwrapStringBody, recoverUnparsableBody } = require('./middleware/jsonBodyRecovery');
 const { sequelize, testConnection, syncDatabase, closeConnection } = require('./database');
 const BanService = require('./services/banService');
 const policiercongoAutomatisation = require('./services/policiercongoAutomatisation');
@@ -352,6 +353,13 @@ app.use(morgan('combined', {
 // Parser pour le corps des requêtes
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Rattrapage des corps JSON mal encodes par les applications deja installees
+// — voir `middleware/jsonBodyRecovery`. Doit rester APRES les parseurs et
+// AVANT les routes.
+app.use(unwrapStringBody);
+app.use(recoverUnparsableBody);
+
 app.use(requestReadRouting);
 // Capture a server-trusted, privacy-preserving context for every future wallet
 // mutation. The central ledger can then authorize calls without trusting route

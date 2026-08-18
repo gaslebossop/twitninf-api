@@ -12,6 +12,12 @@ const SmartRecommendationEngine = require('./smartRecommendationEngine');
  * 2. Une fois approuvés, ils passent en statut 'testing' 
  * 3. Maximum 2 tweets à tester par page
  */
+/**
+ * Groupes de progression ayant une colonne `group_views_<groupe>` dans
+ * `tweet_queue`. Toute autre valeur (`excluded` notamment) n'en a pas.
+ */
+const GROUP_VIEW_COLUMNS = new Set(['initial', 'expansion', 'viral', 'massive']);
+
 class TweetQueueService {
   constructor() {
     this.initialized = false;
@@ -355,12 +361,37 @@ class TweetQueueService {
   async trackTweetView(tweetId, currentGroup, userId, shadowBanReduction = 1) {
     try {
       // 1. Mettre à jour les compteurs dans tweet_queue avec réduction pour shadow ban
-      const groupColumn = `group_views_${currentGroup}`;
-      
+      //
+      // `currentGroup` est INTERPOLE dans le SQL : il doit donc etre valide par
+      // une liste blanche, jamais concatene tel quel. Deux raisons, et la
+      // premiere s'est deja produite en production :
+      //
+      //  - `tweet_queue` n'a de colonne que pour les quatre groupes de
+      //    progression. Un tweet en groupe `excluded` (filtrage/shadowban)
+      //    produisait `group_views_excluded`, qui n'existe pas : l'UPDATE
+      //    entier echouait, donc la vue n'etait comptee NULLE PART — pas meme
+      //    dans `total_views` — et `trackTweetView` rendait false.
+      //  - une valeur qui viendrait un jour d'une entree utilisateur serait
+      //    injectee directement dans la requete.
+      //
+      // Groupe inconnu : on renonce au compteur par groupe, mais on compte
+      // quand meme la vue au total. Mieux vaut un compteur detaille incomplet
+      // qu'une vue perdue.
+      const groupColumn = GROUP_VIEW_COLUMNS.has(currentGroup)
+        ? `group_views_${currentGroup}`
+        : null;
+
+      if (!groupColumn) {
+        logger.warn(
+          `Groupe « ${currentGroup} » sans colonne dediee dans tweet_queue : ` +
+          `vue comptee dans total_views uniquement (tweet ${tweetId})`
+        );
+      }
+
       await sequelize.query(`
         UPDATE tweet_queue 
         SET 
-          ${groupColumn} = COALESCE(${groupColumn}, 0) + :shadowBanReduction,
+          ${groupColumn ? `${groupColumn} = COALESCE(${groupColumn}, 0) + :shadowBanReduction,` : ''}
           total_views = COALESCE(total_views, 0) + :shadowBanReduction,
           processing_metadata = COALESCE(processing_metadata, '{}'::jsonb) || 
             jsonb_build_object(
