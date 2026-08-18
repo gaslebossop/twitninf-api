@@ -18,6 +18,7 @@ const {
   Notification
 } = require('../models');
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
+const { toDecodableBuffer } = require('../services/heifDecoder');
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
 const logger = require('../utils/logger');
 
@@ -533,8 +534,14 @@ router.post('/', [authenticateToken, denySuspended, upload.single('media')], asy
     if (isVideo) {
       fs.writeFileSync(outputPath, req.file.buffer);
     } else {
+      // Une photo prise sur iPhone arrive en HEIC, que le libvips embarqué par
+      // `sharp` ne sait pas décoder — voir `heifDecoder`. Sans cette
+      // conversion, toute story photographiée sur iPhone échouait sur
+      // « bad seek », y compris sur des fichiers parfaitement intacts.
+      const decodable = await toDecodableBuffer(req.file.buffer);
+
       // Format story : 9:16 max 1080x1920, sans agrandir une petite image.
-      await sharp(req.file.buffer)
+      await sharp(decodable)
         .rotate()
         .resize(1080, 1920, { fit: 'inside', withoutEnlargement: true })
         .jpeg({ quality: 82 })
