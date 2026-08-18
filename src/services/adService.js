@@ -110,7 +110,7 @@ class AdService {
   /**
    * 📊 Créer une nouvelle campagne publicitaire
    */
-  async createCampaign(userId, campaignData) {
+  async createCampaign(userId, campaignData, options = {}) {
     try {
       const campaign = await AdCampaign.create({
         user_id: userId,
@@ -123,7 +123,7 @@ class AdService {
         end_date: campaignData.end_date,
         targeting_criteria: campaignData.targeting_criteria || {},
         status: 'draft'
-      });
+      }, options.transaction ? { transaction: options.transaction } : undefined);
 
       logger.info(`📊 Campagne créée: ${campaign.id} pour l'utilisateur ${userId}`);
       return campaign;
@@ -136,9 +136,16 @@ class AdService {
   /**
    * 🎯 Créer une nouvelle publicité
    */
-  async createAdvertisement(userId, adData) {
+  // `options.transaction` : quand un appelant possède déjà une transaction
+  // ouverte (voir `/api/ads/targeted`, qui crée la campagne ET la publicité
+  // comme une seule opération), on l'utilise au lieu d'en ouvrir une nouvelle
+  // — sinon un échec ICI ne défaisait que le débit et la publicité, jamais la
+  // campagne créée juste avant par un autre appel : elle restait en base,
+  // vide, à chaque tentative ratée.
+  async createAdvertisement(userId, adData, options = {}) {
     const { sequelize } = require('../database/index');
-    const transaction = await sequelize.transaction();
+    const ownsTransaction = !options.transaction;
+    const transaction = options.transaction || await sequelize.transaction();
     try {
       // 1. Vérifier le solde de l'utilisateur
       const userBalance = await this.getUserTWCBalance(userId);
@@ -175,11 +182,11 @@ class AdService {
         status: 'draft'
       }, { transaction });
 
-      await transaction.commit();
+      if (ownsTransaction) await transaction.commit();
       logger.info(`🎯 Publicité créée: ${advertisement.id} pour l'utilisateur ${userId} (Budget: ${adData.budget} NF)`);
       return advertisement;
     } catch (error) {
-      await transaction.rollback();
+      if (ownsTransaction) await transaction.rollback();
       logger.error('❌ Erreur lors de la création de la publicité:', error);
       throw error;
     }

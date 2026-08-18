@@ -1014,6 +1014,7 @@ router.get('/targeting/options', authenticateToken, async (req, res) => {
  */
 router.post('/targeted', authenticateToken, async (req, res) => {
   try {
+    const { sequelize } = require('../database');
     const userId = req.user.id;
     const { budget, targeting, title, max_impressions_per_user } = req.body || {};
 
@@ -1035,25 +1036,41 @@ router.post('/targeted', authenticateToken, async (req, res) => {
       daily_cap: Number.isInteger(t.daily_cap) ? t.daily_cap : undefined,
     };
 
-    const campaign = await adService.createCampaign(userId, {
-      name: title || `Promotion ${new Date().toLocaleDateString('fr-FR')}`,
-      total_budget: budget,
-      daily_budget: budget,
-      targeting_criteria,
-    });
+    // Campagne, publicité, débit et activation dans UNE seule transaction :
+    // si le débit refuse (solde, revue anti-fraude…), tout se défait, y
+    // compris la campagne. Sans ça, chaque tentative ratée laissait une
+    // campagne vide en base — c'est exactement ce qui s'est produit pendant
+    // les essais du 2026-08-18 : 16 campagnes « draft » sans aucune publicité.
+    const dbTransaction = await sequelize.transaction();
+    let campaign, advertisement;
+    try {
+      campaign = await adService.createCampaign(userId, {
+        name: title || `Promotion ${new Date().toLocaleDateString('fr-FR')}`,
+        total_budget: budget,
+        daily_budget: budget,
+        targeting_criteria,
+      }, { transaction: dbTransaction });
 
-    const advertisement = await adService.createAdvertisement(userId, {
-      ...target,
-      campaign_id: campaign.id,
-      title: title || target.label || 'Publicité',
-      budget,
-      targeting_criteria,
-      max_impressions_per_user: max_impressions_per_user || 3,
-    });
+      advertisement = await adService.createAdvertisement(userId, {
+        ...target,
+        campaign_id: campaign.id,
+        title: title || target.label || 'Publicité',
+        budget,
+        targeting_criteria,
+        max_impressions_per_user: max_impressions_per_user || 3,
+      }, { transaction: dbTransaction });
 
-    // Le débit a réussi (sinon `createAdvertisement` aurait levé) : la
-    // publicité doit être diffusable tout de suite, pas rester en brouillon.
-    await advertisement.update({ status: 'active' });
+      // Le débit a réussi (sinon `createAdvertisement` aurait levé) : la
+      // publicité et sa campagne doivent être diffusables tout de suite, pas
+      // rester en brouillon.
+      await advertisement.update({ status: 'active' }, { transaction: dbTransaction });
+      await campaign.update({ status: 'active' }, { transaction: dbTransaction });
+
+      await dbTransaction.commit();
+    } catch (error) {
+      await dbTransaction.rollback();
+      throw error;
+    }
 
     return res.status(201).json({
       success: true,
