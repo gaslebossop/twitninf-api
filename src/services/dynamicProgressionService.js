@@ -69,7 +69,16 @@ class DynamicProgressionService {
       });
 
       if (!queueData) {
-        logger.error(`❌ Tweet ${tweetId} non trouvé dans la queue`);
+        // PAS une erreur : `processTweetProgression` est appele a CHAQUE vue et
+        // chaque interaction, sur n'importe quel tweet, alors que seuls les
+        // tweets en test progressif figurent dans `tweet_queue`. L'immense
+        // majorite n'y est donc pas, et c'est le cas nominal.
+        //
+        // Au niveau `error`, cette ligne representait a elle seule 1184 des
+        // entrees d'erreur du journal — de quoi noyer les vraies pannes et
+        // rendre toute enquete penible. C'est ce qui a failli masquer le bug
+        // d'upload des images.
+        logger.debug(`Tweet ${tweetId} hors file de progression, rien a faire`);
         return false;
       }
 
