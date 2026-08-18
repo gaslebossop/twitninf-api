@@ -666,6 +666,14 @@ AdvertisementModel.belongsTo(Tweet, {
   as: 'tweet'
 });
 
+// Compte promu (`target_type = 'profile'`). Distinct de `user` : `user` est
+// l'annonceur qui paie, `promoted_user` est le compte mis en avant — et
+// depuis qu'on peut promouvoir autre chose que soi, les deux diffèrent.
+AdvertisementModel.belongsTo(User, {
+  foreignKey: 'target_user_id',
+  as: 'promoted_user'
+});
+
 AdCampaignModel.hasMany(AdvertisementModel, { 
   foreignKey: 'campaign_id', 
   as: 'advertisements',
@@ -1693,6 +1701,54 @@ async function ensureTweetsAudioColumns() {
   }
 }
 
+/**
+ * Publicité : promouvoir un COMPTE, pas seulement un tweet.
+ *
+ * Même piège que `ensureUsersCityColumn` : `sequelize.sync({ alter: false })`
+ * ne touche jamais une table existante, MAIS il tente quand même de créer les
+ * index déclarés sur le modèle (`AdvertisementModel`, champ `target_user_id`)
+ * — et ça, il le fait même sans `alter`. Sans ce garde-fou, `sync()` essaie de
+ * poser un index sur une colonne qui n'existe pas encore et fait planter tout
+ * le démarrage (« column "target_user_id" does not exist »), avant même que
+ * la migration ait eu une chance de l'ajouter.
+ */
+async function ensureAdvertisementsTargetColumns() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'advertisements'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) return;
+
+    await sequelize.query(`
+      ALTER TABLE advertisements
+        ADD COLUMN IF NOT EXISTS target_type VARCHAR(16) NOT NULL DEFAULT 'tweet',
+        ADD COLUMN IF NOT EXISTS target_user_id UUID NULL REFERENCES users(id) ON DELETE CASCADE;
+      ALTER TABLE advertisements ALTER COLUMN tweet_id DROP NOT NULL;
+    `);
+    await sequelize.query(`
+      DO $constraint$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'advertisements_target_ck'
+        ) THEN
+          ALTER TABLE advertisements ADD CONSTRAINT advertisements_target_ck CHECK (
+            (target_type = 'tweet'   AND tweet_id       IS NOT NULL) OR
+            (target_type = 'profile' AND target_user_id IS NOT NULL)
+          );
+        END IF;
+      END
+      $constraint$;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureAdvertisementsTargetColumns:', e.message);
+    throw e;
+  }
+}
+
 // Fonction pour synchroniser la base de données
 async function syncDatabase() {
   try {
@@ -1728,6 +1784,7 @@ async function syncDatabase() {
     await ensureTweetsAudioColumns();
     await ensureUsersPreferredLanguageColumn();
     await ensureScheduledTweetsTimeZoneColumn();
+    await ensureAdvertisementsTargetColumns();
 
     // ÉTAPE 2: Synchroniser les modèles (créer/modifier les tables)
     logger.info('Synchronisation des modèles...');

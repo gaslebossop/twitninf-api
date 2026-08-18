@@ -18,6 +18,72 @@ const { Advertisement, AdCampaign, User, Tweet } = require('../models');
 const PLATFORM_UTC_OFFSET_HOURS = parseInt(process.env.PLATFORM_UTC_OFFSET_HOURS, 10) || 1;
 
 /**
+ * Résout et valide ce qu'une publicité met en avant.
+ *
+ * Deux règles ont sauté ici, et pour la même raison : elles ne protégeaient
+ * rien.
+ *
+ * — « on ne peut promouvoir qu'un tweet » venait d'une colonne NOT NULL, pas
+ *   d'un choix. Un compte est une cible publicitaire aussi légitime qu'un
+ *   post.
+ * — « et seulement le sien » interdisait de payer pour mettre en avant le
+ *   contenu de quelqu'un d'autre, ce qui est le cas d'usage normal d'une
+ *   régie. Ce qui compte n'est pas QUI a écrit la cible, c'est qu'elle soit
+ *   déjà publiquement visible : payer ne doit jamais donner accès à ce que
+ *   l'algorithme refuserait de servir gratuitement.
+ *
+ * Renvoie `{ target_type, tweet_id, target_user_id, label }`, ou lève une
+ * erreur portant `.status` pour que l'appelant réponde le bon code.
+ */
+async function resolveAdTarget({ target_type, tweet_id, target_user_id, target_username }) {
+  const fail = (status, message) => {
+    const e = new Error(message);
+    e.status = status;
+    throw e;
+  };
+
+  const type = target_type === 'profile' ? 'profile' : (target_type === 'tweet' || tweet_id ? 'tweet' : null);
+  if (!type) fail(400, 'Cible manquante : indiquez un tweet ou un compte à promouvoir');
+
+  if (type === 'profile') {
+    const where = target_user_id ? { id: target_user_id } : { username: target_username };
+    if (!target_user_id && !target_username) fail(400, 'Compte à promouvoir manquant');
+    const user = await User.findOne({ where });
+    if (!user) fail(404, 'Compte à promouvoir introuvable');
+    // Mêmes conditions que celles du moteur (`load_active_ads`) : inutile de
+    // débiter un annonceur pour une cible que le fil n'affichera jamais.
+    if (user.is_active === false || user.is_suspended) fail(403, 'Ce compte ne peut pas être promu');
+    if (user.is_private_account) fail(403, 'Un compte privé ne peut pas être promu');
+    return {
+      target_type: 'profile',
+      tweet_id: null,
+      target_user_id: user.id,
+      label: `@${user.username}`,
+    };
+  }
+
+  if (!tweet_id) fail(400, 'Tweet à promouvoir manquant');
+  const tweet = await Tweet.findByPk(tweet_id, {
+    include: [{ model: User, as: 'author', attributes: ['id', 'username', 'is_active', 'is_suspended', 'is_private_account'] }],
+  });
+  if (!tweet || tweet.deleted_at) fail(404, 'Tweet à promouvoir introuvable');
+  if (tweet.is_private) fail(403, 'Un tweet privé ne peut pas être promu');
+  if (tweet.moderation_status && tweet.moderation_status !== 'approved') {
+    fail(403, 'Ce tweet n’est pas diffusable');
+  }
+  const author = tweet.author;
+  if (author && (author.is_active === false || author.is_suspended || author.is_private_account)) {
+    fail(403, 'Ce tweet ne peut pas être promu');
+  }
+  return {
+    target_type: 'tweet',
+    tweet_id: tweet.id,
+    target_user_id: null,
+    label: (tweet.content || '').slice(0, 60) || `Tweet de @${author?.username || ''}`,
+  };
+}
+
+/**
  * 📊 Créer une nouvelle campagne publicitaire
  * POST /api/ads/campaigns
  */
@@ -61,23 +127,17 @@ router.post('/advertisements', authenticateToken, async (req, res) => {
     const adData = req.body;
 
     // Validation des données
-    if (!adData.tweet_id || !adData.budget) {
+    if (!adData.budget) {
       return res.status(400).json({
         success: false,
-        message: 'Tweet ID et budget requis'
+        message: 'Budget requis'
       });
     }
 
-    // Vérifier que le tweet appartient à l'utilisateur
-    const tweet = await Tweet.findByPk(adData.tweet_id);
-    if (!tweet || tweet.user_id !== userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Vous ne pouvez promouvoir que vos propres tweets'
-      });
-    }
+    // Tweet OU compte, à soi ou non — voir `resolveAdTarget`.
+    const target = await resolveAdTarget(adData);
 
-    const advertisement = await adService.createAdvertisement(userId, adData);
+    const advertisement = await adService.createAdvertisement(userId, { ...adData, ...target });
 
     res.status(201).json({
       success: true,
@@ -85,14 +145,17 @@ router.post('/advertisements', authenticateToken, async (req, res) => {
       data: advertisement
     });
   } catch (error) {
-    logger.error('❌ Erreur lors de la création de publicité:', error);
     // Un solde insuffisant n'est pas une panne du serveur : le renvoyer en
     // 500 avec un message générique empêchait le client de dire à
     // l'utilisateur ce qui manquait — il ne voyait qu'une erreur inexpliquée.
+    // Même raison pour `error.status` : une cible refusée est un refus, pas
+    // un incident.
     const insufficient = /solde insuffisant/i.test(error.message || '');
-    res.status(insufficient ? 402 : 500).json({
+    const status = error.status || (insufficient ? 402 : 500);
+    if (status >= 500) logger.error('❌ Erreur lors de la création de publicité:', error);
+    res.status(status).json({
       success: false,
-      message: insufficient ? error.message : 'Erreur lors de la création de la publicité',
+      message: status === 500 ? 'Erreur lors de la création de la publicité' : error.message,
       error: error.message
     });
   }
@@ -952,15 +1015,14 @@ router.get('/targeting/options', authenticateToken, async (req, res) => {
 router.post('/targeted', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { tweet_id, budget, targeting, title, max_impressions_per_user } = req.body || {};
+    const { budget, targeting, title, max_impressions_per_user } = req.body || {};
 
-    if (!tweet_id || !budget || Number(budget) <= 0) {
-      return res.status(400).json({ success: false, message: 'Tweet et budget requis' });
+    if (!budget || Number(budget) <= 0) {
+      return res.status(400).json({ success: false, message: 'Budget requis' });
     }
-    const tweet = await Tweet.findByPk(tweet_id);
-    if (!tweet || tweet.user_id !== userId) {
-      return res.status(403).json({ success: false, message: 'Vous ne pouvez promouvoir que vos propres tweets' });
-    }
+    // Tweet ou compte, le sien ou celui d'un autre : la seule condition est
+    // que la cible soit déjà publiquement visible (voir `resolveAdTarget`).
+    const target = await resolveAdTarget(req.body || {});
 
     // On ne retient que les critères réellement évalués par le moteur : en
     // accepter d'autres ferait payer un ciblage sans effet.
@@ -981,9 +1043,9 @@ router.post('/targeted', authenticateToken, async (req, res) => {
     });
 
     const advertisement = await adService.createAdvertisement(userId, {
-      tweet_id,
+      ...target,
       campaign_id: campaign.id,
-      title: title || 'Publicité',
+      title: title || target.label || 'Publicité',
       budget,
       targeting_criteria,
       max_impressions_per_user: max_impressions_per_user || 3,
@@ -996,14 +1058,15 @@ router.post('/targeted', authenticateToken, async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Publicité créée et activée',
-      data: { id: advertisement.id, campaign_id: campaign.id },
+      data: { id: advertisement.id, campaign_id: campaign.id, target_type: target.target_type },
     });
   } catch (error) {
     const insufficient = /solde insuffisant/i.test(error.message || '');
-    if (!insufficient) logger.error('❌ Création de publicité ciblée en échec:', error);
-    return res.status(insufficient ? 402 : 500).json({
+    const status = error.status || (insufficient ? 402 : 500);
+    if (status >= 500) logger.error('❌ Création de publicité ciblée en échec:', error);
+    return res.status(status).json({
       success: false,
-      message: insufficient ? error.message : 'Erreur lors de la création de la publicité',
+      message: status === 500 ? 'Erreur lors de la création de la publicité' : error.message,
     });
   }
 });
@@ -1011,22 +1074,76 @@ router.post('/targeted', authenticateToken, async (req, res) => {
 /**
  * 📈 Mes publicités ciblées, avec leurs résultats
  * GET /api/ads/targeted/me
+ *
+ * Cette route renvoyait `impressions`/`clicks` pendant que l'écran lisait
+ * `current_views`/`max_views`/`text_content` — des noms hérités de l'ancien
+ * module de ciblage SQLite, disparu depuis. D'où les « undefined » partout
+ * dans « Mes campagnes » : rien n'était cassé côté calcul, les deux moitiés
+ * ne parlaient simplement plus de la même chose.
+ *
+ * Les compteurs portent maintenant le vocabulaire de l'écran (des VUES, pas
+ * des « impressions »), et l'objectif de vues est reconstitué depuis le
+ * budget : c'est exactement ce que l'annonceur a acheté (budget ÷ prix de la
+ * vue), donc la barre de progression a de nouveau un dénominateur.
  */
 router.get('/targeted/me', authenticateToken, async (req, res) => {
   try {
     const { sequelize } = require('../database');
     const { QueryTypes } = require('sequelize');
     const rows = await sequelize.query(`
-      SELECT a.id, a.title, a.status, a.budget::float8 AS budget,
-             a.targeting_criteria, a.created_at, a.tweet_id,
+      SELECT a.id, a.title, a.status, a.created_at,
+             a.budget::float8            AS budget,
+             a.cost_per_impression::float8 AS cost_per_impression,
+             a.target_type, a.tweet_id, a.target_user_id,
+             a.targeting_criteria,
+             t.content       AS tweet_content,
+             tu.username     AS tweet_author_username,
+             pu.username     AS promoted_username,
+             pu.avatar       AS promoted_avatar,
              (SELECT COUNT(*) FROM ad_impressions i WHERE i.advertisement_id = a.id)::int AS impressions,
-             (SELECT COUNT(*) FROM ad_clicks c WHERE c.advertisement_id = a.id)::int AS clicks
+             (SELECT COUNT(*) FROM ad_clicks c      WHERE c.advertisement_id = a.id)::int AS clicks
       FROM advertisements a
+      LEFT JOIN tweets t  ON t.id  = a.tweet_id
+      LEFT JOIN users  tu ON tu.id = t.user_id
+      LEFT JOIN users  pu ON pu.id = a.target_user_id
       WHERE a.user_id = :userId
       ORDER BY a.created_at DESC LIMIT 50`,
       { replacements: { userId: req.user.id }, type: QueryTypes.SELECT });
 
-    return res.json({ success: true, data: rows });
+    const data = rows.map((r) => {
+      const cpi = Number(r.cost_per_impression) || 0.10;
+      const views = Number(r.impressions) || 0;
+      const clicks = Number(r.clicks) || 0;
+      // Objectif de vues = ce qui a été acheté. Sans prix unitaire lisible on
+      // ne devine pas : mieux vaut 0 qu'un dénominateur inventé.
+      const maxViews = cpi > 0 ? Math.round(Number(r.budget) / cpi) : 0;
+      const isProfile = r.target_type === 'profile';
+      return {
+        id: r.id,
+        title: r.title,
+        status: r.status,
+        created_at: r.created_at,
+        target_type: r.target_type || 'tweet',
+        target_id: isProfile ? r.target_user_id : r.tweet_id,
+        // Ce que l'annonceur reconnaît dans la liste : le compte promu, ou le
+        // début du tweet promu.
+        target_label: isProfile
+          ? `@${r.promoted_username || ''}`
+          : (r.tweet_content || '').slice(0, 90),
+        target_avatar: isProfile ? r.promoted_avatar : null,
+        target_author: isProfile ? r.promoted_username : r.tweet_author_username,
+        budget: Number(r.budget) || 0,
+        cost_per_view: cpi,
+        current_views: views,
+        max_views: maxViews,
+        clicks,
+        spent: Number((views * cpi).toFixed(2)),
+        ctr: views > 0 ? Number(((clicks / views) * 100).toFixed(1)) : 0,
+        targeting_criteria: r.targeting_criteria || {},
+      };
+    });
+
+    return res.json({ success: true, data });
   } catch (error) {
     logger.error('❌ Lecture des publicités impossible:', error);
     return res.status(500).json({ success: false, message: 'Publicités indisponibles' });

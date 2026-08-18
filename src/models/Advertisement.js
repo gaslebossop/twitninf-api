@@ -118,11 +118,30 @@ module.exports = (sequelize) => {
         key: 'id'
       }
     },
+    // Une publicité désigne SOIT un tweet, SOIT un compte — d'où les deux
+    // colonnes nullables et `target_type` qui dit laquelle fait foi. `tweet_id`
+    // était NOT NULL : promouvoir un compte était impossible par construction,
+    // pas par choix de produit.
+    target_type: {
+      type: DataTypes.STRING(16),
+      allowNull: false,
+      defaultValue: 'tweet',
+      validate: { isIn: [['tweet', 'profile']] }
+    },
     tweet_id: {
       type: DataTypes.UUID,
-      allowNull: false,
+      allowNull: true,
       references: {
         model: 'tweets',
+        key: 'id'
+      }
+    },
+    /** Compte promu quand `target_type = 'profile'`. */
+    target_user_id: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      references: {
+        model: 'users',
         key: 'id'
       }
     },
@@ -211,6 +230,9 @@ module.exports = (sequelize) => {
       },
       {
         fields: ['tweet_id']
+      },
+      {
+        fields: ['target_user_id']
       },
       {
         fields: ['campaign_id']

@@ -365,6 +365,73 @@ function withThreadContext(feed) {
  *   offset  = pagination (défaut: 0)
  */
 /**
+ * Hydrate les COMPTES promus en entrées de fil.
+ *
+ * Une publicité de compte n'a pas de tweet à afficher : ce qui est servi est
+ * une carte de profil (avatar, bio, abonnés), pas un post. Elle voyage
+ * néanmoins dans le même tableau que les tweets, avec `author` renseigné :
+ * un client qui ne connaît pas encore les comptes promus la traite alors
+ * comme une entrée sans contenu et l'ignore, plutôt que de planter.
+ *
+ * L'`id` définitif est posé par `injectAds` à partir de l'identifiant de la
+ * publicité : deux campagnes visant le même compte resteraient sinon
+ * indiscernables pour un `keyExtractor` côté client.
+ */
+async function fetchPromotedAccounts(userIds, readerId) {
+  const safeIds = [...new Set(userIds.map(String))].filter(id => UUID_RE.test(id));
+  if (safeIds.length === 0) return new Map();
+
+  const rows = await sequelize.query(`
+    SELECT u.id, u.username, u.full_name, u.avatar, u.banner, u.bio,
+           u.verified, u.verification_style, u.premium,
+           u.subscription_tier, u.profile_customization, u.created_at,
+           (SELECT COUNT(*) FROM user_follows f
+             WHERE f.following_id = u.id AND f.status = 'active')::int AS followers_count,
+           (SELECT COUNT(*) FROM tweets t
+             WHERE t.user_id = u.id AND t.deleted_at IS NULL)::int AS tweets_count,
+           EXISTS (SELECT 1 FROM user_follows f2
+                    WHERE f2.follower_id = :readerId AND f2.following_id = u.id
+                      AND f2.status = 'active') AS is_following
+    FROM users u
+    WHERE u.id IN (:ids)`,
+    { replacements: { ids: safeIds, readerId }, type: QueryTypes.SELECT });
+
+  return new Map(rows.map(r => {
+    const account = {
+      id: String(r.id),
+      username: r.username,
+      full_name: r.full_name || r.username,
+      avatar: r.avatar || null,
+      banner: r.banner || null,
+      bio: r.bio || '',
+      verified: Boolean(r.verified),
+      verification_style: r.verification_style || 'default',
+      premium: Boolean(r.premium),
+      subscription_tier: r.subscription_tier || 'free',
+      profile_customization: r.profile_customization || {},
+      stats: {
+        followers: Number(r.followers_count) || 0,
+        tweets: Number(r.tweets_count) || 0,
+      },
+    };
+    return [String(r.id), {
+      id: `promoted:${r.id}`, // remplacé par `promoted:<advertisement_id>` à l'insertion
+      // La bio sert de contenu : c'est ce que le compte dit de lui-même, et
+      // rien n'est inventé pour remplir la carte.
+      content: r.bio || '',
+      created_at: r.created_at,
+      author: account,
+      promoted_account: { ...account, is_following: Boolean(r.is_following) },
+      stats: { likes: 0, retweets: 0, replies: 0, views: 0 },
+      media_urls: [],
+      hashtags: [],
+      mentions: [],
+      user_interaction: { is_liked: false, is_retweeted: false },
+    }];
+  }));
+}
+
+/**
  * Insère les publicités choisies par le moteur dans la page déjà hydratée.
  *
  * Les positions viennent du moteur et sont appliquées de la fin vers le
@@ -379,31 +446,50 @@ function withThreadContext(feed) {
 async function injectAds(tweets, placements, userId) {
   if (!Array.isArray(placements) || placements.length === 0) return;
 
-  const adTweetIds = placements.map(p => p.tweet_id);
-  let adTweets = [];
-  try {
-    adTweets = await fetchTweetsByIds(adTweetIds, userId);
-  } catch (e) {
-    logger.warn(`[NeuralRank] hydratation des publicités impossible: ${e.message}`);
-    return;
+  const tweetPlacements = placements.filter(p => p.target_type !== 'profile' && p.tweet_id);
+  const profilePlacements = placements.filter(p => p.target_type === 'profile' && p.target_user_id);
+
+  let byId = new Map();
+  if (tweetPlacements.length > 0) {
+    try {
+      const adTweets = await fetchTweetsByIds(tweetPlacements.map(p => p.tweet_id), userId);
+      byId = new Map(adTweets.map(t => [String(t.id), t]));
+    } catch (e) {
+      logger.warn(`[NeuralRank] hydratation des publicités impossible: ${e.message}`);
+    }
   }
-  const byId = new Map(adTweets.map(t => [String(t.id), t]));
+
+  let accountById = new Map();
+  if (profilePlacements.length > 0) {
+    try {
+      accountById = await fetchPromotedAccounts(profilePlacements.map(p => p.target_user_id), userId);
+    } catch (e) {
+      logger.warn(`[NeuralRank] hydratation des comptes promus impossible: ${e.message}`);
+    }
+  }
 
   const ordered = [...placements].sort((a, b) => b.position - a.position);
   const shown = [];
   for (const p of ordered) {
-    const tweet = byId.get(String(p.tweet_id));
-    if (!tweet) {
-      logger.warn(`[NeuralRank] publicité ${p.advertisement_id} non hydratable (tweet ${p.tweet_id}) — non affichée, non facturée`);
+    const item = p.target_type === 'profile'
+      ? accountById.get(String(p.target_user_id))
+      : byId.get(String(p.tweet_id));
+    if (!item) {
+      logger.warn(`[NeuralRank] publicité ${p.advertisement_id} non hydratable — non affichée, non facturée`);
       continue;
     }
     const pos = Math.min(Math.max(0, p.position), tweets.length);
     tweets.splice(pos, 0, {
-      ...tweet,
+      ...item,
+      // Un tweet promu garde son propre id : c'est lui qu'on aime, ouvre ou
+      // retweete. Un compte promu n'en a pas — on l'identifie par la campagne,
+      // pour que deux campagnes visant le même compte restent distinctes.
+      ...(p.target_type === 'profile' ? { id: `promoted:${p.advertisement_id}` } : {}),
       is_ad: true,
       ad_data: {
         id: p.advertisement_id,
         match_score: p.match_score,
+        target_type: p.target_type || 'tweet',
       },
     });
     shown.push(p);

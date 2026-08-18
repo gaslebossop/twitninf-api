@@ -156,7 +156,9 @@ class AdService {
       // 3. Créer la publicité
       const advertisement = await Advertisement.create({
         user_id: userId,
-        tweet_id: adData.tweet_id,
+        target_type: adData.target_type === 'profile' ? 'profile' : 'tweet',
+        tweet_id: adData.tweet_id || null,
+        target_user_id: adData.target_user_id || null,
         campaign_id: adData.campaign_id && adData.campaign_id.trim() !== '' ? adData.campaign_id : null,
         title: adData.title,
         description: adData.description,
@@ -193,10 +195,18 @@ class AdService {
         throw new Error('Utilisateur non trouvé');
       }
 
-      // Récupérer toutes les publicités actives
+      // Récupérer toutes les publicités actives.
+      //
+      // Uniquement celles qui promeuvent un TWEET : ce chemin hérité construit
+      // sa carte à partir de `ad.tweet` (voir `injectAdsIntoFeed`), qu'une
+      // publicité de compte n'a pas. Sans ce filtre, la première campagne de
+      // compte créée ferait tomber l'injection entière dans le catch, et plus
+      // aucune publicité ne sortirait sur ce fil. Les comptes promus passent
+      // par le moteur Rust (`ads/serving.rs`), pas par ici.
       const activeAds = await Advertisement.findAll({
         where: {
-          status: 'active'
+          status: 'active',
+          target_type: 'tweet'
         },
         include: [
           {

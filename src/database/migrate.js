@@ -525,6 +525,37 @@ async function runMigrations() {
         ON users (g_auth_sub) WHERE g_auth_sub IS NOT NULL;
     `);
 
+    // Publicité : promouvoir un COMPTE, pas seulement un tweet.
+    //
+    // `advertisements.tweet_id` était NOT NULL : une publicité de compte
+    // n'avait aucune colonne où se poser, et la restriction « il faut un
+    // tweet » venait du schéma, pas d'un choix de produit. `target_type` dit
+    // laquelle des deux cibles fait foi ; la contrainte garantit qu'il y en a
+    // toujours exactement une de renseignée.
+    await sequelize.query(`
+      ALTER TABLE advertisements
+        ADD COLUMN IF NOT EXISTS target_type VARCHAR(16) NOT NULL DEFAULT 'tweet',
+        ADD COLUMN IF NOT EXISTS target_user_id UUID NULL REFERENCES users(id) ON DELETE CASCADE;
+      ALTER TABLE advertisements ALTER COLUMN tweet_id DROP NOT NULL;
+    `);
+    await sequelize.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'advertisements_target_ck'
+        ) THEN
+          ALTER TABLE advertisements ADD CONSTRAINT advertisements_target_ck CHECK (
+            (target_type = 'tweet'   AND tweet_id       IS NOT NULL) OR
+            (target_type = 'profile' AND target_user_id IS NOT NULL)
+          );
+        END IF;
+      END $$;
+    `);
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS idx_advertisements_target_user
+        ON advertisements (target_user_id) WHERE target_user_id IS NOT NULL;
+    `);
+
     await createOptimizedIndexes();
 
     // Créer les vues optimisées
