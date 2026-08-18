@@ -11,6 +11,13 @@ const logger = require('../utils/logger');
 const { Advertisement, AdCampaign, User, Tweet } = require('../models');
 
 /**
+ * Décalage horaire de la plateforme. Doit valoir la même chose que
+ * `PLATFORM_UTC_OFFSET_HOURS` côté moteur : les heures proposées ici sont
+ * celles que le moteur compare à l'heure courante.
+ */
+const PLATFORM_UTC_OFFSET_HOURS = parseInt(process.env.PLATFORM_UTC_OFFSET_HOURS, 10) || 1;
+
+/**
  * 📊 Créer une nouvelle campagne publicitaire
  * POST /api/ads/campaigns
  */
@@ -877,13 +884,19 @@ router.get('/targeting/options', authenticateToken, async (req, res) => {
                COUNT(*)::int AS user_count
         FROM activite GROUP BY 1`, { type: QueryTypes.SELECT }),
 
-      // Heures d'activité — comptées sur les likes réels.
+      // Heures d'activité — comptées sur les likes réels, dans le fuseau de
+      // la plateforme et NON en UTC. Le serveur tourne en Etc/UTC : sans ce
+      // décalage, les effectifs annoncés désignaient des heures décalées de
+      // celles réellement ciblées par le moteur (voir `platform_hour_offset`
+      // dans `rust-recommender/src/ads/serving.rs` — les deux doivent rester
+      // d'accord).
       sequelize.query(`
-        SELECT EXTRACT(HOUR FROM l.created_at)::int::text AS value,
+        SELECT EXTRACT(HOUR FROM l.created_at + make_interval(hours => :offset))::int::text AS value,
                COUNT(DISTINCT l.user_id)::int AS user_count
         FROM tweet_likes l
         WHERE l.created_at > NOW() - INTERVAL '30 days'
-        GROUP BY 1 ORDER BY 2 DESC`, { type: QueryTypes.SELECT }),
+        GROUP BY 1 ORDER BY 2 DESC`,
+        { replacements: { offset: PLATFORM_UTC_OFFSET_HOURS }, type: QueryTypes.SELECT }),
 
       // Cibler les abonnés d'un compte : la portée est son nombre d'abonnés.
       sequelize.query(`

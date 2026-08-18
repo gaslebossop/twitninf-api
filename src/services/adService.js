@@ -349,18 +349,16 @@ class AdService {
    */
   async recordImpression(advertisementId, userId, context = {}) {
     try {
-      // Vérifier si l'impression n'a pas déjà été enregistrée pour éviter les doublons
-      const existingImpression = await AdImpression.findOne({
-        where: {
-          advertisement_id: advertisementId,
-          user_id: userId
-        }
-      });
-
-      if (existingImpression) {
-        logger.info(`📊 Impression déjà enregistrée pour la publicité ${advertisementId} et l'utilisateur ${userId}`);
-        return;
-      }
+      // ⚠ Plus de déduplication « une impression par lecteur, à vie ».
+      //
+      // Le moteur sert désormais la même publicité plusieurs fois au même
+      // lecteur (c'est le principe : une publicité vue une fois n'a pas
+      // produit son effet). Avec l'ancienne déduplication, seule la PREMIÈRE
+      // vue était facturée : le budget ne descendait donc plus, et une
+      // campagne tournait indéfiniment sans jamais s'épuiser. Chaque
+      // affichage réel est maintenant compté et débité — c'est la
+      // facturation au CPM ordinaire, et c'est ce qui rend le plafond de
+      // fréquence (voir `DEFAULT_DAILY_CAP` côté moteur) réellement utile.
 
       // Récupérer la publicité pour obtenir le coût
       const advertisement = await Advertisement.findByPk(advertisementId);
