@@ -17,6 +17,7 @@ const logger = require('../utils/logger');
 const { spaceOutReplies } = require('../utils/feedShape');
 const rustClient = require('../services/rustRecommenderClient');
 const paidContentService = require('../services/paidContentService');
+const adService = require('../services/adService');
 const { withFeedCache } = require('../services/feedCache');
 const { sequelize } = require('../database');
 const { QueryTypes } = require('sequelize');
@@ -363,6 +364,61 @@ function withThreadContext(feed) {
  *   limit   = nombre de tweets (défaut: 50, max: 200)
  *   offset  = pagination (défaut: 0)
  */
+/**
+ * Insère les publicités choisies par le moteur dans la page déjà hydratée.
+ *
+ * Les positions viennent du moteur et sont appliquées de la fin vers le
+ * début : insérer par index croissant décalerait chaque position suivante
+ * d'un cran à chaque insertion, et les publicités glisseraient vers le bas.
+ *
+ * L'impression est enregistrée côté API et pas côté moteur : c'est elle qui
+ * débite l'annonceur (`adService.recordImpression`), et une écriture d'argent
+ * n'a rien à faire sur le chemin chaud du classement. Un échec ici ne casse
+ * jamais le fil — le lecteur n'a pas à payer l'erreur d'une régie.
+ */
+async function injectAds(tweets, placements, userId) {
+  if (!Array.isArray(placements) || placements.length === 0) return;
+
+  const adTweetIds = placements.map(p => p.tweet_id);
+  let adTweets = [];
+  try {
+    adTweets = await fetchTweetsByIds(adTweetIds, userId);
+  } catch (e) {
+    logger.warn(`[NeuralRank] hydratation des publicités impossible: ${e.message}`);
+    return;
+  }
+  const byId = new Map(adTweets.map(t => [String(t.id), t]));
+
+  const ordered = [...placements].sort((a, b) => b.position - a.position);
+  const shown = [];
+  for (const p of ordered) {
+    const tweet = byId.get(String(p.tweet_id));
+    if (!tweet) {
+      logger.warn(`[NeuralRank] publicité ${p.advertisement_id} non hydratable (tweet ${p.tweet_id}) — non affichée, non facturée`);
+      continue;
+    }
+    const pos = Math.min(Math.max(0, p.position), tweets.length);
+    tweets.splice(pos, 0, {
+      ...tweet,
+      is_ad: true,
+      ad_data: {
+        id: p.advertisement_id,
+        match_score: p.match_score,
+      },
+    });
+    shown.push(p);
+  }
+
+  // Facturer UNIQUEMENT ce qui a réellement été inséré dans la page. Facturer
+  // sur la seule décision du moteur revenait à débiter l'annonceur pour une
+  // publicité que personne n'a vue, dès que l'hydratation échouait.
+  for (const p of shown) {
+    adService
+      .recordImpression(p.advertisement_id, userId, { surface: 'neural_rank' })
+      .catch(e => logger.warn(`[NeuralRank] impression pub non enregistrée: ${e.message}`));
+  }
+}
+
 router.get('/recommendations', authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const { mode = 'for_you', limit = 50, offset = 0, force_refresh, exclude_seen } = req.query;
@@ -402,6 +458,18 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
 
         // Hydrater les IDs en tweets complets
         const tweets = await fetchTweetsByIds(result.tweetIds, userId, result.experiments);
+
+        // ── Publicités ciblées ────────────────────────────────────────────
+        // Le moteur a déjà décidé QUI voit QUOI, à partir du profil lecteur
+        // qu'il construit de toute façon (vecteur de goût, heures actives,
+        // graphe social) — voir `rust-recommender/src/ads/serving.rs`. Ici on
+        // ne fait qu'hydrater et facturer.
+        //
+        // C'est ce fil-ci qui manquait : l'injection n'existait que dans
+        // `recommendationRoutes.js`, l'ancien fil, via l'ancien module de
+        // ciblage SQLite. Les publicités créées en base n'étaient donc
+        // affichées nulle part.
+        await injectAds(tweets, result.ads, userId);
 
         // Contenus payants : ce fil est construit à partir d'IDs classés par le
         // service Rust, qui ne sait rien des verrous. Le masquage se fait donc ici,

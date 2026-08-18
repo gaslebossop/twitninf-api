@@ -219,6 +219,11 @@ async function getRecommendations(userId, opts = {}) {
 
   return {
     tweetIds: result.tweet_ids,
+    // Publicités ciblées par les signaux de l'algorithme (profil lecteur,
+    // vecteur de goût, heures actives) — voir `rust-recommender/src/ads/`.
+    // Vide dans le cas courant : aucune campagne active ou aucune qui
+    // corresponde.
+    ads: Array.isArray(result.ads) ? result.ads : [],
     experiments: Array.isArray(result.experiments) ? result.experiments : [],
     count: result.count,
     latencyMs: result.latency_ms,

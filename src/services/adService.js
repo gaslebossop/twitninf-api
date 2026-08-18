@@ -6,39 +6,54 @@
 const logger = require('../utils/logger');
 const { Advertisement, AdCampaign, AdImpression, AdClick, AdEngagement, User, Tweet, UserWallet, VirtualCurrency, Transaction } = require('../models');
 
+/**
+ * Monnaie de facturation publicitaire.
+ *
+ * ⚠ C'était `TWC`, qui n'existe PLUS dans `virtual_currencies` (la table ne
+ * contient que NF, EUR, KOSP, BEBET, GCORP, CONG, LLL). La recherche de la
+ * monnaie renvoyait donc toujours `null` et toute création de publicité
+ * échouait — en 500 avec un message générique, sans jamais dire pourquoi.
+ * Personne ne pouvait créer de publicité, et rien ne l'indiquait.
+ *
+ * Les méthodes gardent leur nom historique (`debitTWC`, `getUserTWCBalance`,
+ * `initializeTWC`) : le module `targeting/` appelle `adService.debitTWC` par
+ * son nom, hors de ce dépôt. Seule la monnaie réellement débitée change.
+ */
+const AD_CURRENCY = 'NF';
+
 class AdService {
   constructor() {
     this.initialized = true;
-    this.twcCurrencyId = null; // Sera initialisé lors du premier appel
+    this.currencyId = null; // Résolu au premier appel
     logger.info('🎯 Service de publicité initialisé');
   }
 
   /**
-   * 💰 Initialiser l'ID de la cryptomonnaie TWC
+   * 💰 Résoudre l'ID de la monnaie de facturation (voir AD_CURRENCY)
    */
   async initializeTWC() {
-    if (this.twcCurrencyId) return this.twcCurrencyId;
+    if (this.currencyId) return this.currencyId;
     
     try {
-      const twcCurrency = await VirtualCurrency.findOne({
-        where: { symbol: 'TWC' }
+      const currency = await VirtualCurrency.findOne({
+        where: { symbol: AD_CURRENCY }
       });
       
-      if (!twcCurrency) {
-        throw new Error('Cryptomonnaie TWC non trouvée');
+      if (!currency) {
+        throw new Error(`Monnaie ${AD_CURRENCY} introuvable`);
       }
       
-      this.twcCurrencyId = twcCurrency.id;
-      logger.info(`💰 TWC initialisé avec l'ID: ${this.twcCurrencyId}`);
-      return this.twcCurrencyId;
+      this.currencyId = currency.id;
+      logger.info(`💰 Monnaie publicitaire ${AD_CURRENCY} résolue: ${this.currencyId}`);
+      return this.currencyId;
     } catch (error) {
-      logger.error('❌ Erreur lors de l\'initialisation de TWC:', error);
+      logger.error(`❌ Résolution de la monnaie ${AD_CURRENCY} impossible:`, error);
       throw error;
     }
   }
 
   /**
-   * 💰 Vérifier le solde TWC d'un utilisateur
+   * 💰 Solde publicitaire d'un utilisateur
    */
   async getUserTWCBalance(userId) {
     try {
@@ -53,13 +68,13 @@ class AdService {
       
       return wallet ? parseFloat(wallet.balance) : 0;
     } catch (error) {
-      logger.error('❌ Erreur lors de la vérification du solde TWC:', error);
+      logger.error(`❌ Lecture du solde ${AD_CURRENCY} impossible:`, error);
       return 0;
     }
   }
 
   /**
-   * 💰 Débiter des TWC du portefeuille utilisateur
+   * 💰 Débiter le portefeuille de l'annonceur
    */
   async debitTWC(userId, amount, description = 'Paiement publicitaire', externalTransaction = null) {
     try {
@@ -67,9 +82,9 @@ class AdService {
       const NewEconomyService = require('./newEconomyService');
 
       // Récupérer la cryptomonnaie
-      const currency = await VirtualCurrency.findOne({ where: { symbol: 'TWC' } });
+      const currency = await VirtualCurrency.findOne({ where: { symbol: AD_CURRENCY } });
       if (!currency) {
-        throw new Error('Cryptomonnaie TWC non trouvée');
+        throw new Error(`Monnaie ${AD_CURRENCY} introuvable`);
       }
       
       const currencyId = currency.id;
@@ -84,10 +99,10 @@ class AdService {
         externalTransaction
       );
 
-      logger.info(`💰 ${amount} TWC débités de l'utilisateur ${userId} pour: ${description}`);
+      logger.info(`💰 ${amount} NF débités de l'utilisateur ${userId} pour: ${description}`);
       return result.remainingBalance;
     } catch (error) {
-      logger.error('❌ Erreur lors du débit TWC:', error);
+      logger.error(`❌ Débit ${AD_CURRENCY} en échec:`, error);
       throw error;
     }
   }
@@ -125,12 +140,12 @@ class AdService {
     const { sequelize } = require('../database/index');
     const transaction = await sequelize.transaction();
     try {
-      // 1. Vérifier le solde TWC de l'utilisateur
+      // 1. Vérifier le solde de l'utilisateur
       const userBalance = await this.getUserTWCBalance(userId);
       const costTWC = adData.budget || 0;
       
       if (userBalance < costTWC) {
-        throw new Error(`Solde TWC insuffisant. Solde: ${userBalance} TWC, Budget requis: ${costTWC} TWC`);
+        throw new Error(`Solde insuffisant : ${userBalance} NF disponibles, ${costTWC} NF requis`);
       }
 
       // 2. Débiter l'utilisateur de manière atomique
@@ -146,9 +161,9 @@ class AdService {
         title: adData.title,
         description: adData.description,
         budget: adData.budget,
-        cost_per_impression: adData.cost_per_impression || 0.10, // 0.10 TWC par vue
-        cost_per_click: adData.cost_per_click || 0.10, // 0.10 TWC par clic
-        cost_per_engagement: adData.cost_per_engagement || 0.05, // 0.05 TWC par engagement
+        cost_per_impression: adData.cost_per_impression || 0.10, // 0.10 NF par vue
+        cost_per_click: adData.cost_per_click || 0.10, // 0.10 NF par clic
+        cost_per_engagement: adData.cost_per_engagement || 0.05, // 0.05 NF par engagement
         start_date: adData.start_date || new Date(),
         end_date: adData.end_date,
         max_impressions_per_day: adData.max_impressions_per_day,
@@ -159,7 +174,7 @@ class AdService {
       }, { transaction });
 
       await transaction.commit();
-      logger.info(`🎯 Publicité créée: ${advertisement.id} pour l'utilisateur ${userId} (Budget: ${adData.budget} TWC)`);
+      logger.info(`🎯 Publicité créée: ${advertisement.id} pour l'utilisateur ${userId} (Budget: ${adData.budget} NF)`);
       return advertisement;
     } catch (error) {
       await transaction.rollback();
@@ -373,7 +388,7 @@ class AdService {
           advertisement.cost_per_impression, 
           `Impression publicitaire - ${advertisement.title}`
         );
-        logger.info(`💰 ${advertisement.cost_per_impression} TWC débités pour l'impression de la publicité ${advertisementId}`);
+        logger.info(`💰 ${advertisement.cost_per_impression} NF débités pour l'impression de la publicité ${advertisementId}`);
       } catch (paymentError) {
         logger.error('❌ Erreur lors du paiement de l\'impression:', paymentError);
         // Ne pas faire échouer l'impression si le paiement échoue
@@ -429,7 +444,7 @@ class AdService {
           advertisement.cost_per_click, 
           `Clic publicitaire - ${advertisement.title}`
         );
-        logger.info(`💰 ${advertisement.cost_per_click} TWC débités pour le clic de la publicité ${advertisementId}`);
+        logger.info(`💰 ${advertisement.cost_per_click} NF débités pour le clic de la publicité ${advertisementId}`);
       } catch (paymentError) {
         logger.error('❌ Erreur lors du paiement du clic:', paymentError);
         // Ne pas faire échouer le clic si le paiement échoue
@@ -488,7 +503,7 @@ class AdService {
             advertisement.cost_per_engagement, 
             `Engagement ${engagementType} publicitaire - ${advertisement.title}`
           );
-          logger.info(`💰 ${advertisement.cost_per_engagement} TWC débités pour l'engagement ${engagementType} de la publicité ${advertisementId}`);
+          logger.info(`💰 ${advertisement.cost_per_engagement} NF débités pour l'engagement ${engagementType} de la publicité ${advertisementId}`);
         } catch (paymentError) {
           logger.error('❌ Erreur lors du paiement de l\'engagement:', paymentError);
           // Ne pas faire échouer l'engagement si le paiement échoue
