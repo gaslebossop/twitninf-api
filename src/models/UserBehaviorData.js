@@ -61,7 +61,15 @@ const userBehaviorDataSchema = {
       'tap_gesture', 'device_motion_noise', 'system_stats_sync', 'keyboard_rhythm', 'scroll_jitter',
       
       // Actions génériques
-      'screen_view', 'custom_action'
+      'screen_view', 'custom_action',
+
+      // Emises par `trackCustomAction` cote mobile, et refusees par cet enum
+      // jusqu'au 2026-08-18 : 145 ouvertures depuis la grille Explorer et 20
+      // reponses au controle d'algorithme ont ete perdues avant l'ajout.
+      // Ajouter une valeur ici ne suffit PAS : `sync` tourne en `alter:false`
+      // et ne touche jamais un type existant, il faut un
+      // `ALTER TYPE ... ADD VALUE` en base.
+      'open_tweet', 'algo_check_answer'
     ),
     allowNull: false
   },

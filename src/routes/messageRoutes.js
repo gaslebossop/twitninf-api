@@ -3,6 +3,7 @@ const { Op } = require('sequelize');
 const router = express.Router();
 const multer = require('multer');
 const sharp = require('sharp');
+const { toDecodableBuffer } = require('../services/heifDecoder');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
@@ -1739,7 +1740,11 @@ router.post(
       if (isAudio) {
         fs.writeFileSync(outputPath, req.file.buffer);
       } else {
-        await sharp(req.file.buffer)
+        // Photo iPhone = HEIC/HEVC, que le libvips embarque par `sharp` ne sait
+        // pas decoder — voir `heifDecoder`.
+        const decodable = await toDecodableBuffer(req.file.buffer);
+
+        await sharp(decodable)
           .rotate()
           .resize(1600, 1600, { fit: 'inside', withoutEnlargement: true })
           .jpeg({ quality: 85 })

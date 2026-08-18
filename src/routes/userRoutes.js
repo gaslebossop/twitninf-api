@@ -60,6 +60,7 @@ const {
 } = require('../utils/profileCustomization');
 
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
+const { toDecodableBuffer } = require('../services/heifDecoder');
 const rustClient = require('../services/rustRecommenderClient');
 const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
 
@@ -1382,8 +1383,13 @@ router.post('/me/avatar', [
     const filename = `${userId}-${Date.now()}-${uuidv4().slice(0,8)}.jpg`;
     const outputPath = path.join(avatarsDir, filename);
 
+    // Photo iPhone = HEIC/HEVC, que le libvips embarque par `sharp` ne sait pas
+    // decoder — voir `heifDecoder`. Sans ca, tout envoi depuis un iPhone echoue
+    // sur « bad seek ».
+    const decodableAvatar = await toDecodableBuffer(req.file.buffer);
+
     // Traitement image: carré 256x256, couverture, JPEG qualité 85
-    await sharp(req.file.buffer)
+    await sharp(decodableAvatar)
       .rotate()
       .resize(256, 256, { fit: 'cover', withoutEnlargement: true })
       .jpeg({ quality: 85 })
@@ -1435,7 +1441,10 @@ router.post('/me/banner', [
     const filename = `banner-${userId}-${Date.now()}-${uuidv4().slice(0, 8)}.jpg`;
     const outputPath = path.join(bannersDir, filename);
 
-    await sharp(req.file.buffer)
+    // Meme raison que pour l'avatar ci-dessus.
+    const decodableBanner = await toDecodableBuffer(req.file.buffer);
+
+    await sharp(decodableBanner)
       .rotate()
       .resize(1500, 500, { fit: 'cover', withoutEnlargement: false })
       .jpeg({ quality: 82 })
