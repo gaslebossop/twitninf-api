@@ -32,11 +32,27 @@ const execFileAsync = promisify(execFile);
  * `heif-convert` (paquet `libheif-examples`) s'appuie dessus. Ajouter un
  * décodeur JavaScript aurait dupliqué un décodeur déjà installé, en plus lent.
  *
- * ── Pourquoi une reprise sur échec et pas un aiguillage sur le type MIME ───
- * Le client déclare `image/jpeg` pour TOUT ce qu'il envoie, y compris un HEIC :
- * le type déclaré ne dit donc rien du contenu réel. On se fie aux octets, et on
- * ne convertit que ce que `sharp` a réellement refusé — un JPEG ou un PNG
- * normal ne paie aucun coût.
+ * ── Pourquoi l'aiguillage se fait sur les OCTETS, et surtout pas sur un essai
+ *    de `sharp` ──────────────────────────────────────────────────────────────
+ * Première version de ce module : « essayer `sharp(buffer).metadata()`, et ne
+ * convertir que si ça échoue ». **Ça ne marche pas**, et le piège mérite d'être
+ * écrit noir sur blanc parce qu'il est contre-intuitif :
+ *
+ *   `sharp.format.heif.input` vaut `true`, et `metadata()` RÉUSSIT sur un HEIC
+ *   — libvips sait parfaitement lire le CONTENEUR HEIF (dimensions, EXIF…).
+ *   Ce qu'il ne sait pas faire, c'est décoder les PIXELS, parce que le codec
+ *   interne est HEVC. L'échec n'arrive donc qu'au `toFile()`/`toBuffer()`.
+ *
+ * Une sonde par `metadata()` répond « sharp sait lire » et laisse passer le
+ * fichier tel quel : la panne reste entière. Sonder par un vrai décodage
+ * coûterait un décodage complet en pure perte sur chaque image.
+ *
+ * Le client, lui, déclare `image/jpeg` pour TOUT ce qu'il envoie, y compris un
+ * HEIC : le type MIME déclaré ne dit rien du contenu. Restent les octets, qui
+ * ne mentent pas — c'est le seul critère fiable des trois.
+ *
+ * Un JPEG, un PNG ou un AVIF (marque `avif`, que libvips décode) ne sont pas
+ * reconnus ici et repartent intacts, sans aucun coût.
  */
 
 /** Un HEIF non converti ne doit pas bloquer la requête indéfiniment. */
@@ -93,36 +109,29 @@ async function heifToJpeg(buffer) {
  * Rend un tampon lisible par `sharp`, en le convertissant si nécessaire.
  *
  * Toujours appeler ceci AVANT `sharp(buffer)` sur un fichier venant d'un
- * client. Rend le tampon d'origine quand `sharp` sait déjà le lire — c'est le
- * cas courant, et il ne coûte alors qu'une lecture d'en-tête.
+ * client. Tout ce qui n'est pas un HEIF repart tel quel, à l'octet près.
  *
- * Ne masque JAMAIS une vraie erreur : si le fichier n'est pas un HEIF, ou si la
- * conversion échoue elle aussi, l'erreur d'origine de `sharp` est relancée
- * telle quelle. Un fichier corrompu doit continuer à échouer.
+ * Ne juge jamais de la validité d'un fichier : en cas d'échec de conversion,
+ * rend le tampon d'origine pour que l'appelant échoue sur SA propre erreur
+ * `sharp`. Un fichier corrompu doit continuer à échouer, et le message d'erreur
+ * doit rester celui de l'outil qui traite l'image, pas celui d'un convertisseur
+ * intercalé.
  *
  * @param {Buffer} buffer Fichier reçu du client.
  * @returns {Promise<Buffer>} Un tampon que `sharp` sait décoder.
  */
 async function toDecodableBuffer(buffer) {
-  const sharp = require('sharp');
+  if (!looksLikeHeif(buffer)) return buffer;
 
   try {
-    // Lit uniquement l'en-tête : ne décode pas l'image entière.
-    await sharp(buffer).metadata();
+    const converted = await heifToJpeg(buffer);
+    logger.info(
+      `Image HEIF convertie en JPEG (${buffer.length} → ${converted.length} octets)`
+    );
+    return converted;
+  } catch (convertError) {
+    logger.error('Conversion HEIF impossible:', convertError);
     return buffer;
-  } catch (sharpError) {
-    if (!looksLikeHeif(buffer)) throw sharpError;
-
-    try {
-      const converted = await heifToJpeg(buffer);
-      logger.info(
-        `Image HEIF convertie en JPEG (${buffer.length} → ${converted.length} octets)`
-      );
-      return converted;
-    } catch (convertError) {
-      logger.error('Conversion HEIF impossible:', convertError);
-      throw sharpError;
-    }
   }
 }
 
