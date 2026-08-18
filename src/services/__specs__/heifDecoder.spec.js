@@ -60,21 +60,37 @@ describe('looksLikeHeif', () => {
 });
 
 describe('toDecodableBuffer', () => {
-  it('rend le tampon d’origine quand sharp sait déjà le lire', async () => {
+  it('rend le tampon d’origine, à l’identité près, pour un JPEG', async () => {
     // Le cas courant — un JPEG ou un PNG ne doit payer aucune conversion.
     const jpeg = await sharp({
       create: { width: 8, height: 8, channels: 3, background: { r: 10, g: 20, b: 30 } },
     }).jpeg().toBuffer();
 
-    const result = await toDecodableBuffer(jpeg);
-
-    expect(result).toBe(jpeg);
+    expect(await toDecodableBuffer(jpeg)).toBe(jpeg);
   });
 
-  it('relance l’erreur de sharp sur un fichier illisible qui n’est pas du HEIF', async () => {
-    // Un fichier corrompu doit continuer à échouer : la reprise ne sert qu'au
-    // HEIF, elle ne doit pas devenir un filet qui masque les vraies erreurs.
-    await expect(toDecodableBuffer(Buffer.from('ceci n’est pas une image')))
-      .rejects.toThrow();
+  it('laisse passer un fichier illisible sans le juger', async () => {
+    // Ce module ne valide pas les images : il rend la main avec le tampon
+    // d'origine, et c'est `sharp`, chez l'appelant, qui échouera avec SON
+    // message. Intercaler une erreur de convertisseur ici rendrait le
+    // diagnostic plus confus, pas moins.
+    const garbage = Buffer.from('ceci n’est pas une image');
+
+    expect(await toDecodableBuffer(garbage)).toBe(garbage);
+    await expect(sharp(garbage).jpeg().toBuffer()).rejects.toThrow();
+  });
+
+  it('n’essaie même pas de sonder sharp avant de décider', async () => {
+    // Garde-fou contre la régression qui a coûté un tour : une sonde
+    // `sharp(buffer).metadata()` RÉUSSIT sur un HEIC (le conteneur est lisible,
+    // seul le codec HEVC ne l'est pas), donc elle conclut « rien à faire » et
+    // laisse la panne entière. La décision doit se prendre sur les octets.
+    const heic = heifHeader('heic');
+
+    // Sur un en-tête HEIF tronqué, la conversion échoue et le tampon revient
+    // tel quel : ce qui compte ici est qu'elle ait été TENTÉE, donc que le
+    // chemin HEIF ait bien été choisi sans consulter sharp.
+    expect(looksLikeHeif(heic)).toBe(true);
+    expect(await toDecodableBuffer(heic)).toBe(heic);
   });
 });
