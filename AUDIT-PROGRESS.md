@@ -14,7 +14,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 |------|----------|-------|------|---------|
 | R1 | Rapidité | Requêtes N+1 | **TERMINÉE** | `AUDIT-R1.md` |
 | R2 | Rapidité | Index et requêtes lentes | **TERMINÉE** | `AUDIT-R2.md` |
-| R3 | Rapidité | Pagination et taille des réponses | À FAIRE | `AUDIT-R3.md` |
+| R3 | Rapidité | Pagination et taille des réponses | **EN COURS** | `AUDIT-R3.md` |
 | R4 | Rapidité | Travail bloquant (boucle d'événements) | À FAIRE | `AUDIT-R4.md` |
 | B1 | Robustesse | Verrous et concurrence | À FAIRE | `AUDIT-B1.md` |
 | B2 | Robustesse | Erreurs et journaux | À FAIRE | `AUDIT-B2.md` |
