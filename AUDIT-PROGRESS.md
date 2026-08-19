@@ -30,10 +30,11 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Section en cours :** R4 — travail bloquant (boucle d'événements).
 - **Couvert :** R1 (10 constats), R2 (12 constats), R3 (11 constats + section
   « vérifié et trouvé sain » + récapitulatif) — **R3 TERMINÉE**.
-- **Couvert pour R4 :** 1 constat écrit (R4-01, appels réseau sans délai
+- **Couvert pour R4 :** 2 constats écrits (R4-01 appels réseau sans délai
   d'attente — inventaire complet des 14 appels sortants de `src/`, 7 sans
   délai / 7 avec ; les appels de `src/scripts/test_*.js` sont des scripts de
-  test hors production et ont été écartés).
+  test hors production et ont été écartés ; R4-02 `bcryptjs` pur JS au coût 12,
+  `src/models/User.js:2/8/651/661`).
 - **Reprendre à :** `readFileSync`/`writeFileSync` sur chemins de requête —
   inventaire déjà fait, à trier : `vectorStoreService.js:207/229/243/249`,
   `similarity/vectorEngine.js:426/442`, `videoEditService.js:267`,
@@ -42,8 +43,10 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `policiercongo/InstructionManager.js:105/123`, `tweetImageService.js:66`.
   (Vérifié SAIN : `searchSummaryService.js` — `ensureCacheLoaded` ne s'exécute
   qu'une fois via un drapeau, et `persistCache` utilise `fs.promises` avec une
-  file d'écriture sérialisée.) Ensuite : traitement d'image (`sharp`, HEIC),
-  `bcrypt`, boucles sur gros tableaux dans les gestionnaires, et les
+  file d'écriture sérialisée. `bcrypt` = fait, c'est R4-02.) Ensuite :
+  traitement d'image (`sharp`/HEIC — noter que `sharp` délègue à libvips hors
+  fil principal, donc vérifier plutôt `heifDecoder.js` et les conversions
+  synchrones), boucles sur gros tableaux dans les gestionnaires, et les
   `setImmediate` de `tweetRoutes.js` (1419, 1845, 2565) et
   `messageRoutes.js:1636`.
 - **Pistes déjà repérées pour R4, à vérifier en premier :**
