@@ -30,7 +30,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Section en cours :** R4 — travail bloquant (boucle d'événements).
 - **Couvert :** R1 (10 constats), R2 (12 constats), R3 (11 constats + section
   « vérifié et trouvé sain » + récapitulatif) — **R3 TERMINÉE**.
-- **Couvert pour R4 :** 5 constats écrits (R4-01 appels réseau sans délai
+- **Couvert pour R4 :** 6 constats écrits (R4-01 appels réseau sans délai
   d'attente — inventaire complet des 14 appels sortants de `src/`, 7 sans
   délai / 7 avec ; les appels de `src/scripts/test_*.js` sont des scripts de
   test hors production et ont été écartés ; R4-02 `bcryptjs` pur JS au coût 12,
@@ -44,7 +44,10 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `COUNT` par utilisateur actif + tables entières en `_loadEnrichedMeta:455/463`
   et `_loadFollowGraph:577` ;
   R4-05 pool libuv à 4 fils partagé entre `sharp`, `fs` et `dns.lookup`,
-  `UV_THREADPOOL_SIZE` défini nulle part).
+  `UV_THREADPOOL_SIZE` défini nulle part ;
+  R4-06 `similarity/vectorEngine.js:352` `search()` = parcours linéaire
+  synchrone de tout l'index sur le chemin du fil — **mesuré** : 169 ms de gel
+  pour 100 k vecteurs, atténué par un cache d'une minute par utilisateur).
 - **Reprendre à :** (traitement d'image = fait, c'est R4-05 ; vérifié SAIN :
   `heifDecoder.js` — `fs.promises`, `execFile` avec délai de 20 s, nettoyage en
   `finally` ; aucun `execSync`/`spawnSync` dans tout `src/`.)
