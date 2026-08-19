@@ -27,7 +27,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 2
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 3
   constats, dont 1 CRITIQUE.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
@@ -109,33 +109,125 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   défaut, poser un plancher de débit même pour le trafic first-party sur les
   routes créditrices.
 
+- **S3 — CONSTAT MOYEN, déjà écrit, NE PAS REFAIRE : `src/services/videoService.js`,
+  upload vidéo — fichier temporaire jamais purgé sur échec de sondage.**
+  `multer.diskStorage` (`:25-33`) écrit le fichier reçu dans `TEMP_DIR`
+  (jusqu'à 500 Mo, `limits.fileSize`, `:49`) sous un nom composé de
+  `'temp_video_' + Date.now() + '-' + random + path.extname(file.originalname)`
+  — **l'extension vient telle quelle du nom de fichier fourni par le
+  client, sans liste blanche.** Vérifié que `path.extname` ne permet pas de
+  traversée de répertoire (testé : un `originalname` avec des `../` ne fait
+  remonter que le dernier segment, jamais un chemin), donc ce point précis
+  n'ouvre pas de traversée de fichier ; en revanche l'extension peut contenir
+  n'importe quel caractère (testé : `.mp4;rm -rf` est un extname valide en
+  JS). **Vérifié que ceci n'est PAS exploitable en injection de commande** :
+  `fluent-ffmpeg` (`ffmpeg.ffprobe`, `:88`, et `ffmpeg(inputPath)`, `:103`)
+  invoque le binaire via un `spawn` à arguments tableau, pas une chaîne de
+  commande shell ; et le nettoyage (`fs.unlink`, `:167` et `:201`) utilise
+  directement l'API `fs`, jamais un shell. **Le vrai défaut, confirmé :**
+  quand `ffmpeg.ffprobe(inputPath, ...)` échoue (`:89-92`, ex. un fichier qui
+  passe le `fileFilter` — `mimetype.startsWith('video/')`, entièrement
+  déclaratif côté client, `videoService.js:37-44` — mais n'est pas un vrai
+  flux vidéo décodable), la promesse est rejetée **sans jamais supprimer
+  `inputPath`**. Le seul `fs.unlink` du fichier d'origine est dans le
+  callback `.on('end')` de la miniature (`:167`), une branche de succès
+  jamais atteinte sur cet échec. Remonté jusqu'à la route
+  (`tweetRoutes.js:1888-1897`), le `catch` du traitement en arrière-plan
+  journalise et marque le tweet `rejected`, **sans jamais appeler
+  `fs.unlink`** non plus ; le `catch` externe de la route porte même le
+  commentaire `// Cleanup if possible? Usually handled in service.` — un
+  aveu d'incertitude de l'auteur original, et la vérification confirme que
+  non, ce n'est pas géré. **Effet :** un compte authentifié peut envoyer en
+  boucle des fichiers jusqu'à 500 Mo avec un `Content-Type: video/*` usurpé
+  mais un contenu non décodable, et chaque envoi laisse un fichier orphelin
+  définitif dans `TEMP_DIR` — remplissage de disque, sans purge, sans
+  authentification renforcée, sans limite de débit dédiée à cette route.
+  **Combiné au constat S3 précédent** (usurpation first-party), l'ampleur
+  n'est bornée par aucune limite HTTP. Correctif à transmettre :
+  `fs.unlink(inputPath, () => {})` dans le `catch` de `ffprobe` et dans le
+  `catch` du traitement en arrière-plan de la route ; liste blanche
+  d'extensions acceptées (`.mp4`, `.mov`, `.webm`, `.m4v`) avant l'écriture
+  disque plutôt qu'après ; envisager une tâche de purge périodique de
+  `TEMP_DIR` par âge, en filet de sécurité.
+  **NE PAS refaire cette recherche.**
+
+- **S3 — vérifié et SAIN (ne pas réexaminer) :**
+  1. **SQL par concaténation / colonne pilotée par le client.** Recherché
+     `sequelize.literal`/`sequelize.query` avec interpolation `${...}` dans
+     tout `src/` (78 sites recensés). Tous les sites de tri paramétrable
+     trouvés (`usernameMarketService.js:541-544`,
+     `advancedSearch.js:231-238`) résolvent le nom de colonne réel via une
+     correspondance fixe (ternaire ou objet `sortMap`), jamais par
+     concaténation directe de l'entrée client — c'est un motif sûr même
+     quand la clé de recherche est arbitraire, puisque seule la VALEUR
+     whitelistée ressort. Le seul point qui restait à risque,
+     `advancedSearch.js:238` (`direction.toUpperCase()` concaténé sans
+     passer par `sortMap`), est protégé en amont par
+     `ADVANCED_SEARCH_SCHEMA.sort.direction: { enum: ['asc','desc'] }`
+     (`advancedSearch.js:72`), et j'ai vérifié que `toolRegistry.js:189-191`
+     bloque bien l'exécution de l'outil si la validation de schéma échoue
+     (`if (errors.length) return this.result(...)`, avant tout appel au
+     handler). Aucun site exploitable trouvé. `raidBotService.js` (colonnes
+     SQL interpolées) vérifié séparément : toutes les valeurs interpolées
+     (`shownCount('followers')`, etc.) sont des littéraux fixes appelés avec
+     des clés en dur dans le code, jamais depuis `req.query`/`req.body`
+     (aucune occurrence de ces deux dans le fichier). `tweetQueueService.js`
+     (`:391`, `:455`, `:490`) : colonnes choisies via `columnMap`/`.has()`
+     sur liste fermée, avec un commentaire du code montrant une conscience
+     explicite du risque.
+  2. **Upload d'image** (avatar, bannière, image de tweet — `userRoutes.js:1359`,
+     `tweetRoutes.js:39`). Le filtre `fileFilter` ne teste que le
+     `mimetype` déclaré (donc contournable), MAIS chaque fichier est ensuite
+     passé à `sharp()` avant d'être écrit sur disque
+     (`userRoutes.js:1391-1395`, `tweetImageService.js:76`), avec un nom de
+     fichier **entièrement généré côté serveur**
+     (`${userId}-${Date.now()}-${uuid}.jpg`, jamais dérivé du nom fourni par
+     le client — donc aucune traversée de chemin possible ici, à la
+     différence de l'upload vidéo). `sharp` échoue sur tout contenu qui
+     n'est pas une image réellement décodable, ce qui constitue une
+     validation de fait du contenu, et son export force le format de sortie
+     (toujours `.jpeg(...)`), ce qui élimine tout contenu actif qu'un format
+     image détourné (SVG avec script, par exemple) pourrait porter. Sain.
+
 - **S3 — reprendre à :** le reste du périmètre n'a **pas encore été couvert** :
-  1. **SQL par concaténation**, en particulier un **nom de colonne** venant
-     d'une entrée utilisateur (tri/filtre paramétrable) — précédent connu sur
-     ce dépôt d'après la consigne d'audit. Chercher les tris/filtres
-     dynamiques dans `src/routes/` (`sort=`, `order_by=`, `?sort=`) et
-     vérifier comment le nom de colonne est validé avant d'atteindre
-     Sequelize (`literal`, `col`, `order: [[...]]` avec une valeur non
-     contrôlée par liste blanche).
-  2. Validation absente sur les routes d'écriture — parcours par échantillonnage
-     des routes `POST`/`PUT`/`PATCH` sans tableau `express-validator`.
-  3. Upload : type réel du fichier (pas seulement l'en-tête `Content-Type`
-     déclaré par le client), taille, construction du chemin de destination
-     (traversée de répertoire).
-  4. Limitation de débit sur mot de passe oublié — **déjà partiellement
+  1. Validation absente sur les routes d'écriture — un balayage automatisé
+     naïf (chercher `body(`/`param(`/`query(` dans les 10 lignes suivant
+     chaque route `POST`/`PUT`/`PATCH`) a renvoyé **156 routes sans validateur
+     visible dans `src/routes/`** — mais ce chiffre est un plafond brut, pas
+     un décompte de constats : par analogie avec le faux-positif de S2 (74 →
+     52 après prise en compte des alias), une bonne partie de ces 156 valide
+     probablement en dehors de la fenêtre de recherche (dans le contrôleur,
+     via un tableau de règles nommé importé, etc.). **Ne pas répéter le
+     balayage brut** — la liste des 156 candidats est reproductible avec le
+     script Python déjà utilisé (recherche `router\.(post|put|patch)` sans
+     `body(|param(|query(|express-validator|handleValidationErrors|validationResult`
+     dans les 10 lignes suivantes). Prochain pas : trier ces 156 par
+     fichier, écarter les faux positifs (validation dans le contrôleur ou via
+     un tableau nommé), puis évaluer les survivants un par un en priorisant
+     les routes qui touchent de l'argent ou des données sensibles
+     (`adRoutes.js`, `economyAdminRoutes.js`, `eventPassRoutes.js`,
+     `featureFlagRoutes.js` ont le plus de candidats bruts).
+  2. Limitation de débit sur mot de passe oublié — **déjà partiellement
      couvert par B2-07** (la route ne fonctionne pas du tout, donc la
      question du débit y est seconde) ; vérifier si un compte peut être
      harcelé de jetons de réinitialisation malgré tout (chaque appel écrase
      le précédent, donc l'impact est probablement faible — à confirmer).
-  5. Rejeu d'opération créditrice — au-delà du constat déjà écrit sur
+  3. Rejeu d'opération créditrice — au-delà du constat déjà écrit sur
      `/purchase`, vérifier `/exchange` et `/transfer` (`newEconomyRoutes.js:102`,
      `:107`) pour une éventuelle absence d'idempotence (un même appel
      rejoué deux fois, ex. par un retry client, double-crédite-t-il ?).
-  6. La fenêtre de 15 secondes de `transaction_risk_authorizations`
+     **Piste déjà écartée pour `/campaigns/:id/fund` et `/advertisements/:id/fund`**
+     (`adRoutes.js:650`, `:713`) : vérifié que `debitTWC` délègue à
+     `NewEconomyService.spendCoins` → `EconomyLedger.spendToTreasury`, qui
+     suit le même schéma de verrouillage de portefeuille que
+     `mintFromPurchase` (déjà vérifié sain sur ce point précis en B1) — la
+     vérification de solde dans la route elle-même est redondante mais
+     inoffensive, l'enforcement réel est dans le ledger verrouillé.
+  4. La fenêtre de 15 secondes de `transaction_risk_authorizations`
      (constat B1-02) : une autorisation validée survit à l'annulation de la
      transaction qui l'a demandée — vérifier si elle est réutilisable pour
      une opération différente de celle qui l'a obtenue.
-  7. `src/routes/messageRoutes.js:59` (`requireGroupManagementRights` évalué
+  5. `src/routes/messageRoutes.js:59` (`requireGroupManagementRights` évalué
      hors transaction — constat B1-04, déjà documenté comme défaut de
      concurrence ; vérifier ici s'il ouvre aussi une fenêtre d'abus côté
      validation/autorisation plutôt que seulement de robustesse).
