@@ -489,3 +489,87 @@ et `:278` ; le `return 0` de `load()` à `:465` et son effet sur `:269`.
 identifiants de type UUID ; la taille réelle dépend du volume en production.
 Le raisonnement tient quelle que soit la taille — elle ne fait que fixer la
 largeur de la fenêtre.
+
+---
+
+## B2-06 — Deux canaux de journalisation coexistent : 50 `console.error` de code applicatif n'atteignent jamais `error.log`
+
+**Gravité : moyenne à haute** — ce n'est pas du bruit, c'est du silence : la
+personne qui cherche les erreurs de production à l'endroit prévu pour elles ne
+les y trouve pas toutes.
+
+**Emplacement :** transverse. `src/utils/logger.js` d'un côté ; 373 appels
+`console.*` de l'autre.
+
+**Ce qui ne va pas.** Le dépôt dispose d'un logger `winston` correctement
+configuré (`src/utils/logger.js`), avec trois transports : la console, un
+fichier général `logs/app.log`, et — c'est le point important — un fichier
+dédié **`logs/error.log` filtré sur `level: 'error'`** (`:32-36`). Le format
+fichier est structuré (`timestamp` + `errors({ stack: true })` + `json()`,
+`:6-10`), et le niveau global est piloté par `config.logging.level`, valant
+`'info'` (`src/config/config.js:100`).
+
+Ce dispositif est bon. Le problème est que **tout le code n'y passe pas**. Le
+dépôt compte 3 600 appels `logger.*` et **373 appels `console.*`**. Les seconds
+n'atteignent aucun transport winston : ils écrivent directement sur
+`stdout`/`stderr`. Trois conséquences en découlent mécaniquement :
+
+1. **Ils sont absents de `logs/error.log`.** Hors scripts d'administration et
+   fichiers de test, **50 `console.error` subsistent dans le code applicatif** —
+   dont 10 dans `src/services/similarity/recommendationEngine.js`, 9 dans
+   `src/controllers/eventController.js`, 7 dans `src/routes/userStatsRoutes.js`,
+   2 dans `src/services/similarity/vectorEngine.js` (dont l'échec de chargement
+   d'index de B2-05, et l'échec de sauvegarde). Ce sont de vraies erreurs, et
+   le fichier censé les rassembler ne les contient pas. Quiconque diagnostique
+   un incident en lisant `error.log` — le réflexe correct — conclura à tort que
+   ces composants n'ont rien signalé.
+2. **Ils échappent au niveau de log.** `config.logging.level` ne les filtre
+   pas : les `console.log` de débogage sont émis en production exactement comme
+   en développement. C'est ce qui rend le flot de B2-01 (un `console.warn` par
+   tweet média) impossible à faire taire autrement qu'en modifiant le code.
+3. **Ils ne sont pas structurés.** Pas d'horodatage, pas de JSON, pas de pile
+   d'appel. Dans un flux où toutes les autres lignes sont du JSON horodaté, ces
+   373 lignes sont illisibles par un collecteur, et cassent l'analyse
+   automatique du flux.
+
+**L'effet concret.** Les deux défauts se combinent de la pire manière : les
+`console.log` bavards saturent `stdout` (canal 2), pendant que les `console.error`
+graves manquent à `error.log` (canal 1). C'est exactement la forme du symptôme
+décrit dans la consigne d'audit — « des journaux si bruyants qu'ils noient les
+vraies erreurs » — mais avec une cause supplémentaire : ici, une partie des
+vraies erreurs n'est même pas dans le fichier où on va les chercher.
+
+**Le correctif.** Par ordre de rentabilité :
+
+1. **Remplacer les 50 `console.error` applicatifs par `logger.error`.**
+   C'est mécanique, sans risque, et cela suffit à rendre `error.log` complet.
+   À faire en premier, avant tout le reste.
+2. Convertir les `console.log`/`console.warn` des services en
+   `logger.debug`/`logger.warn`, ce qui les place enfin sous le contrôle de
+   `config.logging.level` (et éteint le flot de B2-01 en production sans
+   toucher à sa logique).
+3. Poser un garde-fou pour empêcher la récidive : une règle ESLint
+   `no-console`, avec exception explicite pour `src/scripts/` — les scripts
+   d'administration sont lancés à la main et leur sortie est lue en direct, la
+   console y est le bon canal.
+
+**Point d'attention sur la rétention.** Les deux transports fichier sont
+plafonnés à `maxsize: 5242880` (5 Mo) et `maxFiles: 5`
+(`logger.js:26-27` et `:34-35`), soit **25 Mo de rétention par fichier**. Sur
+un service qui journalise abondamment, une rafale d'erreurs répétitives peut
+faire tourner `error.log` assez vite pour évincer les erreurs antérieures —
+donc pour effacer le début d'un incident pendant qu'on l'analyse. Je ne peux
+pas dire depuis le code seul si ce plafond est atteint en production : cela
+dépend du volume réel. À vérifier côté exploitation ; si les fichiers tournent
+en moins de quelques jours, augmenter `maxFiles` est un correctif à un
+caractère.
+
+**Vérifié.** Les trois transports et le filtre `level: 'error'` lus dans
+`logger.js:14-37` ; le format structuré à `:6-10` ; `level: 'info'` lu dans
+`config/config.js:100` ; les décomptes 373 `console.*` / 3 600 `logger.*`
+obtenus par recherche sur `src/` ; les 50 `console.error` applicatifs obtenus
+par la même recherche en excluant `src/scripts/` et les fichiers de test, et
+ventilés par fichier.
+**Non vérifié :** le volume de journalisation réel en production, seul élément
+qui permettrait de dire si le plafond de rétention de 25 Mo est effectivement
+atteint.
