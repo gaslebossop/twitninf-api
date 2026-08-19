@@ -23,11 +23,11 @@ un client peut-il influencer un montant ou rejouer une opération créditrice.
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
 | **Critique** | **1** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie |
-| **Moyenne** | **1** | Un mécanisme de confiance destiné au trafic applicatif légitime repose sur des informations entièrement fournies par le client, sans attache cryptographique — il conditionne l'exemption de plusieurs limites de débit, y compris sur l'opération créditrice ci-dessus |
+| **Moyenne** | **2** | Un mécanisme de confiance destiné au trafic applicatif légitime repose sur des informations entièrement fournies par le client, sans attache cryptographique — il conditionne l'exemption de plusieurs limites de débit, y compris sur l'opération créditrice ci-dessus ; un chemin d'échec d'upload laisse un fichier volumineux sur disque indéfiniment, sans purge |
 
-**À ce stade : 2 constats, dont 1 critique.** Les deux se combinent : le
-second lève la limite de débit qui aurait pu, à défaut d'autre chose, borner
-l'ampleur du premier.
+**À ce stade : 3 constats, dont 1 critique.** Les deux premiers se combinent :
+le second lève la limite de débit qui aurait pu, à défaut d'autre chose,
+borner l'ampleur du premier.
 
 ## Constat critique — détail (décompte uniquement ici, méthode complète transmise au propriétaire)
 
@@ -48,9 +48,40 @@ l'exemption de plusieurs limiteurs de débit du dépôt, y compris — c'est ce
 qui en fait un constat à part entière plutôt qu'une note en marge du premier —
 celui qui aurait pu limiter l'ampleur du constat critique ci-dessus.
 
+## Constat moyen (2/2) — détail (décompte uniquement ici)
+
+Une route d'upload traite le fichier reçu par un outil externe avant de le
+ranger à son emplacement final. Quand cet outil échoue à interpréter le
+contenu envoyé — ce qui inclut le cas simple d'un fichier qui n'est pas ce
+qu'il prétend être — le chemin d'erreur emprunté ne supprime jamais le
+fichier déjà écrit sur disque. Le fichier peut atteindre plusieurs centaines
+de mégaoctets, et rien dans le dépôt ne le purge ensuite.
+
+## Vérifié et trouvé sain (S3, à ce stade)
+
+- **SQL par concaténation / nom de colonne piloté par l'utilisateur :**
+  balayage large mené sur les tris et filtres paramétrables trouvés dans
+  `src/routes/`. Partout où un tri est proposé au client, le nom de colonne
+  réellement utilisé dans la requête est choisi côté serveur par une
+  correspondance fixe (ternaire ou table de correspondance), jamais construit
+  à partir de la valeur envoyée par le client. Un cas plus complexe, à
+  l'intérieur d'un outil interne piloté par un modèle de langage, envoyait
+  une direction de tri non filtrée dans du SQL brut — mais elle est
+  contrainte par un schéma de validation strict imposé avant l'exécution de
+  l'outil, qui bloque toute valeur hors de `asc`/`desc`. Aucun cas exploitable
+  trouvé à ce stade.
+- **Upload d'image (avatar, bannière, image de tweet) :** le type déclaré par
+  le client n'est qu'un premier filtre, mais le fichier est ensuite
+  systématiquement retraité par une bibliothèque de manipulation d'image qui
+  échoue sur tout contenu qui n'est pas réellement une image, avant d'écrire
+  un fichier de sortie entièrement reconstruit sous un nom choisi par le
+  serveur. C'est une validation de fait du contenu réel, et une protection
+  efficace contre un contenu actif déguisé en image.
+
 ## Suite
 
 Le détail complet — chemins exacts, méthode, correctif — est transmis au
-propriétaire hors dépôt. La poursuite de la section (SQL par concaténation,
-validation des routes d'écriture, upload, limitation de débit sur
-authentification) est décrite dans `AUDIT-PROGRESS.md`.
+propriétaire hors dépôt. La poursuite de la section (validation des routes
+d'écriture restantes, limitation de débit sur authentification, rejeu
+d'opération créditrice sur les autres routes économiques) est décrite dans
+`AUDIT-PROGRESS.md`.
