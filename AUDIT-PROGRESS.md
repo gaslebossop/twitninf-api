@@ -31,7 +31,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9) — **R1 à R4
   TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
   récapitulatif.
-- **Couvert pour B1 :** 4 constats écrits (B1-01, `src/economy/metrics.js:100`
+- **Couvert pour B1 :** 5 constats écrits (B1-01, `src/economy/metrics.js:100`
   `EconomyMetrics.refresh` — verrou de ligne global sur la monnaie, `SUM` de
   toute la table des portefeuilles sous ce verrou, et `purchaseVolume24h`
   (`:81`) qui emprunte une **seconde** connexion hors transaction → risque
@@ -46,7 +46,10 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   simultanées suffisent à vider un pool de 10 ;
   B1-04 `messageRoutes.js:958/1219/1353/1388` — `requireMembership` (`:53`) et
   `requireGroupManagementRights` (`:59`) n'acceptent pas de transaction ; le
-  second est un **contrôle d'accès lu hors transaction**, à reprendre en S2).
+  second est un **contrôle d'accès lu hors transaction**, à reprendre en S2 ;
+  B1-05 `contestService.js:274` `drawContest` — transaction non bornée (1 UPDATE
+  par participation) qui tient un `FOR UPDATE` sur le portefeuille de la
+  trésorerie, ligne partagée par toute l'économie).
 - **Reprendre à :** inventaire des 76 `sequelize.transaction(` de `src/`.
   Déjà vérifié SAIN : `newEconomyService.js:371` `submitMiningProof` (verrou
   sur la ligne du round, pas sur `users` — bonne granularité) ;
@@ -72,8 +75,12 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `:1219`, `:1353`, `:1388`). Réserve : le balayage ne suit pas les appels
   indirects ni ceux traversant un module (B1-01 et B1-02 sont de cette forme et
   ont été trouvés à la lecture).
-  **Reste à faire pour clore B1 :** (i) transactions englobant une **boucle**
-  (chercher `for`/`while`/`map` entre `transaction()` et `commit()`) ;
+  **Reste à faire pour clore B1 :** (i) boucles dans transactions — balayage
+  FAIT, 6 sites : `contestService.js:319` = B1-05 ; **restent à examiner**
+  `economyAdminController.js:81` (boucle `burnFraudulent` + `Promise.all` de
+  `EconomyMetrics.refresh` **sur la même transaction**, cf. B1-01c amplifié),
+  `messagingManager.js:46`, `messageRoutes.js:845`,
+  `policiercongo/InstructionManager.js:55/73` ;
   (ii) `communityModerationService.js` (7 `FOR UPDATE`), `casinoService.js:208`,
   `paidContentService.js`, `gAuthService.js:317`,
 
