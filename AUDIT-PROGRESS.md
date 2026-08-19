@@ -30,7 +30,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Section en cours :** R4 — travail bloquant (boucle d'événements).
 - **Couvert :** R1 (10 constats), R2 (12 constats), R3 (11 constats + section
   « vérifié et trouvé sain » + récapitulatif) — **R3 TERMINÉE**.
-- **Couvert pour R4 :** 3 constats écrits (R4-01 appels réseau sans délai
+- **Couvert pour R4 :** 4 constats écrits (R4-01 appels réseau sans délai
   d'attente — inventaire complet des 14 appels sortants de `src/`, 7 sans
   délai / 7 avec ; les appels de `src/scripts/test_*.js` sont des scripts de
   test hors production et ont été écartés ; R4-02 `bcryptjs` pur JS au coût 12,
@@ -39,7 +39,10 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   calcul ; méthode de mesure reproductible décrite dans le constat ;
   R4-03 `similarity/vectorEngine.js:394` `writeFileSync` de ~300 Mo toutes les
   5 min dans le processus API — **mesuré** : 2,7 s de gel pour 100 k vecteurs,
-  et `_periodicSave` en enchaîne deux).
+  et `_periodicSave` en enchaîne deux ;
+  R4-04 `similarity/recommendationEngine.js:296` `syncWithDB` horaire — un
+  `COUNT` par utilisateur actif + tables entières en `_loadEnrichedMeta:455/463`
+  et `_loadFollowGraph:577`).
 - **Reprendre à :** `readFileSync`/`writeFileSync` sur chemins de requête —
   inventaire déjà fait, à trier (`similarity/vectorEngine.js:426/442` = fait,
   c'est R4-03) : `vectorStoreService.js:207/229/243/249` (même forme que R4-03
@@ -65,6 +68,14 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `readFileSync`/`writeFileSync` dans les gestionnaires, traitement d'image
   (`sharp`, HEIC), `bcrypt` synchrone, `JSON.parse` sur gros volumes, et
   appels réseau sans délai d'attente (`fetch`/`axios` sans `timeout`).
+- **PISTE POUR B2 :** `similarity/recommendationEngine.js:711` crée un
+  `new Float32Array(256)` alors que `DIMS = 768` (`vectorEngine.js:26`) ; le
+  commentaire « DIMS = 256 » est périmé. `VectorStore.upsert` (`:311`) refuse
+  donc le vecteur et émet un `console.warn` **par tweet vidéo/média sans
+  texte**, à chaque reconstruction. Double conséquence : bruit massif dans les
+  journaux (le symptôme « un millier de fausses erreurs » décrit dans la
+  consigne) **et** ces tweets ne sont jamais vectorisés — bug fonctionnel
+  silencieux. À rédiger en B2.
 - **Piste pour S2 (ne pas publier le détail) :** `src/models/Tweet.js:498`,
   valeur par défaut de la colonne `metadata`, croisée avec l'absence de liste
   blanche de sortie dans le fil (`src/routes/tweetRoutes.js:568`).
