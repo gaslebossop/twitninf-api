@@ -43,7 +43,15 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   (`vectorEngine.save()` non atomique : `.vdb` de ~155 Mo réécrit en place
   toutes les 5 min → troncature au redémarrage → reconstruction complète) et
   **B2-06** (deux canaux de journalisation : 373 `console.*` hors winston, dont
-  50 `console.error` applicatifs absents de `logs/error.log`).
+  50 `console.error` applicatifs absents de `logs/error.log`) et **B2-07**
+  (`/forgot-password` répond 200 « un lien a été envoyé » alors que l'envoi est
+  un TODO jamais fait → récupération de compte hors service, invisible en
+  supervision ; + email en clair dans les journaux sur route publique).
+  **Recensement (e) FAIT :** données personnelles dans les journaux — balayage
+  sur `email|ip_address|password|token|full_name|req.body|req.query` dans les
+  appels de journalisation ; retenus : `authService.js:461`,
+  `moderationController.js:1014-1015`, `searchRoutes.js:133` (tous trois écrits
+  dans B2-07).
   **Recensements DÉJÀ FAITS, ne pas les refaire :** (a) tous les `catch` vides
   de `src/` ; (b) tous les `catch` non vides qui ne journalisent ni ne relancent
   (balayage automatisé sur `src/`) ; (c) les chemins d'échec répondant 200

@@ -573,3 +573,98 @@ ventilés par fichier.
 **Non vérifié :** le volume de journalisation réel en production, seul élément
 qui permettrait de dire si le plafond de rétention de 25 Mo est effectivement
 atteint.
+
+---
+
+## B2-07 — « Mot de passe oublié » répond `200 OK` en annonçant un email qui n'est jamais envoyé
+
+**Gravité : haute** — un parcours utilisateur entier est hors service, et l'API
+affirme le contraire à chaque appel. Aucun journal ne signale l'anomalie, parce
+que du point de vue du code il ne s'est rien passé d'anormal.
+
+**Emplacement :** `src/services/authService.js:458-463`
+
+```js
+await user.save();
+
+// TODO: Envoyer l'email avec le lien de réinitialisation
+
+logger.info(`Demande de réinitialisation de mot de passe pour: ${user.email}`);
+
+return { success: true, message: 'Si l\'email existe, un lien de réinitialisation a été envoyé' };
+```
+
+**Ce qui ne va pas.** Le service fabrique un jeton de réinitialisation
+(`jwt.sign`, `:448`), le stocke sur l'utilisateur avec une expiration à une
+heure (`:455-456`), l'enregistre — **puis ne l'envoie nulle part**. L'envoi est
+un `TODO` jamais honoré. La fonction renvoie néanmoins `success: true` avec le
+message *« Si l'email existe, un lien de réinitialisation a été envoyé »*, et
+le contrôleur le transmet tel quel en `200`
+(`src/controllers/authController.js:194-195`) sur la route publique
+`POST /forgot-password` (`src/routes/authRoutes.js:291`).
+
+J'ai vérifié qu'aucun autre chemin ne rattrape l'envoi : une recherche sur
+`sendMail|nodemailer` dans tout `src/` (hors scripts) ne renvoie **aucune
+occurrence**. La dépendance `nodemailer` est pourtant bien déclarée
+(`package.json:65`) et une configuration SMTP existe
+(`src/config/config.js:105-107`, `smtp.gmail.com`) : tout a été préparé, seul
+le branchement manque. La formulation prudente du message — celle qu'on emploie
+justement pour ne pas révéler si un compte existe — masque parfaitement le
+fait qu'aucun envoi n'a lieu, y compris quand l'email existe.
+
+**L'effet concret.**
+
+- **Aucun utilisateur ne peut récupérer son compte.** Celui qui perd son mot de
+  passe reçoit une confirmation rassurante, attend un email qui n'arrivera
+  jamais, recommence, et finit par conclure que son adresse n'est pas la bonne.
+  Le compte est irrécupérable en libre-service.
+- **Le défaut est invisible en supervision.** Pas d'exception, pas de `4xx`,
+  pas de `5xx`, pas de `logger.error` : la seule trace est un `logger.info`
+  qui indique que la demande a été *reçue*. Tous les indicateurs sont au vert.
+  C'est le cas d'école du « chemin d'échec répondant 200 » : ce n'est pas une
+  erreur avalée par un `catch`, c'est une erreur qui n'a jamais été levée.
+- **Des jetons de réinitialisation valides s'accumulent en base**, un par
+  demande, valables une heure, sans que personne ne puisse s'en servir
+  légitimement. Chaque demande écrase le précédent, donc il n'y a pas
+  d'accumulation illimitée — mais la colonne contient en permanence des jetons
+  actifs qui n'ont aucune raison d'exister.
+
+**Le correctif.** Deux choses, dans cet ordre :
+
+1. **Décider et rendre l'état honnête tout de suite.** Tant que l'envoi n'est
+   pas branché, la route ne doit pas prétendre le contraire : renvoyer un `501`
+   (ou un `503`) avec un message explicite, et journaliser en `warn`. C'est une
+   modification de quelques lignes qui transforme une panne invisible en panne
+   visible — et qui permet à l'interface d'orienter l'utilisateur vers le
+   support au lieu de le faire attendre.
+2. **Brancher l'envoi.** `nodemailer` est déjà installé et la configuration
+   SMTP est déjà là. L'envoi doit être placé **avant** le `return success`, et
+   son échec doit être journalisé en `error` — sans révéler à l'appelant si
+   l'adresse existe, le message prudent restant le bon choix côté réponse.
+
+**Point annexe, même ligne — donnée personnelle dans les journaux.** Le
+`logger.info` de `:461` écrit **l'adresse email en clair** dans `logs/app.log`.
+La route est publique et non authentifiée : n'importe qui peut donc faire
+inscrire l'adresse email de son choix dans les journaux du service, en
+quantité. Journaliser `user.id` plutôt que `user.email` donne exactement la
+même capacité de diagnostic sans stocker de donnée personnelle. Deux autres
+cas de même nature, moins exposés car sur des routes d'administration
+authentifiées :
+`src/controllers/moderationController.js:1014-1015`, qui journalise sur la
+route de bannissement les champs déjà extraits **puis le corps de requête
+complet** (`logger.info('Body complet:', req.body)`) — la seconde ligne est un
+reste de mise au point qui double la première et embarque le
+`moderator_note` ; et `src/routes/searchRoutes.js:133`
+(`logger.info('🔍 Recherche globale - Query params:', req.query)`), qui
+journalise à chaque recherche les termes saisis par l'utilisateur.
+
+**Vérifié.** Le `TODO` et le `return success: true` lus à
+`authService.js:458-463` ; le `res.status(200).json(result)` lu à
+`authController.js:195` ; la route publique confirmée à `authRoutes.js:291` ;
+l'absence totale de `sendMail`/`nodemailer` dans `src/` confirmée par
+recherche ; la dépendance présente confirmée à `package.json:65` ; la
+configuration SMTP lue à `config/config.js:105-107`.
+**Non vérifié :** si un envoi d'email est assuré hors du dépôt (par un service
+tiers branché sur la base, par exemple). Rien dans le code ne le suggère, mais
+je ne peux pas l'exclure depuis le dépôt seul — c'est la seule hypothèse qui
+invaliderait ce constat, et elle mérite d'être confirmée ou écartée en premier.
