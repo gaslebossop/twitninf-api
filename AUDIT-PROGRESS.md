@@ -28,9 +28,10 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
 - **Section en cours :** R3 — pagination et taille des réponses.
-- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 4 constats écrits
+- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 5 constats écrits
   (R3-01 `recommendationRoutes.js:264`, R3-02 `messageRoutes.js:489`,
-  R3-03 `messageRoutes.js:517`, R3-04 `messageRoutes.js:1844`).
+  R3-03 `messageRoutes.js:517`, R3-04 `messageRoutes.js:1844`,
+  R3-05 clause `IN` géante, 16 sites dont `models/Tweet.js:170`).
 - **Déjà passé en revue pour R3 :** inventaire des 57 `findAll` sans `limit`
   dans `src/routes/` et `src/controllers/` (liste établie par balayage
   automatique — **attention, ce balayage rate les appels dont un `include`
@@ -41,7 +42,11 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `recommendationRoutes.js:528`) — ce ne sont donc pas des constats.
 - **Reprendre à :** suite de l'inventaire des `findAll` sans `limit`, dans
   l'ordre : `messageRoutes.js` (458, 489, 834, 1231, 1243, 1480, 1636, 1844),
-  `userRoutes.js` (406, 423, 631, 840-862), `storyRoutes.js` (141-773),
+  `userRoutes.js` : 406/423 bornés à 30 par validation (sains), 840-862
+  `hydrateTweetStats` = agrégats groupés bornés (sain) ; **reste 631
+  `/follow-requests` non paginé, à écrire**. `storyRoutes.js` : 211 couvert par
+  R3-05, **reste 773 `purgeExpiredStories` (`NOT IN` sur toute la table des
+  épinglages) à écrire**.
   `tweetRoutes.js` (335, 415, 590, 1603, 1609, 3302), puis
   `recommendationRoutes.js` (autres lignes), `moderationController.js`
   (2294-2326), `contestRoutes.js`, `adRoutes.js`, `supportRoutes.js`.
