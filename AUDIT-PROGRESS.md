@@ -31,7 +31,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9) — **R1 à R4
   TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
   récapitulatif.
-- **Couvert pour B1 :** 3 constats écrits (B1-01, `src/economy/metrics.js:100`
+- **Couvert pour B1 :** 4 constats écrits (B1-01, `src/economy/metrics.js:100`
   `EconomyMetrics.refresh` — verrou de ligne global sur la monnaie, `SUM` de
   toute la table des portefeuilles sous ce verrou, et `purchaseVolume24h`
   (`:81`) qui emprunte une **seconde** connexion hors transaction → risque
@@ -43,7 +43,10 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   B1-03 `messageRoutes.js:597` `POST /messages/direct/:userId` — `:624` et
   `:658` appellent des contrôles d'accès qui font jusqu'à 6 requêtes **hors**
   de `tx`, dont 2 en `Promise.all` → pic de 3 connexions par requête, 4 requêtes
-  simultanées suffisent à vider un pool de 10).
+  simultanées suffisent à vider un pool de 10 ;
+  B1-04 `messageRoutes.js:958/1219/1353/1388` — `requireMembership` (`:53`) et
+  `requireGroupManagementRights` (`:59`) n'acceptent pas de transaction ; le
+  second est un **contrôle d'accès lu hors transaction**, à reprendre en S2).
 - **Reprendre à :** inventaire des 76 `sequelize.transaction(` de `src/`.
   Déjà vérifié SAIN : `newEconomyService.js:371` `submitMiningProof` (verrou
   sur la ligne du round, pas sur `users` — bonne granularité) ;
@@ -62,11 +65,17 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   d'une transaction — balayage automatisé des deux formes (`transaction(async`
   et `const tx = await sequelize.transaction()`), aucun résultat. Les émissions
   Socket.io de `messageRoutes.js` sont bien **après** `commit`.
-  **Reste à examiner :** les 9 autres transactions manuelles de
-  `messageRoutes.js` (`:821`, `:948`, `:1046`, `:1098`, `:1209`, `:1303`…),
-  `userRoutes.js:123`, `storyRoutes.js:618`, `tweetRoutes.js:1341`,
-  `adRoutes.js:1044` — motif à repérer : appel de fonction touchant la base
-  **sans** recevoir `tx`. Puis : boucles englobées par une transaction.
+  **Balayage exhaustif FAIT** (les deux formes de transaction, tout `src/`) :
+  0 appel de modèle sans `transaction:` dans un bloc transactionnel ;
+  6 appels de fonctions touchant la base sans recevoir `tx`, **tous dans
+  `messageRoutes.js`** — couverts par B1-03 (`:624`, `:658`) et B1-04 (`:958`,
+  `:1219`, `:1353`, `:1388`). Réserve : le balayage ne suit pas les appels
+  indirects ni ceux traversant un module (B1-01 et B1-02 sont de cette forme et
+  ont été trouvés à la lecture).
+  **Reste à faire pour clore B1 :** (i) transactions englobant une **boucle**
+  (chercher `for`/`while`/`map` entre `transaction()` et `commit()`) ;
+  (ii) `communityModerationService.js` (7 `FOR UPDATE`), `casinoService.js:208`,
+  `paidContentService.js`, `gAuthService.js:317`,
 
 - **Pistes déjà repérées pour B1, à vérifier en premier :**
   - `src/routes/messageRoutes.js:489` (`findExactDirectConversation`) : lecture
