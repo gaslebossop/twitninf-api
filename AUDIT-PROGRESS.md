@@ -37,8 +37,18 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `temp/` non ignoré → 13 fichiers suivis dans un dépôt public — **CRITIQUE,
   propriétaire notifié**) et **B2-03** (`catch` vides : verdict de détection de
   bot jamais persisté ni journalisé en cas d'échec + recensement de tous les
-  `catch` vides de `src/`, avec la liste de ceux jugés sains).
-  **Le recensement des `catch` vides est FAIT, ne pas le refaire.**
+  `catch` vides de `src/`, avec la liste de ceux jugés sains) et **B2-04**
+  (26 fonctions de scoring de `smartRecommendationEngine.js` renvoient une note
+  neutre sans trace → dégradation invisible et indatable).
+  **Recensements DÉJÀ FAITS, ne pas les refaire :** (a) tous les `catch` vides
+  de `src/` ; (b) tous les `catch` non vides qui ne journalisent ni ne relancent
+  (balayage automatisé sur `src/`) ; (c) les chemins d'échec répondant 200
+  (4 occurrences, **toutes jugées saines** : `contestRoutes`,
+  `recommendationRoutes`, `twEventController` ×2 — délibérées, commentées, et
+  journalisées avant repli) ; (d) les aides `fail()` / `handleError()` de
+  `paidContentRoutes`, `eventPassRoutes`, `usernameMarketRoutes`,
+  `scheduledTweetRoutes`, `userCurrencyRoutes` — **saines**, elles journalisent
+  le cas 500 et laissent passer les erreurs métier sans bruit.
   Continuer avec la piste 3 ci-dessous.
 
 - **Pistes déjà repérées pour B2, à écrire en priorité :**

@@ -295,7 +295,7 @@ enjeu inférieur au précédent :
   Un fichier d'index corrompu est ignoré en silence ; l'index se vide
   progressivement sans que rien ne l'annonce.
 
-**Jugés sains (analysés, non retenus).** `src/middleware/fraudMiddleware.js:276`,
+**Jugés sains — pour B2-03 (analysés, non retenus).** `src/middleware/fraudMiddleware.js:276`,
 `:283` et `:356` : les deux premiers protègent un `JSON.stringify` dont
 l'échec est sans conséquence (le champ reste vide), le troisième décode un JWT
 non vérifié pour identifier l'appelant et retombe délibérément sur
@@ -308,3 +308,100 @@ modèle, où l'échec d'une tentative est la condition normale de passage à la
 suivante. Les `catch { // ignore }` de `src/scripts/` ne sont pas retenus non
 plus : ce sont des scripts d'administration lancés à la main, dont la sortie
 est lue en direct par l'opérateur.
+
+---
+
+## B2-04 — 26 fonctions de scoring des recommandations renvoient une note neutre en cas d'erreur, sans rien journaliser : un moteur cassé est indistinguable d'un moteur qui marche
+
+**Gravité : moyenne à haute** — pas de panne visible, jamais ; à la place, une
+dégradation permanente de la qualité des recommandations que rien ne permet de
+détecter ni de dater.
+
+**Emplacement :** `src/services/smartRecommendationEngine.js`, 26 occurrences
+entre les lignes 1730 et 2145. Forme type (`:1957`) :
+
+```js
+calculateLanguageMatch(tweet, userProfile) {
+  try {
+    const tweetLanguage = tweet.language || 'unknown';
+    const userLanguage = userProfile.user?.language || 'fr';
+    return tweetLanguage === userLanguage ? 100 : 0;
+  } catch (error) {
+    return 50;          // ← aucun logger, aucun compteur, aucune trace
+  }
+}
+```
+
+**Ce qui ne va pas.** Le fichier compte 75 blocs `catch (error)`, dont **26
+renvoient une valeur par défaut sans aucune journalisation** : 11 `return 0`,
+6 `return 50`, 5 `return false`, plus un `return 70`, un `return 1000`, un
+`return []` et un `return null`. La variable `error` est liée puis jamais
+utilisée — le motif est uniforme, ce n'est pas un oubli isolé mais une
+convention appliquée à tout le module.
+
+Le choix de ne pas propager l'erreur est raisonnable en soi : un composant de
+scoring défaillant ne doit pas faire échouer le fil entier. Le défaut est
+ailleurs, et il est double :
+
+1. **La valeur de repli est indistinguable d'un résultat légitime.** `50` est
+   au milieu de l'échelle 0–100 que ces fonctions produisent : un composant
+   totalement cassé rend exactement ce que rend un composant en bon état face
+   à un contenu moyen. `return 0` est pire encore côté effet, puisqu'il pénalise
+   le tweet — mais il est tout aussi silencieux. Aucun consommateur en aval ne
+   peut faire la différence, parce qu'il n'y a rien à lire pour la faire.
+2. **L'erreur ne laisse aucune trace, nulle part.** Pas de `logger`, pas de
+   compteur, pas même un `stats.errors++` — alors que ce compteur existe
+   ailleurs dans le dépôt : `src/services/featureFlagService.js` incrémente
+   `stats.errors` dans huit de ses `catch` silencieux (`:176`, `:197`, `:220`,
+   `:294`, `:337`, `:372`, `:388`). Ce module-là dégrade lui aussi en silence,
+   mais il **compte**, donc la dégradation est observable. Le moteur de
+   recommandation ne compte pas.
+
+**L'effet concret.** Ces notes ne sont pas consommées isolément : elles
+alimentent une somme pondérée, dont les poids sont déclarés en tête de fichier
+(`:44-70` — `weight: 0.35` pour la proximité sociale, `0.25` pour
+l'engagement, etc.). Une seule fonction qui bascule durablement sur son repli
+décale donc le score final de tous les tweets, dans le même sens, sans que le
+service ne signale quoi que ce soit. Concrètement :
+
+- Un changement de forme sur `userProfile` (un champ renommé, une association
+  non chargée, un `null` là où un objet était attendu) fait basculer une ou
+  plusieurs de ces fonctions sur leur repli **pour tous les utilisateurs à la
+  fois**. Le fil devient moins pertinent ; les journaux restent parfaitement
+  vides ; le service est « vert » sur tous les tableaux de bord.
+- Le diagnostic, quand la baisse de pertinence finit par être remarquée par les
+  usages, ne dispose d'**aucune date de début** ni d'aucun composant désigné.
+  C'est ce qui rend ce constat coûteux : il ne provoque pas d'incident, il
+  rend les incidents inexplicables.
+
+**Le correctif.** Ne pas changer la stratégie de repli — elle est bonne — mais
+la rendre observable. Le plus économique, sans toucher aux 26 sites :
+
+```js
+// une fois, en tête de classe
+_scoringFallback(fnName, error, fallbackValue) {
+  this.stats.scoringErrors = (this.stats.scoringErrors || 0) + 1;
+  // volontairement throttlé : ces erreurs arrivent en rafale ou pas du tout
+  if (this.stats.scoringErrors % 100 === 1) {
+    logger.warn(`⚠️ [SmartReco] ${fnName} repli sur ${fallbackValue}:`, error.message);
+  }
+  return fallbackValue;
+}
+// puis, sur chaque site :
+} catch (error) { return this._scoringFallback('calculateLanguageMatch', error, 50); }
+```
+
+L'échantillonnage (une ligne sur cent) est le point important : journaliser
+sans limite ici recréerait exactement le problème de B2-01, puisque ces
+fonctions sont appelées une fois par tweet et par candidat. Le compteur, lui,
+doit être exposé sans échantillonnage — c'est lui qui rend la dégradation
+visible, et il coûte une incrémentation.
+
+**Vérifié.** Les 75 `catch (error)` comptés dans le fichier ; les 26 retours
+silencieux dénombrés et ventilés par valeur ; les formes exactes lues à
+`:1885`, `:1957`, `:1971`, `:2001` ; les poids lus à `:44-70` ; le compteur
+`stats.errors` de `featureFlagService.js` vérifié aux huit lignes citées.
+**Non vérifié :** si l'un de ces replis est effectivement déclenché en
+production aujourd'hui — c'est précisément ce que l'absence de trace rend
+impossible à déterminer depuis le code seul, et c'est l'argument central du
+constat.
