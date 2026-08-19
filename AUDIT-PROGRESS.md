@@ -30,7 +30,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Section en cours :** R4 — travail bloquant (boucle d'événements).
 - **Couvert :** R1 (10 constats), R2 (12 constats), R3 (11 constats + section
   « vérifié et trouvé sain » + récapitulatif) — **R3 TERMINÉE**.
-- **Couvert pour R4 :** 6 constats écrits (R4-01 appels réseau sans délai
+- **Couvert pour R4 :** 7 constats écrits (R4-01 appels réseau sans délai
   d'attente — inventaire complet des 14 appels sortants de `src/`, 7 sans
   délai / 7 avec ; les appels de `src/scripts/test_*.js` sont des scripts de
   test hors production et ont été écartés ; R4-02 `bcryptjs` pur JS au coût 12,
@@ -47,14 +47,16 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `UV_THREADPOOL_SIZE` défini nulle part ;
   R4-06 `similarity/vectorEngine.js:352` `search()` = parcours linéaire
   synchrone de tout l'index sur le chemin du fil — **mesuré** : 169 ms de gel
-  pour 100 k vecteurs, atténué par un cache d'une minute par utilisateur).
+  pour 100 k vecteurs, atténué par un cache d'une minute par utilisateur ;
+  R4-07 `vectorStoreService.js:198` `_persistInteractions` — lecture, dedup
+  O(n²) et écriture synchrones sur le chemin du fil IA, **mesuré** 85 ms de gel
+  au plafond de 5 000 interactions).
 - **Reprendre à :** (traitement d'image = fait, c'est R4-05 ; vérifié SAIN :
   `heifDecoder.js` — `fs.promises`, `execFile` avec délai de 20 s, nettoyage en
   `finally` ; aucun `execSync`/`spawnSync` dans tout `src/`.)
   `readFileSync`/`writeFileSync` sur chemins de requête —
-  inventaire déjà fait, à trier (`similarity/vectorEngine.js:426/442` = fait,
-  c'est R4-03) : `vectorStoreService.js:207/229/243/249` (même forme que R4-03
-  mais en JSON, à chiffrer),
+  inventaire déjà fait, à trier (`similarity/vectorEngine.js:426/442` = R4-03 ;
+  `vectorStoreService.js:207/229/243/249` = R4-07) :
   `videoEditService.js:267`,
   `verificationService.js:385`, `nfMapWebView.js:680`,
   `policiercongo/schedulerManager.js:81/98`,
