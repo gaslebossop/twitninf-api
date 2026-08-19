@@ -667,6 +667,16 @@ async function runMigrations() {
         ON advertisements (target_user_id) WHERE target_user_id IS NOT NULL;
     `);
 
+    // Suivi vues/clics du mur Explorer, séparé de `view_count` (qui reste la
+    // source de vérité pour les stats créateur et le classement algo). Lu
+    // uniquement par `tweetMonetizationService.js` pour reformuler la part
+    // Explorer en clics plutôt qu'en vues.
+    await sequelize.query(`
+      ALTER TABLE tweets
+        ADD COLUMN IF NOT EXISTS explore_view_count INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS explore_click_count INTEGER NOT NULL DEFAULT 0;
+    `);
+
     await createOptimizedIndexes();
 
     // Créer les vues optimisées

@@ -69,7 +69,11 @@ const userBehaviorDataSchema = {
       // Ajouter une valeur ici ne suffit PAS : `sync` tourne en `alter:false`
       // et ne touche jamais un type existant, il faut un
       // `ALTER TYPE ... ADD VALUE` en base.
-      'open_tweet', 'algo_check_answer'
+      'open_tweet', 'algo_check_answer',
+
+      // Clic sur une carte du mur Explorer — voir
+      // `ensureBehaviorDataTweetClickAction` dans models/index.js.
+      'tweet_click'
     ),
     allowNull: false
   },

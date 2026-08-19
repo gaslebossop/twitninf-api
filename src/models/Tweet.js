@@ -448,6 +448,20 @@ const tweetSchema = {
     defaultValue: 0
   },
 
+  // Vues venues du mur Explorer, dénormalisées à part de `view_count` — lues
+  // uniquement par `tweetMonetizationService` pour reformuler cette part en
+  // clics plutôt qu'en vues (voir exploreViewsHelpers.js).
+  explore_view_count: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+
+  // Clics d'ouverture depuis le mur Explorer — voir explore_view_count.
+  explore_click_count: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+
   // Indique si le tweet a déjà été monétisé
   monetized: {
     type: DataTypes.BOOLEAN,

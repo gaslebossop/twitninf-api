@@ -9,6 +9,7 @@ const { UserWallet, VirtualCurrency, Tweet, User } = require('../models');
 const NewEconomyService = require('./newEconomyService');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
 const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
+const { computeEffectiveViews } = require('../utils/exploreViewsHelpers');
 const logger = require('../utils/logger');
 
 class TweetMonetizationService {
@@ -133,7 +134,15 @@ class TweetMonetizationService {
       // (colonne réelle, pas `viewCount`) : même compte monétisable, chaque
       // récompense tombait à zéro. Repris à l'identique de `previewEarnings`
       // et `processEligibleTweets`, qui comptent en direct depuis la DB.
-      const views = tweet.view_count || 0;
+      //
+      // La part Explorer est payée au clic, pas à la vue passive — voir
+      // `computeEffectiveViews`. `view_count` lui-même n'est jamais touché ici :
+      // stats créateur et classement algo continuent de le lire brut.
+      const views = computeEffectiveViews({
+        rawViews: tweet.view_count || 0,
+        exploreViews: tweet.explore_view_count || 0,
+        exploreClicks: tweet.explore_click_count || 0,
+      });
       const [likesCount, retweetsCount, repliesCount] = await Promise.all([
         sequelize.query(`SELECT COUNT(*) as count FROM tweet_likes WHERE tweet_id = :id`, { replacements: { id: tweet.id }, type: sequelize.QueryTypes.SELECT }),
         sequelize.query(`SELECT COUNT(*) as count FROM tweet_retweets WHERE tweet_id = :id`, { replacements: { id: tweet.id }, type: sequelize.QueryTypes.SELECT }),
@@ -355,7 +364,11 @@ class TweetMonetizationService {
 
       for (const tweet of tweets) {
         try {
-          const views = tweet.view_count || 0;
+          const views = computeEffectiveViews({
+            rawViews: tweet.view_count || 0,
+            exploreViews: tweet.explore_view_count || 0,
+            exploreClicks: tweet.explore_click_count || 0,
+          });
 
           // Interactions réelles depuis la DB
           const [likesCount, retweetsCount, repliesCount] = await Promise.all([
@@ -422,7 +435,11 @@ class TweetMonetizationService {
       const details = [];
 
       for (const tweet of tweets) {
-        const views = tweet.view_count || 0;
+        const views = computeEffectiveViews({
+          rawViews: tweet.view_count || 0,
+          exploreViews: tweet.explore_view_count || 0,
+          exploreClicks: tweet.explore_click_count || 0,
+        });
         const [likesC, retweetsC, repliesC] = await Promise.all([
           sequelize.query(`SELECT COUNT(*) as count FROM tweet_likes WHERE tweet_id = :id`, { replacements: { id: tweet.id }, type: sequelize.QueryTypes.SELECT }),
           sequelize.query(`SELECT COUNT(*) as count FROM tweet_retweets WHERE tweet_id = :id`, { replacements: { id: tweet.id }, type: sequelize.QueryTypes.SELECT }),

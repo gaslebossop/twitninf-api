@@ -1749,6 +1749,61 @@ async function ensureAdvertisementsTargetColumns() {
   }
 }
 
+/**
+ * Suivi vues/clics du mur Explorer (voir
+ * `docs/superpowers/specs/2026-08-20-explore-view-click-tracking-design.md`).
+ * `view_count` reste inchangé ; ces deux colonnes ne sont lues que par
+ * `tweetMonetizationService.js`.
+ */
+async function ensureTweetsExploreCounters() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'tweets'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) return;
+
+    await sequelize.query(`
+      ALTER TABLE tweets
+        ADD COLUMN IF NOT EXISTS explore_view_count INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS explore_click_count INTEGER NOT NULL DEFAULT 0;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureTweetsExploreCounters:', e.message);
+    throw e;
+  }
+}
+
+/**
+ * `UserBehaviorData.action_type` gagne `tweet_click` (clic sur une carte du
+ * mur Explorer). Comme pour `open_tweet`/`algo_check_answer` : ajouter la
+ * valeur dans l'ENUM JS du modèle ne suffit pas, `sync({ alter: false })` ne
+ * touche jamais un type Postgres existant — sans ceci l'insertion échoue et
+ * `behaviorTracker` retombe sur `custom_action` en silence.
+ */
+async function ensureBehaviorDataTweetClickAction() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'user_behavior_data'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) return;
+
+    await sequelize.query(`
+      ALTER TYPE "enum_user_behavior_data_action_type" ADD VALUE IF NOT EXISTS 'tweet_click';
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureBehaviorDataTweetClickAction:', e.message);
+    throw e;
+  }
+}
+
 // Fonction pour synchroniser la base de données
 async function syncDatabase() {
   try {
@@ -1785,6 +1840,8 @@ async function syncDatabase() {
     await ensureUsersPreferredLanguageColumn();
     await ensureScheduledTweetsTimeZoneColumn();
     await ensureAdvertisementsTargetColumns();
+    await ensureTweetsExploreCounters();
+    await ensureBehaviorDataTweetClickAction();
 
     // ÉTAPE 2: Synchroniser les modèles (créer/modifier les tables)
     logger.info('Synchronisation des modèles...');

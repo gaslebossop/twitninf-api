@@ -3383,10 +3383,11 @@ router.get('/:id/retweets', [
   router.post('/views/increment', [
     body('tweetIds').isArray({ min: 1, max: 50 }).withMessage('tweetIds doit être un tableau de 1 à 50 éléments'),
     body('tweetIds.*').isUUID().withMessage('Chaque tweetId doit être un UUID valide'),
+    body('source').optional().isIn(['explore']).withMessage('source doit valoir "explore"'),
     handleValidationErrors
   ], authenticateToken, async (req, res) => {
     try {
-      const { tweetIds } = req.body;
+      const { tweetIds, source } = req.body;
       const userId = req.user.id;
 
       logger.info(`👁️ Incrémentation des vues pour ${tweetIds.length} tweets par l'utilisateur ${userId}`);
@@ -3411,8 +3412,17 @@ router.get('/:id/retweets', [
       // Incrémenter les vues en batch
       const validTweetIds = tweets.map(tweet => tweet.id);
 
+      // `source: 'explore'` incrémente aussi `explore_view_count`, dans le
+      // même aller-retour — lu uniquement par la monétisation pour reformuler
+      // cette part en clics. Sans `source`, comportement inchangé (le fil n'a
+      // pas besoin de le passer).
+      const viewIncrement = { view_count: sequelize.literal('view_count + 1') };
+      if (source === 'explore') {
+        viewIncrement.explore_view_count = sequelize.literal('explore_view_count + 1');
+      }
+
       await Tweet.update(
-        { view_count: sequelize.literal('view_count + 1') },
+        viewIncrement,
         {
           where: {
             id: { [Op.in]: validTweetIds }
@@ -3459,6 +3469,70 @@ router.get('/:id/retweets', [
       res.status(500).json({
         success: false,
         message: 'Erreur lors de l\'incrémentation des vues',
+        error: error.message
+      });
+    }
+  });
+
+  /**
+   * POST /api/tweets/clicks/increment
+   * Incrémenter les clics Explorer de plusieurs tweets (paie uniquement — ne
+   * touche jamais `view_count` ni la queue temps réel de l'algo).
+   */
+  router.post('/clicks/increment', [
+    body('tweetIds').isArray({ min: 1, max: 50 }).withMessage('tweetIds doit être un tableau de 1 à 50 éléments'),
+    body('tweetIds.*').isUUID().withMessage('Chaque tweetId doit être un UUID valide'),
+    handleValidationErrors
+  ], authenticateToken, async (req, res) => {
+    try {
+      const { tweetIds } = req.body;
+      const userId = req.user.id;
+
+      logger.info(`🖱️ Incrémentation des clics Explorer pour ${tweetIds.length} tweets par l'utilisateur ${userId}`);
+
+      const tweets = await Tweet.findAll({
+        where: {
+          id: { [Op.in]: tweetIds },
+          deleted_at: null,
+          is_private: false
+        },
+        attributes: ['id']
+      });
+
+      if (tweets.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Aucun tweet valide trouvé'
+        });
+      }
+
+      const validTweetIds = tweets.map(tweet => tweet.id);
+
+      await Tweet.update(
+        { explore_click_count: sequelize.literal('explore_click_count + 1') },
+        {
+          where: {
+            id: { [Op.in]: validTweetIds }
+          }
+        }
+      );
+
+      logger.info(`✅ ${validTweetIds.length} clics Explorer incrémentés avec succès`);
+
+      res.json({
+        success: true,
+        data: {
+          updated: validTweetIds.length,
+          tweetIds: validTweetIds
+        },
+        message: `${validTweetIds.length} clics mis à jour`
+      });
+
+    } catch (error) {
+      logger.error('❌ Erreur lors de l\'incrémentation des clics Explorer:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Erreur lors de l\'incrémentation des clics Explorer',
         error: error.message
       });
     }
