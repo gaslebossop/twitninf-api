@@ -31,7 +31,24 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9) — **R1 à R4
   TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
   récapitulatif.
-- **Prochain pas :** démarrer B1, aucun constat B1 encore écrit.
+- **Couvert pour B1 :** 1 constat écrit (B1-01, `src/economy/metrics.js:100`
+  `EconomyMetrics.refresh` — verrou de ligne global sur la monnaie, `SUM` de
+  toute la table des portefeuilles sous ce verrou, et `purchaseVolume24h`
+  (`:81`) qui emprunte une **seconde** connexion hors transaction → risque
+  d'interblocage sur le pool ; 20 appelants recensés).
+- **Reprendre à :** inventaire des 76 `sequelize.transaction(` de `src/`.
+  Déjà vérifié SAIN : `newEconomyService.js:371` `submitMiningProof` (verrou
+  sur la ligne du round, pas sur `users` — bonne granularité).
+  À regarder ensuite, dans l'ordre : `usernameMarketService.js:205/255/348/378`
+  (plusieurs verrous `users` dans la même transaction → **ordre de
+  verrouillage** à vérifier), `communityModerationService.js` (7 `FOR UPDATE`),
+  `casinoService.js:242`, `transactionAuthorizationService.js`,
+  `paidContentService.js`, `gAuthService.js:317`,
+  `policiercongo/policiercongov3/platformTools.js:705`,
+  `customTweetGenerationService.js:96`, `BotDetectionService.js:254`,
+  `tweetEditService.js:114`, `virtualCurrencyController.js:562`.
+  Puis chercher : appel réseau (`fetch`/`axios`) **à l'intérieur** d'une
+  transaction, et boucles englobées par une transaction.
 
 - **Pistes déjà repérées pour B1, à vérifier en premier :**
   - `src/routes/messageRoutes.js:489` (`findExactDirectConversation`) : lecture
