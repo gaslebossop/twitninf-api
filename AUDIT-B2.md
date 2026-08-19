@@ -773,3 +773,147 @@ présence de `req.ip` et de l'agent utilisateur dans le journal est une donnée
 personnelle au sens strict, mais elle est ici proportionnée : elle ne concerne
 que les requêtes en erreur et constitue le minimum utile pour rattacher un
 incident à son contexte. À conserver.
+
+---
+
+## B2-09 — La gestion d'erreur des appels réseau sans délai d'attente est correcte mais inatteignable dans le mode de panne qu'elle vise
+
+**Gravité : faible en soi, mais elle annule le bénéfice d'un code par ailleurs
+bien écrit.** Ce constat prolonge R4-01 sous l'angle des journaux ; le
+correctif est celui de R4-01.
+
+**Emplacements :** les sept appels sans délai d'attente recensés en R4-01, en
+particulier `src/models/Notification.js:121` et `src/services/ctrTracker.js:51`.
+
+**Ce qui ne va pas.** La gestion d'erreur de ces appels est, en elle-même,
+exemplaire. `Notification.js:125` :
+
+```js
+} catch (pushError) {
+  logger.warn('Envoi push automatique échoué (non bloquant):', pushError?.message || pushError);
+}
+```
+
+et `ctrTracker.js:67` :
+
+```js
+} catch (error) {
+  logger.warn(`⚠️ [ctrTracker] Impossible de contacter le recommandeur: ${error.message}`);
+  // Non-blocking: on continue même si le tracking échoue
+}
+```
+
+Niveau approprié (`warn`, pas `error` : c'est accessoire), message explicite,
+caractère non bloquant assumé et commenté. Rien à redire — **sauf que ce code
+ne s'exécute pas dans le cas qu'il est censé couvrir**.
+
+Comme établi en R4-01, ni `axios` ni le `fetch` de Node n'appliquent de délai
+par défaut. Face à un serveur distant qui accepte la connexion TCP puis ne
+répond jamais — équilibreur saturé, panne partielle, table de suivi de
+connexions pleine —, la promesse **ne se rejette pas** : elle attend. Aucune
+exception n'est levée, donc aucun `catch` n'est déclenché, donc **aucune ligne
+de journal n'est émise**. Le service en face est mort, et les journaux sont
+parfaitement silencieux à son sujet.
+
+**L'effet concret.** C'est le pire des cas pour un diagnostic : l'exploitant
+qui cherche la cause d'un ralentissement voit des requêtes lentes ou bloquées,
+consulte les journaux à la recherche d'un `warn` sur le poussoir de
+notifications ou sur le recommandeur, **n'en trouve aucun**, et en déduit
+raisonnablement que ces dépendances vont bien. La présence d'un `catch`
+soigné renforce cette conclusion erronée : on constate que le code aurait
+signalé le problème s'il y en avait eu un. Les seuls modes de panne qui
+déclenchent effectivement ces `catch` sont les échecs *rapides* — DNS
+introuvable, connexion refusée, réponse non-2xx — c'est-à-dire ceux qui sont
+déjà les plus faciles à diagnostiquer par ailleurs.
+
+**Le correctif.** Poser le délai d'attente, comme le prescrit R4-01 : c'est
+lui qui transforme une attente muette en erreur journalisée, et il rend du même
+coup opérant tout le `catch` déjà écrit. Aucune modification n'est nécessaire
+dans les blocs `catch` eux-mêmes — ils sont bons. Le seul ajout utile, une
+fois le délai posé, serait de distinguer le dépassement de délai des autres
+échecs dans le message (`error.code === 'ECONNABORTED'` pour axios,
+`AbortError` pour `fetch`), une dépendance lente et une dépendance absente
+n'appelant pas la même action.
+
+**Vérifié.** Les deux blocs `catch` lus à `Notification.js:125-127` et
+`ctrTracker.js:67-70` ; l'absence d'option `timeout` sur les appels
+correspondants (`Notification.js:121-123`, `ctrTracker.js:51-58`) confirmée par
+lecture ; le recensement des sept appels sans délai repris de R4-01, où il a
+été établi.
+
+---
+
+# Récapitulatif de la section B2
+
+| # | Constat | Gravité |
+|---|---|---|
+| B2-02 | Identité utilisateur écrite sur disque, jamais purgée, `temp/` non ignoré → 13 fichiers dans un dépôt public | **Critique** |
+| B2-01 | `Float32Array(256)` vs `DIMS = 768` → flot d'avertissements + tweets média jamais vectorisés | **Haute** |
+| B2-07 | `/forgot-password` répond `200` en annonçant un email jamais envoyé | **Haute** |
+| B2-08 | `process.exit(1)` après `logger.error` → la trace du plantage se perd ; pas d'arrêt gracieux | **Haute** |
+| B2-03 | Verdict de détection de bot jamais persisté ni journalisé en cas d'échec (+ recensement des `catch` vides) | **Haute** |
+| B2-06 | 373 `console.*` hors winston, dont 50 `console.error` absents de `logs/error.log` | Moyenne à haute |
+| B2-04 | 26 fonctions de scoring renvoient une note neutre sans aucune trace | Moyenne à haute |
+| B2-05 | Sauvegarde non atomique d'un index de ~155 Mo réécrit toutes les 5 min | Moyenne |
+| B2-09 | Gestion d'erreur réseau correcte mais inatteignable faute de délai d'attente | Faible (prolonge R4-01) |
+
+## Ordre d'application conseillé
+
+Le classement ci-dessus est par gravité ; celui-ci est par rapport
+effet/effort, et ce n'est pas le même ordre.
+
+1. **B2-02**, immédiatement et sans attendre le reste : des données
+   personnelles sont publiquement exposées en ce moment. Le propriétaire a été
+   notifié séparément.
+2. **B2-01** : une constante à importer au lieu d'un `256` recopié. Une ligne,
+   qui supprime le gros du bruit et répare un bug fonctionnel au passage.
+3. **B2-06**, étape 1 seulement : remplacer les 50 `console.error` applicatifs
+   par `logger.error`. Mécanique, sans risque, et `error.log` devient complet.
+4. **B2-08** : attendre le vidage des tampons avant de sortir. Quelques lignes,
+   et les prochains plantages deviennent explicables.
+5. **B2-07** : décider — soit brancher l'envoi, soit rendre l'échec visible.
+   Ne pas laisser la route mentir plus longtemps.
+6. **B2-05** : `.tmp` + `rename`, trois lignes.
+7. **B2-03** puis **B2-04** : rendre observables deux dégradations
+   silencieuses. Plus de travail, mais c'est ce qui évitera les prochains
+   diagnostics à l'aveugle.
+8. **B2-09** est traité par le correctif de R4-01, rien à faire de spécifique
+   ici.
+
+## Vérifié et trouvé sain
+
+Les recensements suivants ont été menés à leur terme ; ce qui n'apparaît pas
+dans les constats ci-dessus a été examiné et jugé correct.
+
+- **Chemins d'échec répondant `200` :** 4 occurrences dans tout `src/`
+  (`routes/contestRoutes.js`, `routes/recommendationRoutes.js`,
+  `controllers/twEventController.js` ×2). **Toutes saines** : chacune est
+  délibérée, accompagnée d'un commentaire qui justifie le choix, et
+  journalisée avant le repli. La dégradation gracieuse y est un choix explicite
+  et correctement mis en œuvre — c'est précisément ce qui manque à B2-07, qui
+  n'est pas dans cette liste parce que rien n'y est ni décidé ni journalisé.
+- **Aides de gestion d'erreur des routes :** `fail()` dans
+  `paidContentRoutes.js:56`, `eventPassRoutes.js:34`,
+  `usernameMarketRoutes.js:43`, `scheduledTweetRoutes.js:37`, et
+  `handleError()` dans `userCurrencyRoutes.js:37`. **Saines, et même
+  exemplaires** : elles laissent passer les erreurs métier avec leur propre
+  message et leur propre code HTTP (refus anti-fraude, solde insuffisant,
+  course perdue sur une contrainte d'unicité → `409`), et ne journalisent en
+  `error` que le cas réellement inattendu avant de renvoyer un `500` générique.
+  C'est le bon équilibre entre bruit et trace ; ce motif mériterait d'être
+  généralisé aux routes qui ne l'utilisent pas encore.
+- **Gestionnaire d'erreurs Express** (`server.js:939`) : sain, détaillé sous
+  B2-08.
+- **`catch` vides délibérés :** `fraudMiddleware.js:276`, `:283`, `:356` et
+  `policiercongoV2.js:677`, `:685` — analysés et écartés, motifs détaillés sous
+  B2-03.
+- **Compteurs d'erreurs de `featureFlagService.js`** (`:176`, `:197`, `:220`,
+  `:294`, `:337`, `:372`, `:388`) : ce module dégrade en silence, mais il
+  **compte** ses erreurs, ce qui rend la dégradation observable. C'est le bon
+  motif, et il sert de référence au correctif proposé en B2-04.
+- **Politique de dégradation de `featureFlagMiddleware.js:33`** : un drapeau
+  qui ne s'évalue pas ferme la porte plutôt que de l'ouvrir, avec un
+  commentaire qui l'explicite. Bon choix, conservé.
+- **`catch` de `src/scripts/`** : non retenus. Ce sont des scripts
+  d'administration lancés à la main, dont la sortie console est lue en direct
+  par l'opérateur ; `console.*` y est le canal approprié.
