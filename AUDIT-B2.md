@@ -187,3 +187,124 @@ lecture d'un fichier.
 littéralement du sujet B2 (« données personnelles dans les journaux »). Sa
 face « exposition publique » sera reprise en S1, et le détail opérationnel
 n'est volontairement pas publié dans ce fichier.
+
+---
+
+## B2-03 — L'écriture du verdict de détection de bot avale toutes ses erreurs : en mode surveillance, la détection ne laisse aucune trace
+
+**Gravité : haute** — c'est la seule écriture durable du verdict, et son échec
+est strictement invisible.
+
+**Emplacement :** `src/services/BotDetectionService.js:180`
+
+```js
+async _updateReputation(userId, score) {
+  try { await BotReputation.upsert({ user_id: userId, last_score: score, updated_at: new Date() }); } catch (e) {}
+}
+```
+
+**Ce qui ne va pas.** Le `catch (e) {}` est vide : pas de `logger`, pas de
+relance, pas de valeur de retour. Toute défaillance de l'`upsert` — table
+absente, contrainte violée, connexion coupée, dépassement de délai du pool,
+base en lecture seule pendant une bascule — est absorbée sans laisser la
+moindre trace. L'appelant ne peut pas non plus détecter l'échec :
+`_updateReputation` ne renvoie rien, et aucun des trois sites d'appel n'en
+teste le résultat (`:130`, `:151`, `:157`).
+
+**L'effet concret.** Il dépend du mode, et c'est en mode surveillance qu'il
+est le plus grave :
+
+- **Mode surveillance (`CONFIG.AUTO_SANCTION` désactivé)** — chemins `:130` et
+  `:151`. Aucune sanction n'est appliquée : le service se contente d'écrire le
+  score et de renvoyer le verdict à l'appelant. `_updateReputation` est donc
+  **la seule trace durable de la détection**. Si l'`upsert` échoue, la
+  détection n'a produit strictement rien : pas de ligne en base, pas de
+  journal, pas d'erreur. Un compte détecté à **score 99** par l'heuristique
+  rapide (`:130`, le cas « rafale extrême », le plus net qui soit) disparaît
+  sans laisser de trace. Or c'est précisément ce mode qu'on utilise pour
+  observer avant d'activer les sanctions : les chiffres sur lesquels reposera
+  la décision d'activation sont silencieusement incomplets, et rien n'indique
+  de combien.
+- **Mode sanction** (`:157`) — la sanction, elle, est appliquée avant
+  (`_applyProgressiveSanction`), donc l'effet immédiat survit. Mais la
+  réputation persistée diverge de la réalité : le compte est sanctionné sans
+  que son score soit enregistré.
+- **Effet différé sur la modération.** L'enregistrement est relu par
+  `src/services/policiercongo/policiercongov3/adminModerationTools.js:174`
+  (`BotReputation.findByPk`). Un modérateur consultant la réputation d'un
+  compte verra « aucune donnée » là où une détection a bien eu lieu, et
+  conclura de bonne foi que le compte est vierge.
+
+**Le même défaut, en lecture, une ligne plus haut.** À
+`BotDetectionService.js:114`, la lecture de la réputation est protégée par
+`.catch(() => null)` : une base en erreur devient indistinguable d'un compte
+sans historique. C'est le même choix — dégrader silencieusement — appliqué au
+chemin de lecture.
+
+**Le correctif.** Journaliser, et remonter l'échec à l'appelant :
+
+```js
+async _updateReputation(userId, score) {
+  try {
+    await BotReputation.upsert({ user_id: userId, last_score: score, updated_at: new Date() });
+    return true;
+  } catch (e) {
+    logger.error(`❌ [BotDetection] Persistance réputation échouée user=${userId} score=${score}:`, e.message);
+    return false;
+  }
+}
+```
+
+Le choix de ne pas faire échouer la requête appelante est défendable — la
+détection de bot ne doit pas casser le parcours utilisateur. Mais « ne pas
+faire échouer » et « ne rien dire » sont deux décisions distinctes, et seule la
+première est justifiée ici. Pour `:114`, remplacer `.catch(() => null)` par un
+`catch` qui journalise avant de renvoyer `null` conserve la tolérance à la
+panne sans en effacer la trace.
+
+**Vérifié.** Le `catch (e) {}` lu à `:180` ; les trois sites d'appel lus à
+`:130`, `:151`, `:157` et l'absence de test du retour confirmée ; le
+`.catch(() => null)` lu à `:114` ; la relecture par les outils de modération
+confirmée à `adminModerationTools.js:174`.
+**Non vérifié :** la valeur effective de `CONFIG.AUTO_SANCTION` en production
+— c'est elle qui décide lequel des deux effets ci-dessus s'applique
+aujourd'hui.
+
+### Autres `catch` vides relevés, par ordre d'importance décroissante
+
+Recensés par recherche sur l'ensemble de `src/`. Ceux-ci sont réels mais d'un
+enjeu inférieur au précédent :
+
+- `src/services/videoRecommendationService.js:224` (`onFollow`) et `:255`
+  (`onNewUser`) — `catch (e) {}` autour de la mise à jour du moteur de
+  recommandation. Une mise à jour perdue dégrade silencieusement les
+  recommandations, sans qu'aucun signal ne permette de relier la dégradation à
+  sa cause. Ce qui rend l'omission certaine plutôt que délibérée : la méthode
+  voisine `onNewVideo` (`:243`), rigoureusement de même forme, journalise bien
+  son erreur (`logger.error('❌ [VideoReco] Failed to add new video ...')`).
+  Les deux autres ont simplement été oubliées.
+- `src/services/policiercongo/tweetManager.js:190` — `JSON.parse` de
+  `media_urls` en `catch (e) {}`. Un champ corrompu en base donne un tweet
+  rendu sans ses médias, sans trace.
+- `src/services/policiercongo/` — nombreux `catch (_) {}` (`dataCollector.js:119`,
+  `:225`, `:234` ; `policiercongoV2Bridge.js:329`, `:353` ;
+  `actionExecutor.js:990` ; `platformTools.js:689` ;
+  `geminiIntelligence.js:1296`). À traiter comme un lot : ce module a manifestement
+  pour convention d'ignorer ses erreurs.
+- `src/services/vectorStoreService.js` — `catch (e) { // Skip corrupt files }`.
+  Un fichier d'index corrompu est ignoré en silence ; l'index se vide
+  progressivement sans que rien ne l'annonce.
+
+**Jugés sains (analysés, non retenus).** `src/middleware/fraudMiddleware.js:276`,
+`:283` et `:356` : les deux premiers protègent un `JSON.stringify` dont
+l'échec est sans conséquence (le champ reste vide), le troisième décode un JWT
+non vérifié pour identifier l'appelant et retombe délibérément sur
+`'anonymous'` si le jeton est malformé — c'est le comportement voulu, documenté
+par le commentaire qui le précède, et le journaliser produirait du bruit à
+chaque requête anonyme. De même,
+`src/services/policiercongo/policiercongoV2.js:677` et `:685` : ces `catch`
+vides encadrent des tentatives successives de `JSON.parse` sur une réponse de
+modèle, où l'échec d'une tentative est la condition normale de passage à la
+suivante. Les `catch { // ignore }` de `src/scripts/` ne sont pas retenus non
+plus : ce sont des scripts d'administration lancés à la main, dont la sortie
+est lue en direct par l'opérateur.

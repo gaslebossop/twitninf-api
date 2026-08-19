@@ -35,7 +35,11 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   vs DIMS=768 — bruit journaux + tweets média jamais vectorisés) et **B2-02**
   (prompt de vérification contenant l'identité écrit sur disque, jamais purgé,
   `temp/` non ignoré → 13 fichiers suivis dans un dépôt public — **CRITIQUE,
-  propriétaire notifié**). Continuer avec la piste 3 ci-dessous.
+  propriétaire notifié**) et **B2-03** (`catch` vides : verdict de détection de
+  bot jamais persisté ni journalisé en cas d'échec + recensement de tous les
+  `catch` vides de `src/`, avec la liste de ceux jugés sains).
+  **Le recensement des `catch` vides est FAIT, ne pas le refaire.**
+  Continuer avec la piste 3 ci-dessous.
 
 - **Pistes déjà repérées pour B2, à écrire en priorité :**
   1. ~~`recommendationEngine.js:711` `Float32Array(256)` vs `DIMS = 768`~~ →
