@@ -27,44 +27,54 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S2 — autorisation et IDOR.
+- **Section en cours :** S2 — autorisation et IDOR. **PARTIELLE, 3 constats.**
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9),
-  **S1 (4 constats + 1 pour information)** — **R1 à S1 TERMINÉES**.
+  S1 (4) — **R1 à S1 TERMINÉES**. S2 en cours.
 
-- **S1 est TERMINÉE.** Balayage complet des 205 commits, toutes références.
-  4 constats de secrets compromis (3 critiques), 12 valeurs d'identifiants à
-  révoquer, **dont 2 constats encore lisibles sur des branches distantes
-  publiées** — exposition EN COURS, pas seulement historique. Le propriétaire a
-  été notifié avec le détail et la liste de révocation. `AUDIT-S1.md` ne
-  contient que décompte et gravité (règle dépôt public). **Ne pas refaire ce
-  balayage.**
+- **S2 — déjà fait, NE PAS REFAIRE :**
+  1. **Recensement automatisé complet des routes sans authentification** sur
+     tout `src/routes/`, en tenant compte des trois formes de protection du
+     dépôt : middleware par route, `router.use(...)` global en tête de fichier,
+     et **alias local** (ex. `const guard = [authenticateToken, ...]` dans
+     `nfMapRoutes.js:27`). ⚠️ Un balayage naïf donne ~74 faux positifs ; après
+     prise en compte des trois formes il reste 52 routes, dont la très grande
+     majorité sont **légitimement publiques**.
+  2. **Balayage IDOR** : chargements par identifiant client suivis d'une
+     écriture, dans `src/routes/` et `src/controllers/`. **Aucun manquement
+     trouvé** — les contrôles d'appartenance sont systématiquement présents.
+  3. **Vérifiés et SAINS** (ne pas réexaminer) : `infrastructureInternalRoutes`
+     (secret partagé, comparaison à temps constant, 404 au lieu de 401) ;
+     `eventPassRoutes` `/verify` et `/redeem` (middleware `doorAccess`) ;
+     `featureProposalRoutes` routes `/agent/*` (jeton dédié + limiteur) ;
+     `contestRoutes:388` `/cancel` (`creator_id !== req.user.id`) ;
+     `supportRoutes:431` `/tickets/:id/close` (`ticket.user_id` vs acteur, avec
+     exception personnel) ; `nfMapRoutes` `/me`, `/position`, `/nearby`,
+     `/friends`, `/invite` (tous derrière `guard`) ; `monetizationRoutes` et
+     `tweetMonetizationRoutes` (`router.use(authMiddleware.authenticateToken)`).
 
-- **Prochain pas : démarrer S2** (autorisation et IDOR). Aucun constat écrit.
-  ⚠️ **Premier geste : `git add -f AUDIT-S2.md`**, puis vérifier
-  `git ls-files | grep AUDIT`.
-  ⚠️ **RAPPEL DÉPÔT PUBLIC — S2 est une section `S*` :** décompte et gravité
-  seulement dans le fichier poussé. Le détail va dans le MESSAGE FINAL.
+- **S2 — les 3 constats trouvés** sont tous dans **`src/routes/userSimilarityRoutes.js`**,
+  fichier qui n'importe `authenticateToken` que pour ne jamais s'en servir.
+  Détail transmis au propriétaire ; ne pas le publier dans `AUDIT-S2.md`.
 
-- **Pistes déjà repérées pour S2 :**
-  1. `src/models/Tweet.js:498`, valeur par défaut de la colonne `metadata`,
-     croisée avec l'absence de liste blanche de sortie dans le fil
-     (`src/routes/tweetRoutes.js:568`).
-  2. `src/routes/messageRoutes.js:59` (`requireGroupManagementRights`) :
-     contrôle d'accès évalué hors transaction — voir constat B1-04.
-  3. Méthode conseillée : parcours route par route des fichiers de
-     `src/routes/`, en vérifiant pour chacune (a) la présence d'un middleware
-     d'authentification, (b) le contrôle d'appartenance quand un identifiant
-     vient du client, (c) le contrôle de rôle sur les routes d'administration,
-     de modération et d'économie. Commencer par les routes d'administration et
-     d'économie : `economyAdminController`, `shadowbanAdminRoutes`,
-     `developerAdminRoutes`, `infrastructureAdminRoutes`, `moderationController`.
+- **S2 — reprendre à :** parcours route par route des routeurs
+  d'**administration, de modération et d'économie**, en vérifiant le contrôle
+  de rôle (et pas seulement l'authentification) :
+  `economyAdminController`, `shadowbanAdminRoutes`, `developerAdminRoutes`,
+  `infrastructureAdminRoutes`, `moderationController`, `advancedAdRoutes`,
+  `newEconomyController`. Vérifier aussi les deux pistes héritées :
+  `src/models/Tweet.js:498` (défaut de la colonne `metadata`) croisé avec
+  l'absence de liste blanche de sortie dans le fil (`src/routes/tweetRoutes.js:568`),
+  et `src/routes/messageRoutes.js:59` (`requireGroupManagementRights` évalué
+  hors transaction — constat B1-04).
 
 - **PISTE POUR S3 (ne pas publier le détail) :** `src/server.js:279`, la
-  fonction `skip` du limiteur de débit global. Et la fenêtre de 15 secondes de
+  fonction `skip` du limiteur de débit global — `isTrustedFirstPartyClient(req)`
+  désactive **entièrement** le quota. Vérifier si un client peut se faire passer
+  pour first-party. Et la fenêtre de 15 secondes de
   `transaction_risk_authorizations` (constat B1-02) : une autorisation validée
   survit à l'annulation de la transaction qui l'a demandée.
 
-- **Reste :** S2 (en cours), S3.
+- **Reste :** S2 (en cours, partielle), S3.
 
 ## Règles de la routine
 
