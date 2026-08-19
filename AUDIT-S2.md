@@ -4,11 +4,7 @@
 > la gravité**. Aucun chemin exact, aucune méthode d'exploitation n'y figure.
 > Le détail est transmis au propriétaire hors dépôt.
 
-## ⏳ Section EN COURS — décompte partiel
-
-Cette section n'est **pas terminée**. Le décompte ci-dessous porte sur la
-partie déjà couverte ; il augmentera. L'état de reprise est tenu à jour dans
-`AUDIT-PROGRESS.md`.
+## ✅ Section TERMINÉE
 
 ## Méthode
 
@@ -26,7 +22,7 @@ Deux balayages complémentaires, tous deux menés sur l'intégralité de
    le client suivis d'une écriture, puis vérification à la main de la présence
    d'un contrôle d'appartenance.
 
-## Décompte partiel
+## Décompte final
 
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
@@ -35,17 +31,32 @@ Deux balayages complémentaires, tous deux menés sur l'intégralité de
 | Moyenne | 1 | Exposition de données dérivées d'un utilisateur arbitraire, sans authentification |
 | Faible | 1 | Exposition d'informations internes de fonctionnement |
 
-**À ce stade : 6 constats, dont 1 critique et 3 de gravité élevée.** Trois d'entre eux sont
+**Au total : 6 constats, dont 1 critique et 3 de gravité élevée.** Trois d'entre eux sont
 **concentrés sur un seul et même fichier de routes** (constats « userSimilarity »),
 qui n'a manifestement jamais reçu de contrôle d'accès — ce qui rend leur
-correction simple : une seule ligne de middleware les traite d'un coup. Le
-quatrième touche un **routeur entier de dix-neuf routes** dédié à la
+correction simple : une seule ligne de middleware les traite d'un coup. Un
+autre touche un **routeur entier de dix-neuf routes** dédié à la
 publicité avancée : chaque route y vérifie qu'un jeton valide existe, mais
 aucune ne vérifie que la ressource demandée (une publicité, une campagne, un
 test A/B) appartient bien à l'appelant — c'est la définition même de l'IDOR,
 mais appliquée systématiquement plutôt qu'à un point isolé. Le routeur
 « classique » de publicité, à titre de comparaison, fait ce contrôle
 correctement sur chacune de ses routes ; celui-ci ne le fait sur aucune.
+
+Le constat critique et le constat de fuite de données touchent chacun un
+point unique et précis — respectivement une fonction d'administration et une
+construction de réponse — plutôt qu'un fichier entier ; leur correction est
+elle aussi courte, mais leur effet est le plus large de la section : le
+premier ouvre la voie à un contrôle total du système depuis un compte à
+privilèges limités, le second expose une donnée personnelle sensible sur la
+route la plus fréquentée de l'API, à chaque appel.
+
+## Piste transmise à S3
+
+En vérifiant le contrôle de rôle des routes économiques, une question a été
+soulevée qui dépasse le périmètre de cette section : la route d'achat de
+monnaie virtuelle mérite une vérification de bout en bout de la preuve de
+paiement. Elle est traitée en priorité à l'ouverture de `AUDIT-S3.md`.
 
 ## Ce qui a été vérifié et trouvé sain — à ce stade
 
@@ -90,7 +101,5 @@ couverte, **bien maîtrisée**.
 
 ## Suite
 
-Le détail des 3 constats est transmis au propriétaire hors dépôt. La
-poursuite de la section — parcours route par route des routeurs
-d'administration, de modération et d'économie — est décrite dans
-`AUDIT-PROGRESS.md`.
+Le détail complet des 6 constats — chemins exacts, méthode, correctif — est
+transmis au propriétaire hors dépôt.
