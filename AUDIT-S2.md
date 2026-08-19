@@ -31,11 +31,11 @@ Deux balayages complémentaires, tous deux menés sur l'intégralité de
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
 | **Critique** | **1** | Élévation de privilèges : une permission d'administration limitée permet d'accorder n'importe quel rôle, y compris le plus élevé du système, sans plafond |
-| **Élevée** | **2** | Absence totale de contrôle d'appartenance sur tout un routeur (IDOR généralisé) ; route d'administration accessible sans authentification, avec effet de déni de service |
+| **Élevée** | **3** | Absence totale de contrôle d'appartenance sur tout un routeur (IDOR généralisé) ; route d'administration accessible sans authentification, avec effet de déni de service ; fuite de données personnelles d'un utilisateur vers tout autre utilisateur, dans une réponse à fort trafic |
 | Moyenne | 1 | Exposition de données dérivées d'un utilisateur arbitraire, sans authentification |
 | Faible | 1 | Exposition d'informations internes de fonctionnement |
 
-**À ce stade : 5 constats, dont 1 critique et 2 de gravité élevée.** Trois d'entre eux sont
+**À ce stade : 6 constats, dont 1 critique et 3 de gravité élevée.** Trois d'entre eux sont
 **concentrés sur un seul et même fichier de routes** (constats « userSimilarity »),
 qui n'a manifestement jamais reçu de contrôle d'accès — ce qui rend leur
 correction simple : une seule ligne de middleware les traite d'un coup. Le
