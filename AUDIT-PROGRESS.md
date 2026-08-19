@@ -34,7 +34,9 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   d'attente — inventaire complet des 14 appels sortants de `src/`, 7 sans
   délai / 7 avec ; les appels de `src/scripts/test_*.js` sont des scripts de
   test hors production et ont été écartés ; R4-02 `bcryptjs` pur JS au coût 12,
-  `src/models/User.js:2/8/651/661`).
+  `src/models/User.js:2/8/651/661` — **mesuré** : 335 ms par hachage, retard
+  max de la boucle d'événements 93 ms, ~90 % de capacité perdue pendant le
+  calcul ; méthode de mesure reproductible décrite dans le constat).
 - **Reprendre à :** `readFileSync`/`writeFileSync` sur chemins de requête —
   inventaire déjà fait, à trier : `vectorStoreService.js:207/229/243/249`,
   `similarity/vectorEngine.js:426/442`, `videoEditService.js:267`,
