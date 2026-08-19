@@ -14,8 +14,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 |------|----------|-------|------|---------|
 | R1 | Rapidité | Requêtes N+1 | **TERMINÉE** | `AUDIT-R1.md` |
 | R2 | Rapidité | Index et requêtes lentes | **TERMINÉE** | `AUDIT-R2.md` |
-| R3 | Rapidité | Pagination et taille des réponses | **EN COURS** | `AUDIT-R3.md` |
-| R4 | Rapidité | Travail bloquant (boucle d'événements) | À FAIRE | `AUDIT-R4.md` |
+| R3 | Rapidité | Pagination et taille des réponses | **TERMINÉE** | `AUDIT-R3.md` |
+| R4 | Rapidité | Travail bloquant (boucle d'événements) | **EN COURS** | `AUDIT-R4.md` |
 | B1 | Robustesse | Verrous et concurrence | À FAIRE | `AUDIT-B1.md` |
 | B2 | Robustesse | Erreurs et journaux | À FAIRE | `AUDIT-B2.md` |
 | S1 | Sécurité | Secrets dans l'historique git | À FAIRE | `AUDIT-S1.md` |
@@ -27,54 +27,23 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** R3 — pagination et taille des réponses.
-- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 11 constats écrits
-  (R3-01 `recommendationRoutes.js:264`, R3-02 `messageRoutes.js:489`,
-  R3-03 `messageRoutes.js:517`, R3-04 `messageRoutes.js:1844`,
-  R3-05 clause `IN` géante 16 sites, R3-06 `adRoutes.js:781`,
-  R3-07 `tweetRoutes.js:1603`, R3-08 4 routes de liste non paginées,
-  R3-09 `SELECT *` sur `tweets` 54 sites, R3-10 `storyRoutes.js:773`,
-  R3-11 3 routes sans plafond de taille de page).
-- **Déjà passé en revue pour R3 :** inventaire des 57 `findAll` sans `limit`
-  dans `src/routes/` et `src/controllers/` (liste établie par balayage
-  automatique — **attention, ce balayage rate les appels dont un `include`
-  imbriqué contient un `limit` : `messageRoutes.js:517` n'y figurait pas alors
-  qu'il est bien non paginé ; ne pas s'y fier seul**) ; vérification que `GET /api/tweets` **est** borné
-  (`query('limit').isInt({max:100})`, `tweetRoutes.js:182`) et que
-  `/api/recommendations` **est** borné (`Math.min(..., 10)`,
-  `recommendationRoutes.js:528`) — ce ne sont donc pas des constats.
-- **Reprendre à :** suite de l'inventaire des `findAll` sans `limit`, dans
-  l'ordre : `messageRoutes.js` (458, 489, 834, 1231, 1243, 1480, 1636, 1844),
-  `userRoutes.js` : 406/423 bornés à 30 par validation (sains), 840-862
-  `hydrateTweetStats` = agrégats groupés bornés (sain) ; **reste 631
-  `/follow-requests` non paginé, à écrire**. `storyRoutes.js` : 211 couvert par
-  R3-05, **reste 773 `purgeExpiredStories` (`NOT IN` sur toute la table des
-  épinglages) à écrire**.
-  `tweetRoutes.js` **terminé** (224/415/590 bornés par les pubs, 3302 borné à
-  50 par validation — sains ; 1603/1609 = R3-07 ; reste 335 à regarder), puis
-  `recommendationRoutes.js` (autres lignes), `moderationController.js`
-  (2294-2326), `contestRoutes.js`, `adRoutes.js`, `supportRoutes.js`.
-  Vérifiés SAINS au passage : `userStatsRoutes.js`, `notificationRoutes.js`,
-  `insightsRoutes.js`, `paidContentRoutes.js`, `premiumRoutes.js` (aucun
-  `findAll` non borné) ; `moderationController.js:2294/2310/2326` (agrégats
-  `GROUP BY` bornés par la fenêtre de dates) ; `recommendationRoutes.js:676`
-  et `aiRecommendationRoutes.js:61` (bornés par la sortie du moteur) ; `walletRoutes.js:15` (borné par le nombre de
-  devises), `contestRoutes.js:358/458` (borné par les gagnants),
-  `userRoutes.js:505` et `:790` (attributs explicites, aucune fuite de
-  colonne), `User.getPublicProfile()` (liste blanche explicite).
-  **Reste à faire pour clore R3 :** (iv) écrire le récapitulatif de fin de
-  section, puis passer R3 à TERMINÉE. Le point (iii) est traité par R3-11 ;
-  vérifiés clampés donc SAINS : `paidContentService.js:544`,
-  `creatorRadarService.js:41`, `eventPassService.js:649`,
-  `moderationRoutes.js:597` (max 5000, admin), `searchRoutes.js` (7 routes),
-  `tweetRoutes.js` `/:id/likes` `/:id/retweets` `/:id/replies`,
-  `userRoutes.js:891` ; `authRoutes.js:395` est une route bouchon sans accès
-  base (sain).
-
-  **PISTE POUR S2 (ne pas publier le détail) :** `src/models/Tweet.js:498`,
+- **Section en cours :** R4 — travail bloquant (boucle d'événements).
+- **Couvert :** R1 (10 constats), R2 (12 constats), R3 (11 constats + section
+  « vérifié et trouvé sain » + récapitulatif) — **R3 TERMINÉE**.
+- **Prochain pas :** démarrer R4, aucun constat R4 encore écrit.
+- **Pistes déjà repérées pour R4, à vérifier en premier :**
+  `src/routes/tweetRoutes.js:1603` (diffusion des notifications sous
+  `setImmediate`, cf. R3-07 : N `INSERT` séquentiels dans la boucle
+  d'événements) ; les trois autres `setImmediate(async …)` de
+  `tweetRoutes.js` (l. 1419, 1845, 2565) ; `src/routes/messageRoutes.js:1636`
+  (`broadcastNewMessage` sous `setImmediate`). Chercher ensuite :
+  `readFileSync`/`writeFileSync` dans les gestionnaires, traitement d'image
+  (`sharp`, HEIC), `bcrypt` synchrone, `JSON.parse` sur gros volumes, et
+  appels réseau sans délai d'attente (`fetch`/`axios` sans `timeout`).
+- **Piste pour S2 (ne pas publier le détail) :** `src/models/Tweet.js:498`,
   valeur par défaut de la colonne `metadata`, croisée avec l'absence de liste
-  blanche de sortie dans le fil (`tweetRoutes.js:568`).
-- **Reste :** R3 (en cours), R4, B1, B2, S1, S2, S3.
+  blanche de sortie dans le fil (`src/routes/tweetRoutes.js:568`).
+- **Reste :** R4 (en cours), B1, B2, S1, S2, S3.
 
 ## Règles de la routine
 
