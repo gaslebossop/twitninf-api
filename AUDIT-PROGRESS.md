@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S2 — autorisation et IDOR. **PARTIELLE, 5 constats,
-  dont 1 CRITIQUE.**
+- **Section en cours :** S2 — autorisation et IDOR. **PARTIELLE, 6 constats,
+  dont 1 CRITIQUE et 3 ÉLEVÉS.**
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9),
   S1 (4) — **R1 à S1 TERMINÉES**. S2 en cours.
 
@@ -112,14 +112,48 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `role: 'superadmin'` ou `role: 'admin'`, distinct du simple
   `can_manage_moderators`.
 
-- **S2 — reprendre à :** `newEconomyController` (routes économiques —
-  vérifier qu'un client ne peut pas influencer un montant, et vérifier que
-  les rôles économiques comme `economiegardien` n'ont pas le même défaut de
-  plafond que `promoteModerator` ci-dessus). Puis les deux pistes héritées :
-  `src/models/Tweet.js:498` (défaut de la colonne `metadata`) croisé avec
-  l'absence de liste blanche de sortie dans le fil (`src/routes/tweetRoutes.js:568`),
-  et `src/routes/messageRoutes.js:59` (`requireGroupManagementRights` évalué
-  hors transaction — constat B1-04).
+- **S2 — CONSTAT ÉLEVÉ, `src/routes/tweetRoutes.js` — fuite de l'IP et du
+  user-agent de l'auteur dans le fil, résolue.** C'était la piste héritée
+  « `Tweet.js:498` croisé avec l'absence de liste blanche ». Confirmée en
+  détail : `Tweet.metadata` (JSONB) reçoit `{ source, device: req.headers['user-agent'],
+  ip_address: req.ip, ... }` à la création (`tweetRoutes.js:1368`, et 5 autres
+  sites identiques : `:1806`, `:2189`, `:2349`, `:2527`, `:2558`). Le fil
+  (`tweetRoutes.js:541-542` et `:1084`) fait `tweet.toJSON()` — le modèle
+  `Tweet` n'a **aucun** `toJSON`/`toPublicJSON` de restriction (recherché,
+  zéro résultat sauf un point d'entrée non lié à la ligne 7) — puis répand
+  `...tweetData` tel quel dans l'objet renvoyé par `res.json` (`:450` et
+  `:645`, confirmé que c'est bien la réponse HTTP finale, pas une étape
+  intermédiaire). **Chaque viewer authentifié du fil reçoit donc, pour
+  chaque tweet, l'adresse IP et le user-agent de son auteur**, en clair, dans
+  le JSON de la route la plus appelée de l'API. Correctif à transmettre :
+  `attributes: { exclude: ['metadata'] }` sur les requêtes `Tweet.findAll`
+  du fil, ou une sérialisation explicite par liste blanche des champs publics
+  — la seconde est plus sûre contre une régression future du même type.
+  **NE PAS refaire cette recherche.**
+
+- **S2 — reprendre à :** `newEconomyController` / `economyAdminRoutes` —
+  **déjà vérifié : `economyAdminRoutes.js` sain**, `router.use(authenticateToken,
+  requireEconomyRole)` en tête, toutes les routes derrière. Reste à vérifier :
+  `newEconomyController` (routes économiques grand public — vérifier qu'un
+  client ne peut pas influencer un montant). ⚠️ **Piste très sérieuse repérée
+  en cours de route, à approfondir en PRIORITÉ, probablement plus adaptée à
+  S3 (économie) qu'à S2 :** `src/economy/ledger.js:152` `mintFromPurchase`
+  crédite le portefeuille sur la seule foi du `paymentMethod` envoyé par le
+  client (`POST /api/new-economy/purchase`, `newEconomyRoutes.js:28`) — j'ai
+  cherché toute intégration Stripe/Apple/Google dans `src/` et dans
+  `package.json` : **aucune dépendance de paiement n'est installée, aucune
+  vérification de reçu ou de `payment_intent` n'existe nulle part**. La seule
+  protection trouvée est `transactionAuthorizationService.authorize`
+  (`:869`), qui est un **scoring de risque/fraude comportemental** (vélocité,
+  empreinte device/IP), pas une vérification qu'un paiement a eu lieu. À
+  vérifier avant de conclure : (a) si un webhook de paiement existe hors de
+  `src/` (improbable, mais à demander) ; (b) l'ampleur réelle — un simple
+  appel répété suffit-il à miner du solde sans jamais payer ? Si confirmé,
+  c'est un constat **critique** pour S3, à traiter en priorité absolue dès
+  l'ouverture de cette section.
+
+- Piste héritée restante : `src/routes/messageRoutes.js:59`
+  (`requireGroupManagementRights` évalué hors transaction — constat B1-04).
 
 - **PISTE POUR S3 (ne pas publier le détail) :** `src/server.js:279`, la
   fonction `skip` du limiteur de débit global — `isTrustedFirstPartyClient(req)`
