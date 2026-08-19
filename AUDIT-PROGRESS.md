@@ -12,7 +12,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 
 | Code | Priorité | Sujet | État | Rapport |
 |------|----------|-------|------|---------|
-| R1 | Rapidité | Requêtes N+1 | À FAIRE | `AUDIT-R1.md` |
+| R1 | Rapidité | Requêtes N+1 | **TERMINÉE** | `AUDIT-R1.md` |
 | R2 | Rapidité | Index et requêtes lentes | À FAIRE | `AUDIT-R2.md` |
 | R3 | Rapidité | Pagination et taille des réponses | À FAIRE | `AUDIT-R3.md` |
 | R4 | Rapidité | Travail bloquant (boucle d'événements) | À FAIRE | `AUDIT-R4.md` |
