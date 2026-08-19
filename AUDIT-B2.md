@@ -668,3 +668,108 @@ configuration SMTP lue à `config/config.js:105-107`.
 tiers branché sur la base, par exemple). Rien dans le code ne le suggère, mais
 je ne peux pas l'exclure depuis le dépôt seul — c'est la seule hypothèse qui
 invaliderait ce constat, et elle mérite d'être confirmée ou écartée en premier.
+
+---
+
+## B2-08 — Les deux gestionnaires d'erreurs fatales appellent `process.exit(1)` juste après `logger.error` : la trace du plantage est perdue avant d'atteindre le disque
+
+**Gravité : haute** — la seule erreur dont on a absolument besoin, celle qui a
+tué le processus, est précisément celle qui a le plus de chances de ne jamais
+être écrite.
+
+**Emplacement :** `src/server.js:1742-1750`
+
+```js
+process.on('uncaughtException', (error) => {
+  logger.error('Exception non capturée:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Promesse rejetée non gérée:', reason);
+  process.exit(1);
+});
+```
+
+**Ce qui ne va pas.** Deux défauts indépendants sur ces neuf lignes.
+
+**1. La journalisation n'a pas le temps d'aboutir.** Les transports fichier de
+winston (`src/utils/logger.js:22-37`) écrivent de façon **asynchrone**, à
+travers un flux. `logger.error(...)` met le message en file d'attente et rend
+la main immédiatement ; l'écriture réelle dans `logs/app.log` et
+`logs/error.log` se produit à un tour de boucle ultérieur. `process.exit(1)`,
+appelé à la ligne suivante, **termine le processus sans vider les flux en
+attente**. Le comportement est donc une course, et elle se joue sur la ligne la
+plus précieuse du journal : selon la charge et l'état du tampon, la trace du
+plantage est écrite… ou perdue. Le résultat pratique est un service qui
+redémarre sans que rien n'explique pourquoi — le symptôme classique du
+« serveur qui tombe sans laisser de trace ».
+
+C'est d'autant plus dommage que le reste du dispositif est correct :
+`logger.js` déclare `exitOnError: false` (`:44`), précisément pour garder la
+maîtrise de l'arrêt, et le gestionnaire d'erreurs Express (`server.js:939-947`)
+journalise proprement avec pile, méthode, chemin et agent utilisateur. Tout
+tient, sauf la sortie.
+
+**2. `unhandledRejection` tue le serveur entier.** Ce gestionnaire s'applique à
+**toute** promesse rejetée sans `catch`, y compris dans une tâche de fond, un
+`cron`, une écriture d'index ou un appel réseau accessoire lancé en
+« tire-et-oublie ». Une seule promesse oubliée dans un composant secondaire
+suffit à faire tomber l'API complète, en coupant net toutes les requêtes en
+cours. Aucun arrêt gracieux n'a lieu : contrairement au chemin `SIGTERM`/
+`SIGINT` situé juste au-dessus (`:1716-1738`), qui ferme proprement le serveur
+HTTP, PolicierCongo v3, la base, le réplica de lecture et Redis avant de
+sortir, le chemin de plantage saute tout cela. Les connexions à la base et à
+Redis sont abandonnées, et les requêtes en vol reçoivent une connexion coupée
+plutôt qu'une réponse. L'auteur connaît manifestement l'arrêt gracieux — il
+est écrit vingt lignes plus haut — il n'est simplement pas appliqué ici.
+
+**Le correctif.** Attendre la fin de l'écriture avant de sortir. Winston émet
+`'finish'` quand ses transports ont vidé leurs tampons :
+
+```js
+process.on('uncaughtException', (error) => {
+  logger.error('Exception non capturée:', error);
+  // On sort quand le journal est écrit — pas avant. Le minuteur garantit
+  // qu'un transport bloqué ne laisse pas un processus zombie derrière lui.
+  const done = () => process.exit(1);
+  logger.on('finish', done);
+  logger.end();
+  setTimeout(done, 3000).unref();
+});
+```
+
+Pour `unhandledRejection`, deux ajustements :
+
+- **Ne pas sortir sur-le-champ.** Journaliser en `error`, incrémenter un
+  compteur, et laisser le processus vivre : une promesse rejetée dans une
+  tâche de fond ne justifie pas de couper les requêtes des utilisateurs. Si
+  l'on tient à sortir — position défendable, une promesse non gérée pouvant
+  laisser l'état incohérent — alors le faire **par le chemin d'arrêt gracieux
+  déjà écrit** (`server.close()` puis fermeture de la base, du réplica et de
+  Redis), pas par un `process.exit` sec.
+- **Journaliser `promise` en plus de `reason`.** Le paramètre est déjà reçu
+  et ignoré ; sans lui, on connaît l'erreur mais pas l'endroit d'où elle vient,
+  ce qui est souvent l'information manquante pour un diagnostic.
+
+**Vérifié.** Les deux gestionnaires lus à `server.js:1742-1750` ; le chemin
+d'arrêt gracieux `SIGTERM`/`SIGINT` lu à `:1716-1738` et sa liste de fermetures
+confirmée ; les transports fichier winston lus à `logger.js:22-37` ;
+`exitOnError: false` lu à `logger.js:44` ; le gestionnaire d'erreurs Express lu
+à `server.js:939-959`.
+**Précision de formulation :** la perte de la trace est une course, pas une
+certitude — selon l'état des tampons au moment du plantage, la ligne part
+parfois. C'est ce qui rend le défaut difficile à reproduire, et c'est aussi
+pourquoi il ne faut pas conclure de « on a déjà vu des traces de plantage »
+que le problème n'existe pas.
+
+### Jugé sain — le gestionnaire d'erreurs Express (`server.js:939`)
+
+Analysé et non retenu : il journalise le message, la pile, la méthode, le
+chemin, l'IP et l'agent utilisateur, puis masque les détails d'erreur en
+production (`config.server.env === 'production'` → message générique) tout en
+les exposant en développement. C'est exactement le comportement attendu. La
+présence de `req.ip` et de l'agent utilisateur dans le journal est une donnée
+personnelle au sens strict, mais elle est ici proportionnée : elle ne concerne
+que les requêtes en erreur et constitue le minimum utile pour rattacher un
+incident à son contexte. À conserver.

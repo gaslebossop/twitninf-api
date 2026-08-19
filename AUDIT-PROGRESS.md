@@ -47,6 +47,10 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   (`/forgot-password` répond 200 « un lien a été envoyé » alors que l'envoi est
   un TODO jamais fait → récupération de compte hors service, invisible en
   supervision ; + email en clair dans les journaux sur route publique).
+  **B2-08** (`uncaughtException`/`unhandledRejection` : `process.exit(1)` juste
+  après `logger.error`, les transports fichier winston étant asynchrones → la
+  trace du plantage est perdue ; + pas d'arrêt gracieux sur ce chemin, alors
+  qu'il existe pour SIGTERM/SIGINT juste au-dessus).
   **Recensement (e) FAIT :** données personnelles dans les journaux — balayage
   sur `email|ip_address|password|token|full_name|req.body|req.query` dans les
   appels de journalisation ; retenus : `authService.js:461`,
