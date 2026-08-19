@@ -28,12 +28,12 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
 - **Section en cours :** R3 — pagination et taille des réponses.
-- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 9 constats écrits
+- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 10 constats écrits
   (R3-01 `recommendationRoutes.js:264`, R3-02 `messageRoutes.js:489`,
   R3-03 `messageRoutes.js:517`, R3-04 `messageRoutes.js:1844`,
   R3-05 clause `IN` géante 16 sites, R3-06 `adRoutes.js:781`,
   R3-07 `tweetRoutes.js:1603`, R3-08 4 routes de liste non paginées,
-  R3-09 `SELECT *` sur `tweets`, 54 sites).
+  R3-09 `SELECT *` sur `tweets` 54 sites, R3-10 `storyRoutes.js:773`).
 - **Déjà passé en revue pour R3 :** inventaire des 57 `findAll` sans `limit`
   dans `src/routes/` et `src/controllers/` (liste établie par balayage
   automatique — **attention, ce balayage rate les appels dont un `include`
@@ -61,9 +61,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   devises), `contestRoutes.js:358/458` (borné par les gagnants),
   `userRoutes.js:505` et `:790` (attributs explicites, aucune fuite de
   colonne), `User.getPublicProfile()` (liste blanche explicite).
-  **Reste à faire pour clore R3 :** (i) `storyRoutes.js:773`
-  `purgeExpiredStories` — `NOT IN` sur toute la table des épinglages, constat
-  rédigé mais non encore écrit ; (ii) `userRoutes.js:1028`,
+  **Reste à faire pour clore R3 :** (ii) `userRoutes.js:1028`,
   `progressiveRecommendationRoutes.js:637`, `searchRoutes.js:89` à regarder ;
   (iii) les 15 fichiers de routes qui lisent `req.query.limit` **sans**
   `query('limit')` de validation (liste à re-établir par grep) ; (iv) écrire le
