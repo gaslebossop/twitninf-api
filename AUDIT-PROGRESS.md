@@ -28,10 +28,11 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
 - **Section en cours :** R3 — pagination et taille des réponses.
-- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 6 constats écrits
+- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 7 constats écrits
   (R3-01 `recommendationRoutes.js:264`, R3-02 `messageRoutes.js:489`,
   R3-03 `messageRoutes.js:517`, R3-04 `messageRoutes.js:1844`,
-  R3-05 clause `IN` géante 16 sites, R3-06 `adRoutes.js:781`).
+  R3-05 clause `IN` géante 16 sites, R3-06 `adRoutes.js:781`,
+  R3-07 `tweetRoutes.js:1603`).
 - **Déjà passé en revue pour R3 :** inventaire des 57 `findAll` sans `limit`
   dans `src/routes/` et `src/controllers/` (liste établie par balayage
   automatique — **attention, ce balayage rate les appels dont un `include`
@@ -47,7 +48,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `/follow-requests` non paginé, à écrire**. `storyRoutes.js` : 211 couvert par
   R3-05, **reste 773 `purgeExpiredStories` (`NOT IN` sur toute la table des
   épinglages) à écrire**.
-  `tweetRoutes.js` (335, 415, 590, 1603, 1609, 3302), puis
+  `tweetRoutes.js` **terminé** (224/415/590 bornés par les pubs, 3302 borné à
+  50 par validation — sains ; 1603/1609 = R3-07 ; reste 335 à regarder), puis
   `recommendationRoutes.js` (autres lignes), `moderationController.js`
   (2294-2326), `contestRoutes.js`, `adRoutes.js`, `supportRoutes.js`.
   Vérifiés SAINS au passage : `walletRoutes.js:15` (borné par le nombre de
