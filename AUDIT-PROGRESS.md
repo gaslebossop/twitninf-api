@@ -28,11 +28,14 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
 - **Section en cours :** R3 — pagination et taille des réponses.
-- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 2 constats écrits
-  (R3-01 `recommendationRoutes.js:264`, R3-02 `messageRoutes.js:489`).
+- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 3 constats écrits
+  (R3-01 `recommendationRoutes.js:264`, R3-02 `messageRoutes.js:489`,
+  R3-03 `messageRoutes.js:517`).
 - **Déjà passé en revue pour R3 :** inventaire des 57 `findAll` sans `limit`
   dans `src/routes/` et `src/controllers/` (liste établie par balayage
-  automatique) ; vérification que `GET /api/tweets` **est** borné
+  automatique — **attention, ce balayage rate les appels dont un `include`
+  imbriqué contient un `limit` : `messageRoutes.js:517` n'y figurait pas alors
+  qu'il est bien non paginé ; ne pas s'y fier seul**) ; vérification que `GET /api/tweets` **est** borné
   (`query('limit').isInt({max:100})`, `tweetRoutes.js:182`) et que
   `/api/recommendations` **est** borné (`Math.min(..., 10)`,
   `recommendationRoutes.js:528`) — ce ne sont donc pas des constats.
