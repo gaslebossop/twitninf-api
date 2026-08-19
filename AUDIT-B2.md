@@ -405,3 +405,87 @@ silencieux dénombrés et ventilés par valeur ; les formes exactes lues à
 production aujourd'hui — c'est précisément ce que l'absence de trace rend
 impossible à déterminer depuis le code seul, et c'est l'argument central du
 constat.
+
+---
+
+## B2-05 — L'index vectoriel est réécrit en place toutes les 5 minutes, sans écriture atomique : un redémarrage pendant l'écriture détruit un fichier de ~155 Mo
+
+**Gravité : moyenne** — la fenêtre est étroite mais elle se rouvre 288 fois par
+jour, et le coût de la perte est une reconstruction complète.
+
+**Emplacement :** `src/services/similarity/vectorEngine.js:425-426`
+
+```js
+const filePath = path.join(this.dataDir, `${this.name}.vdb`);
+fs.writeFileSync(filePath, buf);        // ← écrase directement le fichier existant
+```
+
+**Ce qui ne va pas.** `writeFileSync` sur le chemin définitif tronque le
+fichier existant **avant** d'écrire le nouveau contenu. Entre la troncature et
+la fin de l'écriture, le fichier sur disque est incomplet. Il n'y a ni
+écriture dans un fichier temporaire suivi d'un `fs.renameSync` (qui serait
+atomique sur le même système de fichiers), ni `fsync`, ni fichier de
+secours.
+
+**L'effet concret.** La taille est ce qui rend la fenêtre réelle plutôt que
+théorique. Le format est décrit juste au-dessus, aux lignes 385-392 : 8 octets
+d'en-tête, puis par entrée 4 octets de longueur d'identifiant, l'identifiant
+UTF-8, et `DIMS * 4` octets de vecteur. Avec `DIMS = 768`, cela fait
+**3 072 octets de vecteur par tweet**, soit ~3 112 octets par entrée pour un
+identifiant de type UUID. Sur les 50 000 tweets que `rebuildFromDB` charge au
+maximum (`recommendationEngine.js:695`), le fichier atteint donc **~155 Mo**,
+écrits en un seul appel bloquant, **toutes les 5 minutes**
+(`SAVE_INTERVAL_MS = 5 * 60 * 1000`, `recommendationEngine.js:82`, armé en
+`setInterval` à `:278`) et une fois de plus à l'arrêt (`:1884`).
+
+Si le processus meurt pendant cette écriture — déploiement, `SIGTERM` d'un
+orchestrateur, redémarrage machine, `ENOSPC` (que B2-02 rend d'ailleurs plus
+probable) — le `.vdb` reste tronqué. Au démarrage suivant, `load()` (`:437`)
+lit le nombre d'entrées annoncé dans l'en-tête, puis boucle pour lire
+exactement ce nombre de vecteurs. Sur un fichier tronqué, `buf.readFloatLE`
+sort des bornes et lève une `RangeError`, attrapée à `:465` :
+
+```js
+} catch (err) {
+  console.error(`❌ [VectorStore:${this.name}] Erreur chargement: ${err.message}`);
+  return 0;
+}
+```
+
+L'erreur est donc bien journalisée — c'est le point positif — mais le retour
+`0` a une conséquence en cascade : l'index est vide, et
+`recommendationEngine.js:269` (`if (tSize === 0 || uSize === 0 || ...)`)
+déclenche une **reconstruction complète depuis la base**. Le redémarrage qui
+devait durer quelques secondes recharge 50 000 tweets et les revectorise, en
+émettant au passage le flot d'avertissements de B2-01. Un incident bénin
+devient un démarrage long et bruyant. À noter aussi : `this.index.clear()` est
+appelé à `:452` **avant** la boucle de lecture, donc un échec en cours de
+route laisse l'index partiellement rempli plutôt qu'inchangé — mais comme
+l'appelant traite `0` comme « vide », cet état intermédiaire n'est pas exploité.
+
+**Le correctif.** Le motif standard, trois lignes :
+
+```js
+const filePath = path.join(this.dataDir, `${this.name}.vdb`);
+const tmpPath  = `${filePath}.tmp`;
+fs.writeFileSync(tmpPath, buf);
+fs.renameSync(tmpPath, filePath);   // atomique sur le même système de fichiers
+```
+
+Le `rename` est atomique : à tout instant, le chemin définitif désigne soit
+l'ancien fichier complet, soit le nouveau fichier complet, jamais un fichier à
+moitié écrit. Il faut aussi prévoir la suppression d'un `.tmp` résiduel au
+démarrage, laissé par un crash antérieur. Pour une garantie stricte contre la
+coupure d'alimentation (et non seulement contre la mort du processus), il faut
+en plus un `fs.fsyncSync` sur le descripteur avant le `rename` — probablement
+superflu ici, l'index étant reconstructible depuis la base.
+
+**Vérifié.** Le `writeFileSync` sur chemin définitif lu à `:426` ; l'absence de
+`.tmp`/`rename` dans la fonction confirmée par lecture intégrale de `save()`
+(`:394-432`) ; le format et le calcul de taille lus à `:385-392` et `:403-406` ;
+`DIMS = 768` à `:26` ; l'intervalle de 5 minutes à `recommendationEngine.js:82`
+et `:278` ; le `return 0` de `load()` à `:465` et son effet sur `:269`.
+**Estimation :** les ~155 Mo supposent l'index plein à 50 000 entrées et des
+identifiants de type UUID ; la taille réelle dépend du volume en production.
+Le raisonnement tient quelle que soit la taille — elle ne fait que fixer la
+largeur de la fenêtre.

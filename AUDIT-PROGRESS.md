@@ -39,7 +39,9 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   bot jamais persisté ni journalisé en cas d'échec + recensement de tous les
   `catch` vides de `src/`, avec la liste de ceux jugés sains) et **B2-04**
   (26 fonctions de scoring de `smartRecommendationEngine.js` renvoient une note
-  neutre sans trace → dégradation invisible et indatable).
+  neutre sans trace → dégradation invisible et indatable) et **B2-05**
+  (`vectorEngine.save()` non atomique : `.vdb` de ~155 Mo réécrit en place
+  toutes les 5 min → troncature au redémarrage → reconstruction complète).
   **Recensements DÉJÀ FAITS, ne pas les refaire :** (a) tous les `catch` vides
   de `src/` ; (b) tous les `catch` non vides qui ne journalisent ni ne relancent
   (balayage automatisé sur `src/`) ; (c) les chemins d'échec répondant 200
