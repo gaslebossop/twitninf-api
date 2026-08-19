@@ -30,14 +30,21 @@ Deux balayages complémentaires, tous deux menés sur l'intégralité de
 
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
-| **Élevée** | **1** | Route d'administration accessible sans authentification, avec effet de déni de service |
+| **Élevée** | **2** | Absence totale de contrôle d'appartenance sur tout un routeur (IDOR généralisé) ; route d'administration accessible sans authentification, avec effet de déni de service |
 | Moyenne | 1 | Exposition de données dérivées d'un utilisateur arbitraire, sans authentification |
 | Faible | 1 | Exposition d'informations internes de fonctionnement |
 
-**À ce stade : 3 constats, dont 1 de gravité élevée.** Ils sont **concentrés
-sur un seul et même fichier de routes**, qui n'a manifestement jamais reçu de
-contrôle d'accès — ce qui rend la correction simple : une seule ligne de
-middleware traite les trois d'un coup.
+**À ce stade : 4 constats, dont 2 de gravité élevée.** Trois d'entre eux sont
+**concentrés sur un seul et même fichier de routes** (constats « userSimilarity »),
+qui n'a manifestement jamais reçu de contrôle d'accès — ce qui rend leur
+correction simple : une seule ligne de middleware les traite d'un coup. Le
+quatrième touche un **routeur entier de dix-neuf routes** dédié à la
+publicité avancée : chaque route y vérifie qu'un jeton valide existe, mais
+aucune ne vérifie que la ressource demandée (une publicité, une campagne, un
+test A/B) appartient bien à l'appelant — c'est la définition même de l'IDOR,
+mais appliquée systématiquement plutôt qu'à un point isolé. Le routeur
+« classique » de publicité, à titre de comparaison, fait ce contrôle
+correctement sur chacune de ses routes ; celui-ci ne le fait sur aucune.
 
 ## Ce qui a été vérifié et trouvé sain — à ce stade
 

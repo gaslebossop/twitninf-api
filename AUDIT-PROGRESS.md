@@ -27,7 +27,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S2 — autorisation et IDOR. **PARTIELLE, 3 constats.**
+- **Section en cours :** S2 — autorisation et IDOR. **PARTIELLE, 4 constats.**
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9),
   S1 (4) — **R1 à S1 TERMINÉES**. S2 en cours.
 
@@ -52,16 +52,42 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
      `/friends`, `/invite` (tous derrière `guard`) ; `monetizationRoutes` et
      `tweetMonetizationRoutes` (`router.use(authMiddleware.authenticateToken)`).
 
-- **S2 — les 3 constats trouvés** sont tous dans **`src/routes/userSimilarityRoutes.js`**,
+- **S2 — 3 constats dans `src/routes/userSimilarityRoutes.js`**,
   fichier qui n'importe `authenticateToken` que pour ne jamais s'en servir.
   Détail transmis au propriétaire ; ne pas le publier dans `AUDIT-S2.md`.
 
-- **S2 — reprendre à :** parcours route par route des routeurs
-  d'**administration, de modération et d'économie**, en vérifiant le contrôle
-  de rôle (et pas seulement l'authentification) :
-  `economyAdminController`, `shadowbanAdminRoutes`, `developerAdminRoutes`,
-  `infrastructureAdminRoutes`, `moderationController`, `advancedAdRoutes`,
-  `newEconomyController`. Vérifier aussi les deux pistes héritées :
+- **S2 — 1 constat (élevé) dans `src/routes/advancedAdRoutes.js`, routeur
+  ENTIER (19 routes).** Chaque route vérifie `authenticateToken` (n'importe
+  quel utilisateur connecté) mais **aucune** ne vérifie que la publicité, la
+  campagne ou le test A/B demandé appartient à l'appelant — pas de
+  `where: { ..., user_id: userId }` nulle part dans ce fichier, alors que
+  `src/routes/adRoutes.js` (le routeur « classique », déjà vérifié sain) le
+  fait systématiquement. `Advertisement` porte bien une colonne `user_id`
+  (vérifié dans `src/models/Advertisement.js`), donc le contrôle est
+  possible, il est juste absent ici. Vérifié : `/export-data` (`:93`),
+  `/score/:advertisementId` (`:132`), `/scores/all` (`:158`, aucun filtre —
+  liste TOUTES les publicités actives), `/predict-performance` (`:186`),
+  `/ab-test/create` (`:257`), `/ab-test/:testId/finalize` (`:363`),
+  `/analytics/:advertisementId` (`:437`), `/analytics/global/summary`
+  (`:489`, résumé de toute la plateforme pub, pas seulement de l'appelant).
+  **NE PAS refaire cette vérification** — c'est fait, c'est confirmé, détail
+  transmis au propriétaire.
+
+- **S2 — déjà vérifiés dans cette reprise (sains, contrôle de rôle correct
+  en tête de fichier) :** `shadowbanAdminRoutes.js` (`authenticateToken` +
+  `requireAdminRole` globaux) ; `infrastructureAdminRoutes.js` (rôle
+  re-vérifié en base à chaque requête, avec secours JWT documenté et limité
+  au cas où la base est indisponible — bonne conception, jetée aux
+  `execFile`/`spawn` de gestion d'infrastructure) ; `developerAdminRoutes.js`
+  (pas de rôle admin, mais c'est voulu : chaque route filtre par
+  `user_id: req.user.id`, c'est un espace développeur personnel, pas une
+  administration globale).
+
+- **S2 — reprendre à :** `moderationController` (routes de modération —
+  vérifier le contrôle de rôle sur chaque action, pas seulement
+  l'authentification) et `newEconomyController` (routes économiques —
+  vérifier qu'un client ne peut pas influencer un montant). Puis les deux
+  pistes héritées :
   `src/models/Tweet.js:498` (défaut de la colonne `metadata`) croisé avec
   l'absence de liste blanche de sortie dans le fil (`src/routes/tweetRoutes.js:568`),
   et `src/routes/messageRoutes.js:59` (`requireGroupManagementRights` évalué
