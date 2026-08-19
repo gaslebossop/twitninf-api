@@ -1012,7 +1012,6 @@ class ModerationController {
       const moderatorId = req.user.id;
 
       logger.info(`Données reçues - userId: ${userId}, reason: ${reason}, duration: ${duration}, permanent: ${permanent}`);
-      logger.info(`Body complet:`, req.body);
 
       const user = await User.findByPk(userId);
       if (!user) {
@@ -2882,6 +2881,28 @@ class ModerationController {
           success: false,
           message: 'Role invalide'
         });
+      }
+
+      // AUDIT 3.2 (2026-08-19) — élévation de privilèges : la route n'exige que
+      // la permission `can_manage_moderators`, pas un rôle superadmin. Sans ce
+      // contrôle, un détenteur de cette seule permission pouvait promouvoir
+      // n'importe qui — y compris lui-même — superadmin avec toutes les
+      // permissions. Seul un superadmin peut désormais accorder le rôle
+      // admin/superadmin ou la permission can_manage_moderators elle-même.
+      const callerRole = ModerationController.prototype.normalizeModerationRole(req.user?.role);
+      if (callerRole !== 'superadmin') {
+        if (['admin', 'superadmin'].includes(role)) {
+          return res.status(403).json({
+            success: false,
+            message: 'Seul un superadmin peut accorder le rôle admin ou superadmin.'
+          });
+        }
+        if (permissions.can_manage_moderators === true) {
+          return res.status(403).json({
+            success: false,
+            message: 'Seul un superadmin peut accorder la permission can_manage_moderators.'
+          });
+        }
       }
 
       const user = await User.findByPk(userId);

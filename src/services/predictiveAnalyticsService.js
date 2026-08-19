@@ -170,7 +170,7 @@ async function fetchAuthorHistory(userId, days = DEFAULT_HISTORY_DAYS) {
       (SELECT COUNT(*) FROM tweets rp
          WHERE rp.parent_tweet_id = t.id AND rp.deleted_at IS NULL)::int AS replies
     FROM tweets t
-    WHERE t.user_id::text = :userId
+    WHERE t.user_id = :userId::uuid
       AND t.deleted_at IS NULL
       AND t.parent_tweet_id IS NULL
       AND COALESCE(t.is_retweet, false) = false
@@ -285,7 +285,7 @@ async function fetchAuthorContext(userId) {
         (SELECT COUNT(*) FROM user_follows f
           WHERE f.follower_id = u.id AND f.status = 'active')::int AS following
       FROM users u
-      WHERE u.id::text = :userId
+      WHERE u.id = :userId::uuid
       LIMIT 1
     `, {
       replacements: { userId },

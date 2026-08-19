@@ -1,6 +1,24 @@
 const { DataTypes, Model } = require('sequelize');
 
-class AdEngagement extends Model {}
+class AdEngagement extends Model {
+  /** Pendant de `AdImpression.countByAdvertisementIds` — même contrat. */
+  static async countByAdvertisementIds(advertisementIds = []) {
+    const ids = [...new Set(advertisementIds.map(String))].filter(Boolean);
+    if (ids.length === 0) return new Map();
+
+    const rows = await this.findAll({
+      where: { advertisement_id: ids },
+      attributes: [
+        'advertisement_id',
+        [this.sequelize.fn('COUNT', this.sequelize.col('id')), 'count'],
+      ],
+      group: ['advertisement_id'],
+      raw: true,
+    });
+
+    return new Map(rows.map((r) => [String(r.advertisement_id), Number(r.count) || 0]));
+  }
+}
 
 module.exports = (sequelize) => {
   AdEngagement.init({

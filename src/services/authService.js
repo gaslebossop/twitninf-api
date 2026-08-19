@@ -1,5 +1,4 @@
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const User = require('../models/User');
@@ -433,38 +432,49 @@ class AuthService {
   }
 
   // Demander la réinitialisation du mot de passe
+  //
+  // AUDIT B2-07 : l'envoi d'email n'a jamais été branché (le `TODO`
+  // ci-dessous n'était honoré nulle part dans le dépôt — vérifié : aucune
+  // occurrence de `sendMail`/`nodemailer` en dehors de la dépendance
+  // déclarée). La route répondait pourtant `200` avec « un lien a été
+  // envoyé » à chaque appel : un parcours de récupération de compte
+  // entièrement hors service, sans que rien ne le signale. Tant que
+  // l'envoi n'est pas réellement branché (il faut des identifiants SMTP
+  // réels dans `config.email`, actuellement vides), l'échec est rendu
+  // honnête plutôt que masqué. Le message neutre (ne révèle pas si le
+  // compte existe) est conservé — c'est le code d'erreur qui change.
   async forgotPassword(email) {
     try {
       const user = await User.findOne({
         where: { email, is_active: true }
       });
 
-      if (!user) {
-        // Ne pas révéler si l'email existe ou non
-        return { success: true, message: 'Si l\'email existe, un lien de réinitialisation a été envoyé' };
+      if (user) {
+        // Le token est quand même généré et sauvegardé : prêt à être utilisé
+        // dès que l'envoi sera branché, sans changement ailleurs.
+        const resetToken = jwt.sign(
+          { id: user.id, type: 'reset' },
+          config.jwt.secret,
+          { expiresIn: '1h' }
+        );
+        user.reset_password_token = resetToken;
+        user.reset_password_expires = new Date(Date.now() + 60 * 60 * 1000); // 1 heure
+        await user.save();
+
+        // `user.id`, pas `user.email` : la route est publique et non
+        // authentifiée, journaliser l'adresse en clair permettrait à
+        // n'importe qui de la faire écrire dans les journaux à volonté.
+        logger.warn(`Demande de réinitialisation pour user=${user.id} — envoi email non implémenté`);
       }
-
-      // Générer un token de réinitialisation
-      const resetToken = jwt.sign(
-        { id: user.id, type: 'reset' },
-        config.jwt.secret,
-        { expiresIn: '1h' }
-      );
-
-      // Sauvegarder le token
-      user.reset_password_token = resetToken;
-      user.reset_password_expires = new Date(Date.now() + 60 * 60 * 1000); // 1 heure
-      await user.save();
-
-      // TODO: Envoyer l'email avec le lien de réinitialisation
-
-      logger.info(`Demande de réinitialisation de mot de passe pour: ${user.email}`);
-
-      return { success: true, message: 'Si l\'email existe, un lien de réinitialisation a été envoyé' };
     } catch (error) {
       logger.error('Erreur lors de la demande de réinitialisation:', error);
       throw error;
     }
+
+    const err = new Error('Réinitialisation par email indisponible pour le moment');
+    err.statusCode = 503;
+    err.code = 'EMAIL_NOT_CONFIGURED';
+    throw err;
   }
 
   // Réinitialiser le mot de passe

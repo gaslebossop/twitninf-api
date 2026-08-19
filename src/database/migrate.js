@@ -43,10 +43,15 @@ async function createOptimizedIndexes() {
       ON users USING gin (full_name gin_trgm_ops)
     `);
 
-    // Index pour les statistiques
+    // AUDIT R2-11 (2026-08-19) : `getPopularUsers` trie sur
+    // `(stats->>'followers')::int DESC` (User.js:88-98) — un GIN sur
+    // l'expression texte brute ne peut PAS servir un tri (GIN n'ordonne pas)
+    // ni même cette expression précise (le cast ::int n'y figure pas).
+    // Remplacé par un btree sur l'expression réellement triée.
+    await sequelize.query(`DROP INDEX IF EXISTS idx_users_stats_followers`);
     await sequelize.query(`
-      CREATE INDEX IF NOT EXISTS idx_users_stats_followers 
-      ON users USING gin ((stats->>'followers'))
+      CREATE INDEX IF NOT EXISTS idx_users_stats_followers_btree
+      ON users (((stats->>'followers')::int) DESC)
     `);
 
     // Index pour les préférences
@@ -65,6 +70,112 @@ async function createOptimizedIndexes() {
       CREATE INDEX IF NOT EXISTS idx_users_last_activity_btree 
       ON users (last_activity DESC)
     `);
+
+    // AUDIT R2-04 (2026-08-19) : le fil (`GET /api/tweets`, la route la plus
+    // appelée de l'API) filtre sur deleted_at/is_private/is_data_test/
+    // moderation_status puis trie par created_at — aucun index déclaré ne
+    // correspond, le planificateur n'a que le parcours séquentiel ou un
+    // bitmap peu sélectif. Index partiel calqué exactement sur ce prédicat :
+    // il ne contient que les lignes réellement servies par le fil.
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS tweets_feed_idx
+      ON tweets (created_at DESC)
+      WHERE deleted_at IS NULL
+        AND is_private = false
+        AND is_data_test = false
+        AND moderation_status = 'approved'
+    `);
+
+    // AUDIT R2-05 (2026-08-19) : `sort=popular` trie sur `view_count DESC`
+    // sans aucun index sur cette colonne — tri complet, souvent sur disque
+    // au-delà de work_mem. Partiel sur le même prédicat que le fil pour
+    // servir le filtre ET le tri en une passe.
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS tweets_popular_idx
+      ON tweets (view_count DESC, created_at DESC)
+      WHERE deleted_at IS NULL
+        AND is_private = false
+        AND is_data_test = false
+        AND moderation_status = 'approved'
+    `);
+
+    // AUDIT R2-06 (2026-08-19) : la recherche de tweets utilise
+    // `content ILIKE '%terme%'` — aucun index btree ne peut servir un motif
+    // commençant par '%'. `idx_users_username_trgm`/`idx_users_full_name_trgm`
+    // existaient déjà ci-dessus pour les utilisateurs ; il manquait
+    // l'équivalent pour les tweets, la table la plus volumineuse du modèle.
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS idx_tweets_content_trgm
+      ON tweets USING gin (content gin_trgm_ops)
+    `);
+
+    // AUDIT R2-12 (2026-08-19) : l'onglet « Médias » du profil filtre sur
+    // `jsonb_array_length(media_urls) > 0` — un GIN sur `media_urls` (voir le
+    // nettoyage ci-dessous) n'indexe pas la cardinalité, seulement le
+    // contenu. Le filtre `user_id` reste indexé et s'applique en premier,
+    // donc l'effet ne se voit que sur un compte à très gros volume — d'où
+    // l'ajout, pas un remplacement de l'index composite existant.
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS tweets_user_media_idx
+      ON tweets (user_id, created_at DESC)
+      WHERE deleted_at IS NULL AND jsonb_array_length(media_urls) > 0
+    `);
+
+    // AUDIT R2-08 (2026-08-19) : index maintenus en permanence sur les
+    // tables les plus écrites du dépôt, pour un bénéfice nul ou hors
+    // production.
+    //
+    // (a) `data_test_batch_id` : NULL sur 100 % des lignes réelles, créé par
+    // un script de banc d'essai (`scripts/capacityDataLifecycle.js:145-150`)
+    // sur les six tables les plus écrites — noms d'index repris tels quels
+    // de ce script (pas une convention Sequelize à deviner ici). Rendus
+    // partiels plutôt que supprimés : le script de charge en a toujours
+    // besoin, `WHERE ... IS NOT NULL` les réduit à quelques pages tant
+    // qu'aucune charge n'est en cours.
+    const dataTestBatchIndexes = {
+      idx_users_data_test_batch: 'users',
+      idx_tweets_data_test_batch: 'tweets',
+      idx_likes_data_test_batch: 'tweet_likes',
+      idx_retweets_data_test_batch: 'tweet_retweets',
+      idx_follows_data_test_batch: 'user_follows',
+      idx_behavior_data_test_batch: 'user_behavior_data',
+    };
+    for (const [oldName, table] of Object.entries(dataTestBatchIndexes)) {
+      await sequelize.query(`DROP INDEX IF EXISTS ${oldName}`);
+      await sequelize.query(`
+        CREATE INDEX IF NOT EXISTS ${oldName}_partial
+        ON ${table} (data_test_batch_id)
+        WHERE data_test_batch_id IS NOT NULL
+      `);
+    }
+
+    // (b) Cinq mono-colonnes booléennes sur `tweets` (is_retweet, is_quote,
+    // is_pinned, is_private, deleted_at) : une colonne à deux valeurs n'est
+    // pas sélective, le planificateur préfère presque toujours le parcours
+    // séquentiel. L'information vit désormais dans la clause WHERE de
+    // `tweets_feed_idx`/`tweets_popular_idx` ci-dessus.
+    //
+    // ⚠ Mêmes noms déduits (non vérifiés par `\di`) que pour (c) plus bas.
+    for (const idx of ['tweets_is_retweet', 'tweets_is_quote', 'tweets_is_pinned', 'tweets_is_private', 'tweets_deleted_at']) {
+      await sequelize.query(`DROP INDEX IF EXISTS ${idx}`);
+    }
+
+    // (c) Cinq GIN morts sur du JSONB jamais interrogé par contenance (`@>`,
+    // `?`, `?|`, `?&`) — recherche exhaustive dans src/routes/ et
+    // src/services/, aucun usage trouvé. Un GIN sur JSONB est parmi les plus
+    // coûteux à l'écriture ; `hashtags` seul mérite un GIN (voir R2-09, qui
+    // demande de vérifier le type réel de la colonne avant d'agir).
+    //
+    // ⚠ Noms déduits de la convention Sequelize par défaut (`fields:`
+    // déclarés sans `name:` explicite dans Tweet.js/User.js) — jamais
+    // confirmés par un `\di` réel (accès base bloqué depuis ici, voir la
+    // note de contexte n°1 d'AUDIT-R2.md). `DROP INDEX IF EXISTS` est un
+    // no-op silencieux si le nom réel diffère : vérifier après coup avec
+    // `\di tweets_mentions tweets_media_urls tweets_urls users_stats
+    // users_preferences` que ces cinq lignes ont bien disparu.
+    for (const idx of ['tweets_mentions', 'tweets_media_urls', 'tweets_urls', 'users_stats', 'users_preferences']) {
+      await sequelize.query(`DROP INDEX IF EXISTS ${idx}`);
+    }
 
     logger.info('Index optimisés créés avec succès');
   } catch (error) {

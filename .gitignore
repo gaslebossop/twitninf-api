@@ -44,6 +44,12 @@ src/megallm-client/megallm-session.json
 src/public/tweets/
 src/public/stories/
 
+# AUDIT B2-02 : contenait des prompts de verification (identite, tweets,
+# reponses libres du formulaire) ecrits en clair sur disque, jamais purges.
+# 13 fichiers etaient deja suivis par git avant cette regle — traites a part
+# avec le proprietaire, cette ligne empeche seulement la recidive.
+temp/
+
 # « conTESTs » contient « test » : la regle *test*.js plus haut excluait donc
 # silencieusement TOUT le module concours (Contest.js, contestRoutes.js,
 # contestService.js, la migration...). Le code partait a la poubelle sans le

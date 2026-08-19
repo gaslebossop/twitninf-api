@@ -11,7 +11,8 @@
 
 const { Op, fn, col, literal, Sequelize } = require('sequelize');
 const logger = require('../utils/logger');
-const { User, Tweet, TweetLike, TweetRetweet, UserFollow, Notification } = require('../models');
+const { User, Tweet, TweetLike, TweetRetweet, UserFollow, Notification, sequelize } = require('../models');
+const { jsonbArrayOverlap } = require('../utils/hashtagFilter');
 const RecommendationEngine = require('./recommendationEngine');
 const UltraRecommendationEngine = require('./ultraRecommendationEngine');
 const UltraRecommendationEngineTikTokLevel = require('./ultraRecommendationEngineTikTokLevel');
@@ -453,9 +454,7 @@ class TweetRecommendationService {
         const preferredHashtags = userBehavior.preferences.content.preferredHashtags.slice(0, 5);
         if (preferredHashtags.length > 0) {
           whereClause[Op.or] = whereClause[Op.or] || [];
-          whereClause[Op.or].push({
-            hashtags: { [Op.overlap]: preferredHashtags }
-          });
+          whereClause[Op.or].push(jsonbArrayOverlap(sequelize, 'hashtags', preferredHashtags));
         }
       }
 
@@ -474,9 +473,7 @@ class TweetRecommendationService {
 
       if (trendingHashtags.length > 0) {
         whereClause[Op.or] = whereClause[Op.or] || [];
-        whereClause[Op.or].push({
-          hashtags: { [Op.overlap]: trendingHashtags }
-        });
+        whereClause[Op.or].push(jsonbArrayOverlap(sequelize, 'hashtags', trendingHashtags));
       }
     }
 
@@ -709,38 +706,38 @@ class TweetRecommendationService {
    */
   async enrichTweetsWithUserData(tweets, userId, includeUser, includeStats) {
     try {
-      return await Promise.all(tweets.map(async (tweet) => {
+      // AUDIT R1-08 (2026-08-19) : 5 requêtes par tweet, `.map(async …)` —
+      // regroupées comme sur le fil (mêmes helpers groupés). Le gain se
+      // propage à toutes les routes qui appellent ce service.
+      const tweetIds = tweets.map((tweet) => String(tweet.id));
+      const [likesMap, rtMap, repliesMap, likedSet, rtSet] = await Promise.all([
+        includeStats ? TweetLike.countLikesForTweets(tweetIds) : Promise.resolve(new Map()),
+        includeStats ? TweetRetweet.countRetweetsForTweets(tweetIds) : Promise.resolve(new Map()),
+        includeStats ? Tweet.countRepliesForTweets(tweetIds) : Promise.resolve(new Map()),
+        userId ? TweetLike.likedTweetIdsForUser(userId, tweetIds) : Promise.resolve(new Set()),
+        userId ? TweetRetweet.retweetedTweetIdsForUser(userId, tweetIds) : Promise.resolve(new Set()),
+      ]);
+
+      return tweets.map((tweet) => {
         const tweetData = tweet.toJSON();
-        
-        // Statistiques de base
+        const tid = String(tweet.id);
+
         if (includeStats) {
-          const [likeCount, retweetCount, replyCount] = await Promise.all([
-            TweetLike.countTweetLikes(tweet.id),
-            TweetRetweet.countTweetRetweets(tweet.id),
-            Tweet.count({ where: { parent_tweet_id: tweet.id } })
-          ]);
-          
           tweetData.stats = {
-            likes: likeCount,
-            retweets: retweetCount,
-            replies: replyCount,
+            likes: likesMap.get(tid) || 0,
+            retweets: rtMap.get(tid) || 0,
+            replies: repliesMap.get(tid) || 0,
             views: tweet.view_count || 0
           };
         }
-        
-        // Interactions utilisateur
+
         if (userId) {
-          const [isLiked, isRetweeted] = await Promise.all([
-            TweetLike.hasUserLikedTweet(userId, tweet.id),
-            TweetRetweet.hasUserRetweetedTweet(userId, tweet.id)
-          ]);
-          
           tweetData.user_interaction = {
-            is_liked: isLiked,
-            is_retweeted: isRetweeted
+            is_liked: likedSet.has(tid),
+            is_retweeted: rtSet.has(tid)
           };
         }
-        
+
         // Données utilisateur enrichies
         if (includeUser && tweet.author) {
           tweetData.author = {
@@ -749,9 +746,9 @@ class TweetRecommendationService {
             is_following: false // À implémenter si nécessaire
           };
         }
-        
+
         return tweetData;
-      }));
+      });
     } catch (error) {
       logger.error('❌ Erreur lors de l\'enrichissement des tweets:', error);
       return tweets.map(tweet => tweet.toJSON());
@@ -908,7 +905,7 @@ class TweetRecommendationService {
 
       // Filtre par hashtag
       if (hashtag) {
-        whereClause.hashtags = { [Op.overlap]: [hashtag] };
+        whereClause[Op.and] = [jsonbArrayOverlap(sequelize, 'hashtags', [hashtag])];
       }
 
       // Filtre par utilisateur

@@ -111,7 +111,13 @@ class BotDetectionService {
           attributes: ['action_type', 'timestamp', 'client_timestamp', 'target_id', 'device_info', 'context_data', 'duration_ms'],
           raw: true,
         }),
-        BotReputation?.findOne({ where: { user_id: userId }, raw: true }).catch(() => null),
+        // AUDIT B2-03 : même choix qu'en dessous (dégrader sans casser le
+        // parcours utilisateur) mais journalisé — sinon une base en erreur
+        // devient indistinguable d'un compte sans historique.
+        BotReputation?.findOne({ where: { user_id: userId }, raw: true }).catch((e) => {
+          logger.error(`❌ [BotDetection] Lecture réputation échouée user=${userId}:`, e.message);
+          return null;
+        }),
       ]);
 
       if (!user || actions.length < CONFIG.MIN_ACTIONS_REQUIRED) {
@@ -176,8 +182,18 @@ class BotDetectionService {
     }
   }
 
+  // AUDIT B2-03 : c'est la SEULE trace durable de la détection en mode
+  // surveillance (`CONFIG.AUTO_SANCTION` désactivé) — aucune sanction n'est
+  // appliquée sur ce chemin, donc un échec silencieux ici signifiait qu'une
+  // détection n'avait produit ni ligne en base, ni journal, ni erreur.
   async _updateReputation(userId, score) {
-    try { await BotReputation.upsert({ user_id: userId, last_score: score, updated_at: new Date() }); } catch (e) {}
+    try {
+      await BotReputation.upsert({ user_id: userId, last_score: score, updated_at: new Date() });
+      return true;
+    } catch (e) {
+      logger.error(`❌ [BotDetection] Persistance réputation échouée user=${userId} score=${score}:`, e.message);
+      return false;
+    }
   }
 
   /**

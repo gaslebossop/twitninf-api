@@ -242,7 +242,7 @@ async function buildUserTopicProfile(userId) {
   const rows = await queryRead(`
     SELECT t.content
     FROM tweets t
-    WHERE t.user_id::text = :userId
+    WHERE t.user_id = :userId::uuid
       AND t.deleted_at IS NULL
       AND t.parent_tweet_id IS NULL
       AND COALESCE(t.is_retweet, false) = false
@@ -358,7 +358,7 @@ async function countIdeasToday(userId) {
   const [row] = await queryRead(`
     SELECT COUNT(*)::int AS n
     FROM notifications
-    WHERE recipient_id::text = :userId
+    WHERE recipient_id = :userId::uuid
       AND metadata->>'kind' = :kind
       AND created_at >= :since
   `, {
@@ -374,7 +374,7 @@ async function recentlyNotifiedTerms(userId) {
   const rows = await queryRead(`
     SELECT metadata->>'topic' AS topic
     FROM notifications
-    WHERE recipient_id::text = :userId
+    WHERE recipient_id = :userId::uuid
       AND metadata->>'kind' = :kind
       AND created_at >= :since
   `, {

@@ -2,6 +2,26 @@ const { DataTypes, Model, Op } = require('sequelize');
 const logger = require('../utils/logger');
 
 class Tweet extends Model {
+  /**
+   * AUDIT S2 (2026-08-19) : `metadata` porte `ip_address` et `device`
+   * (user-agent) de l'auteur au moment de la publication — utile pour la
+   * modération/anti-fraude, jamais destiné aux autres lecteurs. Sans ce
+   * `toJSON`, Sequelize sérialise `metadata` tel quel : chaque appel de la
+   * route la plus fréquentée de l'API (le fil) renvoyait ces deux champs à
+   * tout autre utilisateur, pour tout tweet. Les autres clés (overlay_texts,
+   * video_processing_percent, ab_test…) restent : elles sont lues côté
+   * client. La donnée brute reste accessible côté serveur via `.metadata`
+   * directement sur l'instance — seule la sérialisation JSON est filtrée.
+   */
+  toJSON() {
+    const json = { ...super.toJSON() };
+    if (json.metadata && typeof json.metadata === 'object') {
+      const { ip_address, device, ...safeMetadata } = json.metadata;
+      json.metadata = safeMetadata;
+    }
+    return json;
+  }
+
   // Méthode pour obtenir le tweet avec les statistiques calculées
   async getTweetWithStats() {
     const tweet = this.toJSON();
@@ -527,6 +547,26 @@ const tweetSchema = {
   deleted_at: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+
+  /**
+   * AUDIT R2-10 (2026-08-19) : cette colonne existe déjà en production,
+   * créée par `scripts/capacityDataLifecycle.js` (`ALTER TABLE ... ADD
+   * COLUMN IF NOT EXISTS`), un outil de banc d'essai — pas par une
+   * migration. Utilisée dans 51 clauses `where`, dont celle du fil
+   * (`tweetRoutes.js`), sans jamais être déclarée ici : `sequelize.sync`
+   * (`alter: false`) ne peut ni la créer sur une base neuve, ni l'indexer.
+   * Toute base qui n'a jamais fait tourner ce script de charge (recette,
+   * restauration, nouvel environnement) fait échouer `GET /api/tweets` avec
+   * `column "is_data_test" does not exist`. Déclarée ici pour que
+   * `sequelize.sync` la crée sur une base neuve ; sur une base existante
+   * (dont la prod), une vraie migration reste nécessaire — voir
+   * `migrations/`, `alter: false` ne touche jamais une table déjà créée.
+   */
+  is_data_test: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
   }
 };
 

@@ -2612,6 +2612,17 @@ class RecommendationEngine {
   }
 
   /**
+   * AUDIT R2-09 (2026-08-19) : méthode morte — confirmé, le seul appelant de
+   * `buildIntelligentWhereClause` sur une instance de `RecommendationEngine`
+   * est `tweetRecommendationService.js`, qui définit et appelle sa PROPRE
+   * méthode de même nom (signature différente) ; celle-ci n'est jamais
+   * atteinte. Deux défauts si jamais appelée un jour : `Op.overlap` sur
+   * `hashtags` (jsonb) génère `&&`, opérateur inexistant entre jsonb et
+   * tableau texte (confirmé en base) ; et `topics` n'est pas une colonne de
+   * `tweets` (confirmé par `\d tweets`) — la seconde branche échouerait même
+   * après avoir corrigé la première. Ne pas la brancher sans reprendre les
+   * deux.
+   *
    * Construit la clause WHERE intelligente
    */
   buildIntelligentWhereClause(contentPreferences, userId) {

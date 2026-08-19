@@ -49,6 +49,13 @@ class NewEconomyController {
 
   /**
    * Acheter des TwitCoins
+   *
+   * Désactivée par `PURCHASE_LOCK_MIDDLEWARE` en amont dans les routes
+   * (AUDIT 3.2, 2026-08-19) : `paymentMethod` n'était qu'une chaîne envoyée
+   * par le client, jamais vérifiée contre un paiement réel — n'importe quel
+   * compte authentifié pouvait se créditer gratuitement. Implémentation
+   * laissée intacte pour la réactivation une fois un vrai moyen de paiement
+   * branché ; ne retirer le verrou qu'à ce moment-là.
    */
   static async purchaseCoins(req, res) {
     try {

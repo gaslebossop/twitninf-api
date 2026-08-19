@@ -1,5 +1,13 @@
 const { DataTypes, Model } = require('sequelize');
-const bcrypt = require('bcryptjs');
+// AUDIT R4-02 (2026-08-19), CRITIQUE : `bcryptjs` est une réimplémentation
+// pure JavaScript — tout le calcul se fait sur le fil principal de Node, en
+// concurrence directe avec toutes les autres requêtes en cours (mesuré :
+// ~93 ms de retard de boucle d'événements par connexion, au coût 12). Le
+// module natif exécute le même calcul dans le pool de travail de libuv, hors
+// du fil principal — API identique, aucun autre changement nécessaire. Les
+// empreintes déjà stockées ($2a$/$2b$) restent valides : vérifié qu'un hash
+// `bcryptjs` se valide avec `bcrypt` natif et réciproquement.
+const bcrypt = require('bcrypt');
 const logger = require('../utils/logger');
 
 class User extends Model {

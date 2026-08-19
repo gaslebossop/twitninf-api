@@ -50,15 +50,28 @@ function serializeReaction(reaction) {
   };
 }
 
-async function requireMembership(conversationId, userId) {
+// AUDIT B1-04 (2026-08-19) : ni l'une ni l'autre n'acceptaient de
+// transaction — appelées depuis un bloc `tx` (4 sites), chacune empruntait
+// une connexion supplémentaire au pool pendant que `tx` détenait déjà la
+// sienne (même mécanisme que B1-02/B1-03). Paramètre optionnel,
+// rétrocompatible : `transaction: null` est déjà le comportement actuel de
+// Sequelize, les appels existants ne changent pas.
+async function requireMembership(conversationId, userId, transaction = null) {
   return ConversationParticipant.findOne({
-    where: { conversation_id: conversationId, user_id: userId }
+    where: { conversation_id: conversationId, user_id: userId },
+    transaction,
   });
 }
 
-async function requireGroupManagementRights(conversationId, userId) {
+async function requireGroupManagementRights(conversationId, userId, transaction = null) {
   const membership = await ConversationParticipant.findOne({
-    where: { conversation_id: conversationId, user_id: userId }
+    where: { conversation_id: conversationId, user_id: userId },
+    // Un `lock` quand une transaction est fournie : le rôle vérifié ne peut
+    // plus changer entre ce contrôle et l'écriture qui l'utilise, jusqu'au
+    // COMMIT — sinon deux instantanés différents pouvaient dire « oui » à
+    // une action que l'état réel n'autorisait déjà plus.
+    lock: transaction ? transaction.LOCK.SHARE : undefined,
+    transaction,
   });
   if (!membership) return { ok: false, reason: 'not_member' };
   if (!['owner', 'admin'].includes(membership.role)) return { ok: false, reason: 'forbidden' };
@@ -485,23 +498,40 @@ async function maybeAutoReplyFromPolicier(conversationId, senderId, incomingCont
   }
 }
 
+// AUDIT R3-02 (2026-08-19), CRITIQUE — l'ancienne version chargeait TOUTES
+// les conversations directes de la plateforme (jointes à leurs participants)
+// pour n'en retenir qu'une, à l'intérieur de la transaction d'ouverture de
+// conversation. Le coût était proportionnel au nombre de conversations
+// directes de toute la plateforme, sur le chemin d'écriture le plus courant
+// de la messagerie. Borné maintenant par les conversations de `userA` (parti
+// des adhésions de cet utilisateur, pas de la table entière).
 async function findExactDirectConversation(userA, userB, transaction) {
-  const candidates = await Conversation.findAll({
-    where: { type: 'direct' },
+  const a = String(userA);
+  const b = String(userB);
+
+  const memberships = await ConversationParticipant.findAll({
+    where: { user_id: a },
     include: [
       {
-        model: ConversationParticipant,
-        as: 'participants',
-        required: true
+        model: Conversation,
+        as: 'conversation',
+        required: true,
+        where: { type: 'direct' },
+        include: [
+          {
+            model: ConversationParticipant,
+            as: 'participants',
+            required: true
+          }
+        ]
       }
     ],
     transaction
   });
 
-  const a = String(userA);
-  const b = String(userB);
-
-  for (const conv of candidates) {
+  for (const membership of memberships) {
+    const conv = membership.conversation;
+    if (!conv) continue;
     const ids = (conv.participants || []).map((p) => String(p.user_id)).filter(Boolean);
     if (ids.length !== 2) continue;
     const uniq = new Set(ids);
@@ -516,8 +546,45 @@ async function findExactDirectConversation(userA, userB, transaction) {
 router.get('/conversations', authenticateToken, denySuspended, async (req, res) => {
   try {
     const userId = req.user.id;
-    const memberships = await ConversationParticipant.findAll({
+    // AUDIT R3-03 (2026-08-19) : l'ancienne version chargeait TOUTE la boîte
+    // de réception (aucun `limit`/`offset`) — un compte à 300 conversations
+    // déclenchait ~300 requêtes `separate: true` et une réponse de plusieurs
+    // Mo à chaque ouverture de l'onglet messages. `limit` (défaut 20,
+    // plafond 50) borne désormais les trois coûts (participants sérialisés,
+    // requêtes séparées des derniers messages, volume réseau).
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    // Étape 1, légère : juste les identifiants de conversation dans le bon
+    // ordre, paginés. `Conversation` est en `belongsTo` depuis
+    // `ConversationParticipant` (jointure 1-vers-1) : `limit` ici ne risque
+    // aucune duplication de ligne, contrairement à un `limit` posé
+    // directement sur la requête riche plus bas (qui joint aussi
+    // `participants`, une relation `hasMany`).
+    const membershipPage = await ConversationParticipant.findAll({
       where: { user_id: userId },
+      attributes: ['conversation_id', 'last_read_at'],
+      include: [{ model: Conversation, as: 'conversation', attributes: ['id', 'updatedAt'] }],
+      order: [[{ model: Conversation, as: 'conversation' }, 'updatedAt', 'DESC']],
+      limit,
+      offset
+    });
+
+    const orderedConversationIds = membershipPage.map((m) => m.conversation_id).filter(Boolean);
+
+    if (orderedConversationIds.length === 0) {
+      return res.json({
+        success: true,
+        conversations: [],
+        pagination: { limit, offset, hasMore: false }
+      });
+    }
+
+    // Étape 2 : la même requête riche qu'avant (participants + dernier
+    // message), mais bornée aux quelques conversations déjà sélectionnées —
+    // jamais tout l'historique.
+    const memberships = await ConversationParticipant.findAll({
+      where: { user_id: userId, conversation_id: orderedConversationIds },
       include: [
         {
           model: Conversation,
@@ -538,11 +605,15 @@ router.get('/conversations', authenticateToken, denySuspended, async (req, res) 
             }
           ]
         }
-      ],
-      order: [['updated_at', 'DESC']]
+      ]
     });
 
-    const data = memberships.map((m) => {
+    const membershipByConvId = new Map(memberships.map((m) => [String(m.conversation_id), m]));
+    const orderedMemberships = orderedConversationIds
+      .map((id) => membershipByConvId.get(String(id)))
+      .filter(Boolean);
+
+    const data = orderedMemberships.map((m) => {
       const conv = m.conversation;
       const invitation = getInvitationMeta(conv);
       const groupInvitation = conv.type === 'group' ? getGroupInvitationForUser(conv, userId) : null;
@@ -586,7 +657,11 @@ router.get('/conversations', authenticateToken, denySuspended, async (req, res) 
       };
     }).filter(Boolean);
 
-    return res.json({ success: true, conversations: data });
+    return res.json({
+      success: true,
+      conversations: data,
+      pagination: { limit, offset, hasMore: membershipPage.length === limit }
+    });
   } catch (error) {
     logger.error('❌ Erreur liste conversations:', error);
     return res.status(500).json({ success: false, message: 'Erreur serveur' });
@@ -594,39 +669,46 @@ router.get('/conversations', authenticateToken, denySuspended, async (req, res) 
 });
 
 router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res) => {
-  const tx = await sequelize.transaction();
+  // Ouverte plus bas, après les contrôles d'accès (AUDIT B1-03) : peut donc
+  // rester `undefined` si une des validations précoces échoue.
+  let tx;
   try {
     const currentUserId = req.user.id;
     const otherUserId = req.params.userId;
     const content = String(req.body?.content || '').trim();
     if (!content) {
-      await tx.rollback();
       return res.status(400).json({ success: false, message: 'Message vide' });
     }
     if (!req.user?.verified && content.length > 3000) {
-      await tx.rollback();
       return res.status(400).json({ success: false, message: 'Message trop long (max 3000 caractères)' });
     }
     if (currentUserId === otherUserId) {
-      await tx.rollback();
       return res.status(400).json({ success: false, message: 'Conversation invalide' });
     }
 
-    const otherUser = await User.findByPk(otherUserId, { transaction: tx });
+    const otherUser = await User.findByPk(otherUserId);
     if (!otherUser) {
-      await tx.rollback();
       return res.status(404).json({ success: false, message: 'Utilisateur introuvable' });
     }
 
+    // AUDIT B1-03 (2026-08-19), ÉLEVÉ : ces deux contrôles ne modifient rien
+    // et n'ont pas besoin d'être atomiques avec la création de la
+    // conversation — ils empruntaient jusqu'à 3 connexions SUPPLÉMENTAIRES
+    // au pool pendant qu'une transaction était déjà ouverte (jusqu'à 6
+    // requêtes pour `canOpenDirectWithoutInvitation` seul, dont 2 en
+    // parallèle). Sortis d'ici, avant l'ouverture de `tx` : même discipline
+    // que `economy/ledger.js` (l'autorisation avant le verrou).
+    //
     // Compte privé : refus SEC, pas une invitation en attente. Une invitation
     // reste un message qui arrive chez la personne — c'est exactement ce
     // qu'elle a fermé en passant son compte en privé.
     const privateGate = await canContactPrivateRecipient(currentUserId, otherUserId);
     if (!privateGate.allowed) {
-      await tx.rollback();
       return res.status(403).json({ success: false, message: privateGate.reason });
     }
+    const allowedWithoutInvitation = await canOpenDirectWithoutInvitation(currentUserId, otherUserId);
 
+    tx = await sequelize.transaction();
     let messageMetadata = {};
     let messagePreview = content;
     const storyId = String(req.body?.story_id || req.body?.storyId || '').trim();
@@ -655,7 +737,6 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
     const existing = await findExactDirectConversation(currentUserId, otherUserId, tx);
 
     let conversation = null;
-    const allowedWithoutInvitation = await canOpenDirectWithoutInvitation(currentUserId, otherUserId);
 
     if (existing) {
       conversation = existing;
@@ -811,7 +892,7 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
     });
     return res.status(201).json({ success: true, conversation_id: conversation.id, message });
   } catch (error) {
-    await tx.rollback();
+    if (tx) await tx.rollback();
     logger.error('❌ Erreur create direct message:', error);
     return res.status(500).json({ success: false, message: 'Erreur serveur' });
   }
@@ -830,6 +911,13 @@ router.post('/groups', authenticateToken, denySuspended, async (req, res) => {
       await tx.rollback();
       return res.status(400).json({ success: false, message: 'Au moins 2 participants requis' });
     }
+    // AUDIT B1-06(a) : `participantIds` n'était borné par rien, ce qui fixait
+    // le nombre de requêtes séquentielles (et la durée de la transaction) sur
+    // la taille du tableau envoyé par le client.
+    if (uniqueParticipants.length > 50) {
+      await tx.rollback();
+      return res.status(400).json({ success: false, message: '50 participants maximum' });
+    }
 
     const users = await User.findAll({
       where: { id: { [Op.in]: uniqueParticipants } },
@@ -841,11 +929,24 @@ router.post('/groups', authenticateToken, denySuspended, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Participants invalides' });
     }
 
+    // AUDIT B1-06(a) : une seule requête (dans `tx`) remplace N appels
+    // séquentiels à `UserFollow.isFollowing`, chacun empruntant auparavant sa
+    // propre connexion hors transaction pendant que `tx` en détenait déjà une.
+    const followersOfCreator = await UserFollow.findAll({
+      where: {
+        follower_id: { [Op.in]: uniqueParticipants },
+        following_id: userId,
+        status: 'active'
+      },
+      attributes: ['follower_id'],
+      transaction: tx
+    });
+    const followsCreatorSet = new Set(followersOfCreator.map((f) => String(f.follower_id)));
+
     const groupInvitations = {};
     for (const pid of uniqueParticipants) {
       if (sameId(pid, userId)) continue;
-      const followsCreator = await UserFollow.isFollowing(pid, userId);
-      if (!followsCreator) {
+      if (!followsCreatorSet.has(String(pid))) {
         groupInvitations[String(pid)] = {
           status: 'pending',
           invited_by: userId,
@@ -955,7 +1056,7 @@ router.post('/conversations/:conversationId/participants', authenticateToken, de
       return res.status(400).json({ success: false, message: 'Utilisateur cible requis' });
     }
 
-    const me = await requireMembership(conversationId, userId);
+    const me = await requireMembership(conversationId, userId, tx);
     if (!me) {
       await tx.rollback();
       return res.status(403).json({ success: false, message: 'Accès refusé' });
@@ -999,7 +1100,7 @@ router.post('/conversations/:conversationId/participants', authenticateToken, de
       }, { transaction: tx });
     }
 
-    const followsOwner = await UserFollow.isFollowing(targetUserId, userId);
+    const followsOwner = await UserFollow.isFollowing(targetUserId, userId, tx);
     const invites = { ...((conv.metadata || {}).group_invitations || {}) };
     invites[String(targetUserId)] = {
       status: followsOwner ? 'accepted' : 'pending',
@@ -1215,8 +1316,12 @@ router.post('/conversations/:conversationId/members', authenticateToken, denySus
       await tx.rollback();
       return res.status(400).json({ success: false, message: 'Aucun membre à ajouter' });
     }
+    if (memberIds.length > 50) {
+      await tx.rollback();
+      return res.status(400).json({ success: false, message: '50 membres maximum par appel' });
+    }
 
-    const rights = await requireGroupManagementRights(conversationId, userId);
+    const rights = await requireGroupManagementRights(conversationId, userId, tx);
     if (!rights.ok) {
       await tx.rollback();
       return res.status(403).json({ success: false, message: 'Action non autorisée' });
@@ -1252,10 +1357,24 @@ router.post('/conversations/:conversationId/members', authenticateToken, denySus
       { transaction: tx }
     );
 
+    // Une seule requête (dans `tx`) plutôt qu'un `isFollowing` par membre
+    // (même défaut que B1-06(a) : chaque appel empruntait une connexion hors
+    // transaction, en série, pendant que `tx` en détenait déjà une).
+    const managerFollowers = await UserFollow.findAll({
+      where: {
+        follower_id: { [Op.in]: validIds },
+        following_id: userId,
+        status: 'active'
+      },
+      attributes: ['follower_id'],
+      transaction: tx
+    });
+    const followsManagerSet = new Set(managerFollowers.map((f) => String(f.follower_id)));
+
     const groupInvitations = { ...((conversation.metadata || {}).group_invitations || {}) };
     let invitations = 0;
     for (const targetId of validIds) {
-      const followsManager = await UserFollow.isFollowing(targetId, userId);
+      const followsManager = followsManagerSet.has(String(targetId));
       if (!followsManager) {
         invitations += 1;
         groupInvitations[String(targetId)] = {
@@ -1350,7 +1469,7 @@ router.post('/conversations/:conversationId/members/:memberId/role', authenticat
       return res.status(400).json({ success: false, message: 'Role invalide' });
     }
 
-    const rights = await requireGroupManagementRights(conversationId, userId);
+    const rights = await requireGroupManagementRights(conversationId, userId, tx);
     if (!rights.ok) {
       await tx.rollback();
       return res.status(403).json({ success: false, message: 'Action non autorisée' });
@@ -1385,7 +1504,7 @@ router.post('/conversations/:conversationId/members/:memberId/ban', authenticate
     const conversationId = req.params.conversationId;
     const memberId = req.params.memberId;
 
-    const rights = await requireGroupManagementRights(conversationId, userId);
+    const rights = await requireGroupManagementRights(conversationId, userId, tx);
     if (!rights.ok) {
       await tx.rollback();
       return res.status(403).json({ success: false, message: 'Action non autorisée' });
@@ -1841,8 +1960,45 @@ router.post('/conversations/:conversationId/read', authenticateToken, denySuspen
 router.get('/invitations', authenticateToken, denySuspended, async (req, res) => {
   try {
     const userId = req.user.id;
+
+    // AUDIT R3-04 (2026-08-19) : l'ancienne version chargeait TOUTE la
+    // messagerie de l'utilisateur (toutes ses conversations, tous leurs
+    // participants, tous leurs profils), sans aucun filtre SQL ni
+    // pagination, pour n'en garder — dans le cas normal — aucune ou une
+    // poignée. Le statut d'invitation vit dans `conversations.metadata`
+    // (JSONB) : filtré ici directement en SQL, avant tout JOIN sur
+    // `participants`. Le filtrage JS ci-dessous (`getInvitationMeta` /
+    // `getGroupInvitationForUser`) reste la source de vérité et n'est pas
+    // retiré : ce pré-filtre ne fait que réduire le volume chargé, il ne
+    // remplace pas la logique d'éligibilité existante.
+    const invitationRows = await sequelize.query(`
+      SELECT DISTINCT c.id
+      FROM conversation_participants cp
+      JOIN conversations c ON c.id = cp.conversation_id
+      WHERE cp.user_id = :userId
+        AND (
+          (c.type = 'direct'
+            AND c.metadata->>'invitation_status' = 'pending'
+            AND c.metadata->>'invitation_to' = :userId)
+          OR
+          (c.type = 'group'
+            AND c.metadata->'group_invitations'->:userId->>'status' = 'pending')
+        )
+      ORDER BY c.id
+      LIMIT 50
+    `, {
+      replacements: { userId: String(userId) },
+      type: sequelize.QueryTypes.SELECT
+    });
+
+    const invitationConvIds = invitationRows.map((r) => String(r.id));
+
+    if (invitationConvIds.length === 0) {
+      return res.json({ success: true, invitations: [] });
+    }
+
     const memberships = await ConversationParticipant.findAll({
-      where: { user_id: userId },
+      where: { user_id: userId, conversation_id: invitationConvIds },
       include: [{
         model: Conversation,
         as: 'conversation',

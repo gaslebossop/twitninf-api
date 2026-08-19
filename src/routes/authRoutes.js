@@ -1,6 +1,7 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const authController = require('../controllers/authController');
+const logger = require('../utils/logger');
 const { 
   authenticateToken, 
   requireVerified, 
@@ -280,7 +281,7 @@ router.post('/login', loginValidation, checkLogin(), async (req, res, next) => {
       });
     }
   } catch (error) {
-    console.error('❌ Erreur lors de la vérification du ban:', error);
+    logger.error('❌ Erreur lors de la vérification du ban:', error);
     return res.status(500).json({
       success: false,
       message: 'Erreur lors de la vérification du compte'

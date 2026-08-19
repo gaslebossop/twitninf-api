@@ -114,40 +114,26 @@ router.post('/', authenticateToken, async (req, res) => {
 
 /**
  * PUT /api/user-challenges/:challengeId/progress
- * Mettre à jour la progression d'un défi
+ *
+ * AUDIT S3 (2026-08-19), CRITIQUE — désactivée. `progress` était accepté tel
+ * quel depuis le client, sans aucun recalcul serveur à partir d'une activité
+ * réelle. Cet état forgeable était ensuite lu par `/claim` (completed) puis
+ * par `/claim-special-reward` (completed ET claimed) pour attribuer un objet
+ * exclusif à stock limité (« Badge Verifie Rose ») : n'importe quel compte
+ * pouvait se déclarer complet sans avoir rien fait.
+ *
+ * Non utilisée par l'app mobile (vérifié : `updateChallengeProgress` du hook
+ * `useUserChallenges` n'est appelée par aucun écran) — la vraie progression
+ * passe par `/update-progress`, `/update-likes-progress`,
+ * `/update-tweets-progress` et `/complete-birthday-wish`, qui recalculent
+ * depuis l'activité réelle via `ChallengeProgressService`. Ne pas réactiver
+ * sans un recalcul serveur équivalent.
  */
 router.put('/:challengeId/progress', authenticateToken, async (req, res) => {
-  try {
-    const { challengeId } = req.params;
-    const { event_slug, progress } = req.body;
-    const userId = req.user.id;
-
-    if (!event_slug || progress === undefined) {
-      return res.status(400).json({
-        success: false,
-        message: 'event_slug et progress sont requis',
-      });
-    }
-
-    const challenge = await UserChallenge.updateChallengeProgress(
-      userId,
-      challengeId,
-      event_slug,
-      progress
-    );
-
-    res.json({
-      success: true,
-      data: challenge,
-    });
-  } catch (error) {
-    logger.error('Erreur lors de la mise à jour de la progression:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Erreur lors de la mise à jour de la progression',
-      error: error.message,
-    });
-  }
+  return res.status(410).json({
+    success: false,
+    message: 'Mise à jour manuelle de la progression désactivée.',
+  });
 });
 
 /**

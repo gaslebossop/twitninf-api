@@ -3,6 +3,7 @@ const { body, param, query, validationResult } = require('express-validator');
 const router = express.Router();
 const path = require('path');
 const multer = require('multer');
+const axios = require('axios');
 
 // Import des modèles et services
 const { Tweet, TweetLike, TweetRetweet, User, Notification } = require('../models');
@@ -15,6 +16,7 @@ const { authenticateToken, denySuspended } = require('../middleware/authMiddlewa
 const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
 const { ultraSafeClean } = require('../utils/circularRefCleaner');
 const { engagementTargetId, resolveEngagementTarget } = require('../utils/engagementTarget');
+const { stripInternalTweetFields } = require('../utils/stripInternalTweetFields');
 const { assertTweetLength } = require('../utils/tweetLimits');
 const tweetTranslationService = require('../services/tweetTranslationService');
 const spotifyService = require('../services/spotifyService');
@@ -237,52 +239,56 @@ async (req, res) => {
             const dbMap = {};
             for (const v of dbVideos) dbMap[v.id] = v;
 
-            const enrichedVideos = [];
+            // AUDIT R1-07 (2026-08-19) : 6 requêtes par vidéo (jusqu'à 600 si
+            // `limit=100`, la validation le permettait) — regroupées comme en
+            // R1-01/R1-02, mêmes helpers.
+            const preparedVideos = [];
             for (const r of recommendations) {
               const dbVideo = dbMap[r.videoId];
-              if (dbVideo) {
-                const videoData = dbVideo.toJSON();
-                const vId = dbVideo.id;
-
-                // Calculer les stats fraîches depuis la DB
-                const [lCount, rtCount, repCount] = await Promise.all([
-                  TweetLike.countTweetLikes(vId).catch(() => 0),
-                  TweetRetweet.countTweetRetweets(vId).catch(() => 0),
-                  Tweet.count({ where: { parent_tweet_id: vId, is_data_test: false } }).catch(() => 0)
-                ]);
-
-                // Construct standard tweet structure for the app
-                videoData.stats = {
-                  likes: lCount,
-                  retweets: rtCount,
-                  replies: repCount,
-                  views: videoData.view_count || 0
-                };
-
-                // Interaction flags (check DB for absolute accuracy)
-                const [isLiked, isRetweeted] = await Promise.all([
-                  TweetLike.hasUserLikedTweet(userId, vId).catch(() => false),
-                  TweetRetweet.hasUserRetweetedTweet(userId, vId).catch(() => false)
-                ]);
-
-                videoData.user_interaction = {
-                  is_liked: isLiked,
-                  is_retweeted: isRetweeted,
-                  is_seen: r.is_seen
-                };
-
-                // Legacy root-level fields for backward compatibility
-                videoData.like_count = lCount;
-                videoData.retweet_count = rtCount;
-                videoData.reply_count = repCount;
-                videoData.is_liked = isLiked;
-                videoData.is_retweeted = isRetweeted;
-                videoData.ai_score = r.ai_score;
-                videoData.primary_signal = r.primary_signal;
-
-                enrichedVideos.push(videoData);
-              }
+              if (dbVideo) preparedVideos.push({ videoData: dbVideo.toJSON(), vId: String(dbVideo.id), r });
             }
+
+            const videoStatsIds = preparedVideos.map(({ vId }) => vId);
+            const [vLikes, vRts, vReplies, vLiked, vRetweeted] = await Promise.all([
+              TweetLike.countLikesForTweets(videoStatsIds),
+              TweetRetweet.countRetweetsForTweets(videoStatsIds),
+              Tweet.countRepliesForTweets(videoStatsIds),
+              TweetLike.likedTweetIdsForUser(userId, videoStatsIds),
+              TweetRetweet.retweetedTweetIdsForUser(userId, videoStatsIds),
+            ]);
+
+            const enrichedVideos = preparedVideos.map(({ videoData, vId, r }) => {
+              const lCount = vLikes.get(vId) || 0;
+              const rtCount = vRts.get(vId) || 0;
+              const repCount = vReplies.get(vId) || 0;
+              const isLiked = vLiked.has(vId);
+              const isRetweeted = vRetweeted.has(vId);
+
+              // Construct standard tweet structure for the app
+              videoData.stats = {
+                likes: lCount,
+                retweets: rtCount,
+                replies: repCount,
+                views: videoData.view_count || 0
+              };
+
+              videoData.user_interaction = {
+                is_liked: isLiked,
+                is_retweeted: isRetweeted,
+                is_seen: r.is_seen
+              };
+
+              // Legacy root-level fields for backward compatibility
+              videoData.like_count = lCount;
+              videoData.retweet_count = rtCount;
+              videoData.reply_count = repCount;
+              videoData.is_liked = isLiked;
+              videoData.is_retweeted = isRetweeted;
+              videoData.ai_score = r.ai_score;
+              videoData.primary_signal = r.primary_signal;
+
+              return videoData;
+            });
 
             await paidContentService.maskTweets(enrichedVideos, userId);
 
@@ -353,12 +359,15 @@ async (req, res) => {
             const dbTweetsMap = {};
             for (const t of dbTweets) dbTweetsMap[t.id] = t;
 
-            const enrichedTweets = [];
-
+            // AUDIT R1-01 (2026-08-19) : 5 requêtes SÉQUENTIELLES par tweet
+            // (≈501 allers-retours pour une page de 100) remplacées par les
+            // helpers groupés déjà utilisés en R1-01/ancêtres plus bas dans
+            // ce fichier (:834, :898) — même motif, 501 → 6.
+            const preparedTweets = [];
             for (const r of recommendations) {
               const dbTweet = dbTweetsMap[r.tweetId];
               if (dbTweet) {
-                const tweetData = dbTweet.toJSON();
+                const tweetData = stripInternalTweetFields(dbTweet.toJSON());
 
                 // Si ce n'est pas une citation ou un retweet, on ne veut pas l'aspect "citation" ou "réponse à" dans le fil
                 if (!tweetData.is_quote && !tweetData.is_retweet) {
@@ -368,42 +377,54 @@ async (req, res) => {
                   tweetData.parentTweet = null;
                 }
 
-                // Calcul des stats (peut être optimisé plus tard via caching).
-                // Un retweet pur emprunte les compteurs de son original.
-                const sId = engagementTargetId(tweetData);
-                const ownStats = sId === String(tweetData.id);
-                const lCount = await TweetLike.countTweetLikes(sId);
-                const rtCount = await TweetRetweet.countTweetRetweets(sId);
-                const repCount = await Tweet.count({ where: { parent_tweet_id: sId, is_data_test: false } });
-                const iLiked = await TweetLike.hasUserLikedTweet(userId, sId);
-                const iRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, sId);
-
-                tweetData.stats = {
-                  likes: lCount,
-                  retweets: rtCount,
-                  replies: repCount,
-                  views: (ownStats ? tweetData.view_count : tweetData.originalTweet?.view_count) || 0
-                };
-
-                tweetData.user_interaction = {
-                  is_liked: iLiked,
-                  is_retweeted: iRetweeted
-                };
-
-                // Champs plats pour compatibilité mobile
-                tweetData.like_count = lCount;
-                tweetData.retweet_count = rtCount;
-                tweetData.reply_count = repCount;
-                tweetData.is_liked = iLiked;
-                tweetData.is_retweeted = iRetweeted;
-
-                // Inclure les infos de debug (score, freshness, collab, etc.)
-                tweetData.ai_score = r.score;
-                tweetData.similarity_components = r.components;
-
-                enrichedTweets.push(tweetData);
+                preparedTweets.push({ tweetData, r });
               }
             }
+
+            const statsIds = preparedTweets.map(({ tweetData }) => String(engagementTargetId(tweetData)));
+            const [likesMap, rtMap, repliesMap, likedSet, rtSet] = await Promise.all([
+              TweetLike.countLikesForTweets(statsIds),
+              TweetRetweet.countRetweetsForTweets(statsIds),
+              Tweet.countRepliesForTweets(statsIds),
+              TweetLike.likedTweetIdsForUser(userId, statsIds),
+              TweetRetweet.retweetedTweetIdsForUser(userId, statsIds),
+            ]);
+
+            const enrichedTweets = preparedTweets.map(({ tweetData, r }) => {
+              // Un retweet pur emprunte les compteurs de son original.
+              const sId = String(engagementTargetId(tweetData));
+              const ownStats = sId === String(tweetData.id);
+              const lCount = likesMap.get(sId) || 0;
+              const rtCount = rtMap.get(sId) || 0;
+              const repCount = repliesMap.get(sId) || 0;
+              const iLiked = likedSet.has(sId);
+              const iRetweeted = rtSet.has(sId);
+
+              tweetData.stats = {
+                likes: lCount,
+                retweets: rtCount,
+                replies: repCount,
+                views: (ownStats ? tweetData.view_count : tweetData.originalTweet?.view_count) || 0
+              };
+
+              tweetData.user_interaction = {
+                is_liked: iLiked,
+                is_retweeted: iRetweeted
+              };
+
+              // Champs plats pour compatibilité mobile
+              tweetData.like_count = lCount;
+              tweetData.retweet_count = rtCount;
+              tweetData.reply_count = repCount;
+              tweetData.is_liked = iLiked;
+              tweetData.is_retweeted = iRetweeted;
+
+              // Inclure les infos de debug (score, freshness, collab, etc.)
+              tweetData.ai_score = r.score;
+              tweetData.similarity_components = r.components;
+
+              return tweetData;
+            });
 
             // --- 🎯 INJECTION PUBLICITAIRE CIBLÉE I.A ---
             try {
@@ -510,7 +531,14 @@ async (req, res) => {
       orderClause = [['created_at', 'DESC']];
     }
 
-    const tweets = await Tweet.findAll({
+    // AUDIT R2-03 (2026-08-19) : le `COUNT(*)` de pagination plus bas portait
+    // sur le même prédicat que ce `findAll` — donc juste, mais quasiment la
+    // table entière (is_private/is_data_test/deleted_at/moderation_status +
+    // le `OR` de type), sur la route la plus appelée de l'API, à chaque
+    // page. `limit + 1` donne `hasMore` sans requête supplémentaire ; `total`
+    // n'était de toute façon lu par aucun écran côté app (vérifié).
+    const requestedLimit = parseInt(limit);
+    const rawTweets = await Tweet.findAll({
       where: whereClause,
       include: [
         {
@@ -530,16 +558,20 @@ async (req, res) => {
         }
       ],
       order: orderClause,
-      limit: parseInt(limit),
+      limit: requestedLimit + 1,
       offset: parseInt(offset)
     });
+    const hasMore = rawTweets.length > requestedLimit;
+    const tweets = rawTweets.slice(0, requestedLimit);
 
     // Récupérer l'ID de l'utilisateur connecté (obligatoire maintenant)
     const userId = req.user.id;
 
-    // Enrichir les tweets avec les statistiques et l'état des likes
-    const enrichedTweets = await Promise.all(tweets.map(async (tweet) => {
-      const tweetData = tweet.toJSON();
+    // AUDIT R1-02 (2026-08-19) : ~500 requêtes déferlant d'un coup sur un pool
+    // de 10 connexions (5 par tweet × 100), remplacées par les mêmes helpers
+    // groupés qu'en R1-01. 501 → 6.
+    const preparedTweets = tweets.map((tweet) => {
+      const tweetData = stripInternalTweetFields(tweet.toJSON());
 
       // Si ce n'est pas une citation ou un retweet, on ne veut pas l'aspect "citation" ou "réponse à" dans le fil
       if (!tweetData.is_quote && !tweetData.is_retweet) {
@@ -549,36 +581,38 @@ async (req, res) => {
         tweetData.parentTweet = null;
       }
 
+      return { tweet, tweetData };
+    });
+
+    const classicStatsIds = preparedTweets.map(({ tweetData }) => String(engagementTargetId(tweetData)));
+    const [classicLikes, classicRts, classicReplies, classicLiked, classicRetweeted] = await Promise.all([
+      TweetLike.countLikesForTweets(classicStatsIds),
+      TweetRetweet.countRetweetsForTweets(classicStatsIds),
+      Tweet.countRepliesForTweets(classicStatsIds),
+      TweetLike.likedTweetIdsForUser(userId, classicStatsIds),
+      TweetRetweet.retweetedTweetIdsForUser(userId, classicStatsIds),
+    ]);
+
+    const enrichedTweets = preparedTweets.map(({ tweet, tweetData }) => {
       // Un retweet pur ne porte aucun engagement propre : ses compteurs et
       // l'état d'interaction sont ceux du tweet d'origine.
-      const statsId = engagementTargetId(tweetData);
+      const statsId = String(engagementTargetId(tweetData));
       const isOwnStats = statsId === String(tweet.id);
-
-      // Calculer les statistiques
-      const likeCount = await TweetLike.countTweetLikes(statsId);
-      const retweetCount = await TweetRetweet.countTweetRetweets(statsId);
-      const replyCount = await Tweet.count({
-        where: { parent_tweet_id: statsId, is_data_test: false }
-      });
-
-      // Vérifier si l'utilisateur connecté a liké/retweeté ce tweet (obligatoire)
-      const isLiked = await TweetLike.hasUserLikedTweet(userId, statsId);
-      const isRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, statsId);
 
       return {
         ...tweetData,
         stats: {
-          likes: likeCount,
-          retweets: retweetCount,
-          replies: replyCount,
+          likes: classicLikes.get(statsId) || 0,
+          retweets: classicRts.get(statsId) || 0,
+          replies: classicReplies.get(statsId) || 0,
           views: (isOwnStats ? tweet.view_count : tweetData.originalTweet?.view_count) || 0
         },
         user_interaction: {
-          is_liked: isLiked,
-          is_retweeted: isRetweeted
+          is_liked: classicLiked.has(statsId),
+          is_retweeted: classicRetweeted.has(statsId)
         }
       };
-    }));
+    });
 
     // --- 🎯 INJECTION PUBLICITAIRE CIBLÉE I.A CLASSIQUE ---
     try {
@@ -619,11 +653,6 @@ async (req, res) => {
       logger.error('Erreur injection pubs dans classic:', e);
     }
 
-    // Compter le total pour la pagination en utilisant EXACTEMENT la même clause WHERE
-    const totalCount = await Tweet.count({
-      where: whereClause
-    });
-
     // Contenus payants : dernière étape avant l'envoi, volontairement.
     // C'est le seul point par lequel passent TOUTES les listes, quel que soit
     // le moteur de recommandation qui les a construites ; masquer plus haut
@@ -644,10 +673,9 @@ async (req, res) => {
       data: {
         tweets: enrichedTweets,
         pagination: {
-          total: totalCount,
-          limit: parseInt(limit),
+          limit: requestedLimit,
           offset: parseInt(offset),
-          hasMore: offset + enrichedTweets.length < totalCount
+          hasMore
         }
       }
     });
@@ -774,7 +802,7 @@ router.get('/:id', [
 
     // Enrichir avec statistiques et état d'interaction pour l'utilisateur courant
     const userId = req.user?.id;
-    let enrichedTweet = tweet.toJSON();
+    let enrichedTweet = stripInternalTweetFields(tweet.toJSON());
 
     // Sur un retweet pur, l'engagement appartient au tweet d'origine.
     const statsId = engagementTargetId(enrichedTweet);
@@ -860,37 +888,67 @@ router.get('/:id', [
     // direct. La relation Sequelize `parentTweet` ne contient qu'un niveau :
     // sans cette remontee, ouvrir une reponse isolait le message et cassait la
     // lecture naturelle d'un thread.
-    const ancestorInstances = [];
-    const seenAncestorIds = new Set([String(enrichedTweet.id)]);
-    let nextParentId = enrichedTweet.parent_tweet_id;
+    //
+    // AUDIT R1-09 (2026-08-19) : l'ancienne version remontait un niveau par
+    // aller-retour (jusqu'à 50 `SELECT` strictement séquentiels sur un fil
+    // profond). Une CTE récursive ramène en une seule requête la liste
+    // ordonnée des identifiants valides — mêmes filtres qu'avant (compte non
+    // privé, modération non rejetée) appliqués À CHAQUE NIVEAU de la
+    // récursion, donc la remontée s'arrête bien dès qu'un ancêtre échoue à
+    // ces filtres, exactement comme le `break` de l'ancienne boucle (les
+    // ancêtres au-delà ne sont plus atteignables une fois la chaîne coupée).
+    // `depth < 50` reproduit le même garde-fou de profondeur, qui protège
+    // aussi contre un cycle de données corrompu.
+    let ancestorsData = [];
+    const rootParentId = enrichedTweet.parent_tweet_id;
 
-    while (nextParentId && ancestorInstances.length < 50) {
-      const normalizedParentId = String(nextParentId);
-      if (seenAncestorIds.has(normalizedParentId)) break;
-      seenAncestorIds.add(normalizedParentId);
-
-      const ancestor = await Tweet.findOne({
-        where: {
-          id: normalizedParentId,
-          is_private: false,
-          moderation_status: { [Op.notIn]: ['not_eligible', 'rejected'] }
-        },
-        include: [{
-          model: User,
-          as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
-        }]
+    if (rootParentId) {
+      const ancestorIdRows = await sequelize.query(`
+        WITH RECURSIVE ancestor_chain AS (
+          SELECT id, parent_tweet_id, 1 AS depth
+          FROM tweets
+          WHERE id = :rootParentId
+            AND is_private = false
+            AND moderation_status NOT IN ('not_eligible', 'rejected')
+          UNION ALL
+          SELECT t.id, t.parent_tweet_id, ac.depth + 1
+          FROM tweets t
+          JOIN ancestor_chain ac ON t.id = ac.parent_tweet_id
+          WHERE t.is_private = false
+            AND t.moderation_status NOT IN ('not_eligible', 'rejected')
+            AND ac.depth < 50
+        )
+        SELECT id FROM ancestor_chain ORDER BY depth DESC
+      `, {
+        replacements: { rootParentId: String(rootParentId) },
+        type: sequelize.QueryTypes.SELECT
       });
 
-      if (!ancestor) break;
-      ancestorInstances.push(ancestor);
-      nextParentId = ancestor.parent_tweet_id;
+      const orderedIds = ancestorIdRows.map((r) => String(r.id));
+
+      if (orderedIds.length > 0) {
+        // Un seul findAll groupé, comme pour les réponses juste au-dessus,
+        // puis réordonné en mémoire selon l'ordre racine → parent direct
+        // rendu par la CTE (findAll ne garantit pas l'ordre du IN).
+        const ancestorInstances = await Tweet.findAll({
+          where: { id: orderedIds },
+          include: [{
+            model: User,
+            as: 'author',
+            attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'premium', 'subscription_tier', 'profile_customization']
+          }]
+        });
+        const ancestorById = new Map(ancestorInstances.map((a) => [String(a.id), a]));
+        ancestorsData = orderedIds
+          .map((id) => ancestorById.get(id))
+          .filter(Boolean)
+          .map((a) => stripInternalTweetFields(a.toJSON()));
+      }
     }
 
     // Même regroupement que pour les réponses : cinq requêtes pour toute la
     // chaîne, au lieu de cinq par ancêtre. Sur un fil profond, c'était la
     // seconde source d'allers-retours après les réponses.
-    const ancestorsData = ancestorInstances.reverse().map((a) => a.toJSON());
     const ancestorStatsIds = ancestorsData.map((a) => String(engagementTargetId(a)));
 
     if (ancestorsData.length > 0) {
@@ -1079,35 +1137,35 @@ router.get('/:id/similar', [
       logger.info(`⚡ [Similar] Aucun match sémantique fort, fallback sur les plus récents`);
     }
 
-    // 4. Enrichir les tweets sélectionnés (stats + interaction)
-    const enrichedTweets = await Promise.all(similarTweets.map(async (tweet) => {
-      const tweetData = tweet.toJSON();
-      
-      const [lCount, rtCount, repCount] = await Promise.all([
-        TweetLike.countTweetLikes(tweet.id).catch(() => 0),
-        TweetRetweet.countTweetRetweets(tweet.id).catch(() => 0),
-        Tweet.count({ where: { parent_tweet_id: tweet.id, is_data_test: false } }).catch(() => 0)
-      ]);
+    // AUDIT R1-06 (2026-08-19) : 5 requêtes par tweet similaire, en 2 vagues
+    // séquentielles — regroupées comme dans le reste du fichier.
+    const similarIds = similarTweets.map((tweet) => String(tweet.id));
+    const [simLikes, simRts, simReplies, simLiked, simRetweeted] = await Promise.all([
+      TweetLike.countLikesForTweets(similarIds),
+      TweetRetweet.countRetweetsForTweets(similarIds),
+      Tweet.countRepliesForTweets(similarIds),
+      TweetLike.likedTweetIdsForUser(userId, similarIds),
+      TweetRetweet.retweetedTweetIdsForUser(userId, similarIds),
+    ]);
 
-      const [isLiked, isRetweeted] = await Promise.all([
-        TweetLike.hasUserLikedTweet(userId, tweet.id).catch(() => false),
-        TweetRetweet.hasUserRetweetedTweet(userId, tweet.id).catch(() => false)
-      ]);
+    const enrichedTweets = similarTweets.map((tweet) => {
+      const tweetData = tweet.toJSON();
+      const tid = String(tweet.id);
 
       tweetData.stats = {
-        likes: lCount,
-        retweets: rtCount,
-        replies: repCount,
+        likes: simLikes.get(tid) || 0,
+        retweets: simRts.get(tid) || 0,
+        replies: simReplies.get(tid) || 0,
         views: tweetData.view_count || 0
       };
 
       tweetData.user_interaction = {
-        is_liked: isLiked,
-        is_retweeted: isRetweeted
+        is_liked: simLiked.has(tid),
+        is_retweeted: simRetweeted.has(tid)
       };
 
       return tweetData;
-    }));
+    });
 
     const similarPage = enrichedTweets.slice(0, 3);
     if (!(await paidContentService.maskTweetsOrFail(similarPage, userId, res))) return;
@@ -1600,32 +1658,67 @@ router.post('/', [
               if (!isOriginalTweet) {
                 logger.info(`Fanout followers ignoré (non original): tweet ${tweet.id}`);
               } else {
-                const followers = await User.sequelize.models.UserFollow.findAll({
-                  where: { following_id: userId, status: 'active' },
-                  attributes: ['follower_id']
+                // AUDIT R3-07 (2026-08-19) : l'ancienne version chargeait TOUS
+                // les abonnés en mémoire (aucune limite), rechargeait leurs
+                // profils via un `IN (...)` de la même taille, puis créait
+                // une notification PAR ABONNÉ en série (`await` dans un
+                // `for`, chacune rouvrant en plus une lecture de l'abonné
+                // pour son push). À 200 000 abonnés : ~200 000 lignes lues
+                // deux fois, ~200 000 `INSERT` l'un après l'autre — plus
+                // d'une heure, une connexion du pool occupée du début à la
+                // fin. Le `SELECT DISTINCT ON` fait en une requête la
+                // jointure et la déduplication par token (même sémantique
+                // qu'avant : un seul destinataire retenu par token
+                // identique, les abonnés sans token enregistré sont
+                // ignorés), et un unique `bulkCreate` remplace la boucle
+                // d'`INSERT`.
+                const recipientRows = await sequelize.query(`
+                  SELECT DISTINCT ON (u.id_notif) uf.follower_id AS recipient_id, u.id_notif
+                  FROM user_follows uf
+                  JOIN users u ON u.id = uf.follower_id
+                  WHERE uf.following_id = :authorId
+                    AND uf.status = 'active'
+                    AND u.id_notif IS NOT NULL
+                  ORDER BY u.id_notif, uf.follower_id
+                `, {
+                  replacements: { authorId: String(userId) },
+                  type: sequelize.QueryTypes.SELECT
                 });
-                if (Array.isArray(followers) && followers.length > 0) {
-                  const followerIds = followers.map(f => f.follower_id);
-                  const recipients = await User.findAll({
-                    where: { id: followerIds },
-                    attributes: ['id', 'id_notif']
-                  });
-                  // Dédupliquer par token pour éviter plusieurs notifs par même device
-                  const seenTokens = new Set();
-                  for (const r of recipients) {
-                    const token = r && r.id_notif;
-                    if (!token) continue;
-                    if (seenTokens.has(token)) continue;
-                    seenTokens.add(token);
-                    await Notification.createNotification({
-                      recipient_id: r.id,
-                      sender_id: userId,
-                      tweet_id: tweet.id,
-                      type: 'system',
-                      title: `@${author.username} a publié un nouveau tweet`,
-                      message: 'Nouveau tweet',
-                      _skip_push: false // push auto dans model Notification
-                    });
+
+                if (recipientRows.length > 0) {
+                  const fanoutTitle = `@${author.username} a publié un nouveau tweet`;
+                  const now = new Date();
+                  await Notification.bulkCreate(recipientRows.map((r) => ({
+                    recipient_id: r.recipient_id,
+                    sender_id: userId,
+                    tweet_id: tweet.id,
+                    type: 'system',
+                    title: fanoutTitle,
+                    message: 'Nouveau tweet',
+                    created_at: now,
+                    updated_at: now
+                  })));
+
+                  // Push envoyés par lots de 100 (limite documentée de l'API
+                  // Expo pour un body en tableau) au lieu d'un appel réseau
+                  // par abonné — le seul rapport gain/effort qui vaille la
+                  // peine ici sans introduire de file d'attente externe.
+                  for (let i = 0; i < recipientRows.length; i += 100) {
+                    const chunk = recipientRows.slice(i, i + 100);
+                    try {
+                      await axios.post('https://exp.host/--/api/v2/push/send', chunk.map((r) => ({
+                        to: r.id_notif,
+                        sound: 'default',
+                        title: fanoutTitle,
+                        body: 'Nouveau tweet',
+                        data: { type: 'system', tweet_id: tweet.id, sender_id: userId }
+                      })), {
+                        headers: { 'Content-Type': 'application/json' },
+                        timeout: 5000
+                      });
+                    } catch (pushError) {
+                      logger.warn('Envoi push par lot (fanout followers) échoué:', pushError?.message || pushError);
+                    }
                   }
                 }
               }

@@ -1,9 +1,11 @@
 /**
  * 🧹 Nettoyeur de Références Circulaires
- * 
+ *
  * Utilitaire pour nettoyer les références circulaires dans les objets JSON
  * afin d'éviter les erreurs "Converting circular structure to JSON"
  */
+
+const logger = require('./logger');
 
 /**
  * Nettoie les références circulaires d'un objet avec détection avancée
@@ -86,7 +88,7 @@ function cleanCircularReferences(obj, excludeKeys = []) {
   try {
     return cleanObject(obj);
   } catch (error) {
-    console.error('❌ Erreur lors du nettoyage des références circulaires:', error);
+    logger.error('❌ Erreur lors du nettoyage des références circulaires:', error);
     // Fallback avec JSON.stringify plus agressif
     return JSON.parse(JSON.stringify(obj, (key, value) => {
       if (allExcludeKeys.includes(key)) return undefined;
@@ -191,7 +193,7 @@ function ultraSafeClean(data) {
     
     return cleanedData;
   } catch (error) {
-    console.error('❌ Erreur nettoyage ultra-sécurisé:', error);
+    logger.error('❌ Erreur nettoyage ultra-sécurisé:', error);
     
     // Fallback extrême : retourner un objet vide avec message d'erreur
     return {

@@ -28,7 +28,7 @@ class VirtualCurrencyController {
         message: 'Cryptomonnaie récupérée avec succès'
       });
     } catch (error) {
-      console.error('Erreur lors de la récupération de la cryptomonnaie:', error);
+      logger.error('Erreur lors de la récupération de la cryptomonnaie:', error);
       res.status(500).json({
         success: false,
         message: 'Erreur serveur interne'

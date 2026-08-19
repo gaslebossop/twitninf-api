@@ -1,4 +1,4 @@
-const { DataTypes, Model, Op } = require('sequelize');
+const { DataTypes, Model, Op, literal } = require('sequelize');
 const logger = require('../utils/logger');
 
 // Applique `delta` (+1/-1) aux compteurs `following`/`followers` des deux
@@ -31,13 +31,14 @@ async function bumpFollowStats(follow, delta) {
 
 class UserFollow extends Model {
   // Méthode statique pour vérifier si un utilisateur suit un autre
-  static async isFollowing(followerId, followingId) {
+  static async isFollowing(followerId, followingId, transaction = null) {
     const follow = await this.findOne({
       where: {
         follower_id: followerId,
         following_id: followingId,
         status: 'active'
-      }
+      },
+      transaction
     });
     return !!follow;
   }
@@ -112,22 +113,21 @@ class UserFollow extends Model {
 
   // Méthode statique pour obtenir les suggestions de suivi
   static async getFollowSuggestions(userId, limit = 10) {
-    // Utilisateurs que l'utilisateur ne suit pas encore. On prend TOUS les
-    // liens, pas seulement les `active` : une demande déjà en attente ne doit
-    // pas être re-suggérée comme un compte qu'on ne connaît pas.
-    const following = await this.findAll({
-      where: { follower_id: userId },
-      attributes: ['following_id']
-    });
-
-    const followingIds = following.map(f => f.following_id);
-    followingIds.push(userId); // Exclure l'utilisateur lui-même
+    // AUDIT R3-05 (2026-08-19) : la liste d'abonnements matérialisée en
+    // littéral `NOT IN` (jusqu'à ~190 Ko de SQL à 5 000 abonnements, un plan
+    // jamais réutilisable) empêchait en plus toute anti-jointure : `NOT IN`
+    // sur des littéraux est évalué ligne à ligne sur `users`. Sous-requête
+    // corrélée à la place — un seul aller-retour, indexable par
+    // `user_follows(follower_id)`. On prend TOUS les liens, pas seulement
+    // les `active` : une demande déjà en attente ne doit pas être
+    // re-suggérée comme un compte qu'on ne connaît pas.
+    const followingSubquery = literal(
+      `(SELECT following_id FROM user_follows WHERE follower_id = ${this.sequelize.escape(String(userId))})`
+    );
 
     return this.sequelize.models.User.findAll({
       where: {
-        // `this.sequelize.Op` n'existe pas en Sequelize v6 : GET
-        // /api/users/suggestions plantait (500) à chaque appel.
-        id: { [Op.notIn]: followingIds },
+        id: { [Op.notIn]: followingSubquery, [Op.ne]: userId }, // exclut aussi l'utilisateur lui-même
         is_active: true,
         is_suspended: false,
         // Un compte privé ne se recommande pas. Il a demandé à n'être visible

@@ -24,6 +24,7 @@
 
 const { SimilarityRecommendationEngine } = require('./recommendationEngine');
 const { AdTargetingEngine } = require('./adTargetingEngine');
+const logger = require('../../utils/logger');
 
 let _engine = null;
 let _adEngine = null;
@@ -47,7 +48,7 @@ async function initialize(sequelizeModels) {
     console.log('🎯 [Similarity Module V2] ✅ Moteurs initialisés (multi-signal + cold start)');
     return true;
   } catch (err) {
-    console.error('❌ [Similarity Module V2] Erreur initialisation:', err.message);
+    logger.error('❌ [Similarity Module V2] Erreur initialisation:', err.message);
     return false;
   }
 }

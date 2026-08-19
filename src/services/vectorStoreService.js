@@ -199,34 +199,45 @@ class VectorStoreService {
         try {
             const userKey = `user_${userId}`;
             const interactions = this.interactionVectors.get(userKey) || [];
-            
+
             const filePath = path.join(this.dataDir, `interactions_${userId}.json`);
-            
+
             // Charger les interactions existantes
             let existing = [];
             if (fs.existsSync(filePath)) {
                 try {
-                    existing = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                    existing = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
                 } catch (e) {
                     existing = [];
                 }
             }
 
-            // Merger et déduquer
-            const merged = [...existing, ...interactions];
-            const unique = merged.filter((item, index, self) =>
-                index === self.findIndex(t => 
-                    t.user_id === item.user_id && 
-                    t.tweet_id === item.tweet_id && 
-                    t.action === item.action &&
-                    t.timestamp === item.timestamp
-                )
-            );
+            // AUDIT R4-07 (2026-08-19) : `filter`+`findIndex` reparcourait toute la
+            // liste pour chaque élément (O(n²), ~76 ms mesurés à 5 000 entrées,
+            // sur le fil d'enrichissement de la route de recommandation IA). Une
+            // clé de déduplication dans un `Set` ramène ça à O(n).
+            const seen = new Set();
+            const unique = [...existing, ...interactions].filter((item) => {
+                const key = `${item.user_id}|${item.tweet_id}|${item.action}|${item.timestamp}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
 
             // Garder les 5000 dernières
             const trimmed = unique.slice(-5000);
 
-            fs.writeFileSync(filePath, JSON.stringify(trimmed, null, 2), 'utf8');
+            // `writeFileSync` bloquait le fil principal jusqu'à la fin de
+            // l'écriture ; `null, 2` (indentation) n'a aucun lecteur humain et
+            // ne fait que gonfler l'octet compte à écrire.
+            await fs.promises.writeFile(filePath, JSON.stringify(trimmed), 'utf8');
+
+            // Remplacé par l'état dédupliqué (pas vidé : `getInteractions` /
+            // `getUserVectorProfile` lisent ce même tampon en mémoire, le vider
+            // leur ferait perdre tout historique jusqu'à la prochaine rafale de
+            // 50 interactions).
+            this.interactionVectors.set(userKey, trimmed);
+
             logger.debug(`💾 [VectorStore] ${trimmed.length} interactions persistées pour user ${userId}`);
         } catch (err) {
             logger.warn(`⚠️ [VectorStore] Erreur persistence interactions user ${userId}: ${err.message}`);
@@ -240,13 +251,19 @@ class VectorStoreService {
         try {
             if (!fs.existsSync(this.dataDir)) return;
 
-            const files = fs.readdirSync(this.dataDir).filter(f => f.startsWith('interactions_'));
+            // AUDIT R4-07 (2026-08-19) : `readdirSync`/`readFileSync` synchrones,
+            // un fichier par utilisateur, sans limite — un plafond dur au
+            // démarrage (mémoire, ou sonde de vivacité qui tue le process avant
+            // qu'il ne réponde) à mesure que la base d'utilisateurs grossit.
+            // Passage en asynchrone : ne supprime pas le travail, mais rend la
+            // main à la boucle d'événements entre chaque fichier.
+            const files = (await fs.promises.readdir(this.dataDir)).filter(f => f.startsWith('interactions_'));
             let totalLoaded = 0;
 
             for (const file of files) {
                 try {
                     const userId = file.replace('interactions_', '').replace('.json', '');
-                    const data = JSON.parse(fs.readFileSync(path.join(this.dataDir, file), 'utf8'));
+                    const data = JSON.parse(await fs.promises.readFile(path.join(this.dataDir, file), 'utf8'));
                     this.interactionVectors.set(`user_${userId}`, data);
                     totalLoaded += data.length;
                 } catch (e) {

@@ -34,6 +34,11 @@ const { toDecodableBuffer } = require('./heifDecoder');
 
 /** Servi par `app.use('/static', express.static(src/public))`. */
 const TWEET_IMAGES_DIR = path.join(__dirname, '../public/tweets');
+// AUDIT R4-09 (2026-08-19) : mkdirSync appelé une fois au chargement du
+// module plutôt qu'à chaque envoi d'image (le répertoire est déjà présent
+// dans l'immense majorité des appels — un aller-retour disque superflu par
+// upload).
+fs.mkdirSync(TWEET_IMAGES_DIR, { recursive: true });
 
 /** Même plafond que le modèle `Tweet` (`media_urls` : 4 maximum). */
 const MAX_IMAGES_PER_TWEET = 4;
@@ -63,8 +68,6 @@ function isAcceptedMimetype(mimetype) {
  * @returns {Promise<string>} URL publique absolue à stocker dans `media_urls`.
  */
 async function storeUploadedImage(buffer, userId) {
-  fs.mkdirSync(TWEET_IMAGES_DIR, { recursive: true });
-
   const filename = `tweet-${userId}-${Date.now()}-${uuidv4().slice(0, 8)}.jpg`;
   const outputPath = path.join(TWEET_IMAGES_DIR, filename);
 

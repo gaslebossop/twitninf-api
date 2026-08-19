@@ -1,6 +1,29 @@
 const { DataTypes, Model } = require('sequelize');
 
-class AdImpression extends Model {}
+class AdImpression extends Model {
+  /**
+   * AUDIT R1-03/R1-04 (2026-08-19) : compte les impressions de plusieurs
+   * publicités en une requête (`GROUP BY`) au lieu d'un `count()` par
+   * publicité. Contrat identique à `TweetLike.countLikesForTweets` : une
+   * publicité sans impression est absente du résultat, lire `map.get(id) || 0`.
+   */
+  static async countByAdvertisementIds(advertisementIds = []) {
+    const ids = [...new Set(advertisementIds.map(String))].filter(Boolean);
+    if (ids.length === 0) return new Map();
+
+    const rows = await this.findAll({
+      where: { advertisement_id: ids },
+      attributes: [
+        'advertisement_id',
+        [this.sequelize.fn('COUNT', this.sequelize.col('id')), 'count'],
+      ],
+      group: ['advertisement_id'],
+      raw: true,
+    });
+
+    return new Map(rows.map((r) => [String(r.advertisement_id), Number(r.count) || 0]));
+  }
+}
 
 module.exports = (sequelize) => {
   AdImpression.init({

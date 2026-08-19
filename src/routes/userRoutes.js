@@ -217,7 +217,7 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
     try {
       userWallet = await NewEconomyService.getUserWallet(currencyId, userId, transaction);
     } catch (walletError) {
-      console.error('❌ [SUB] Erreur récupération wallet:', walletError);
+      logger.error('❌ [SUB] Erreur récupération wallet:', walletError);
       await transaction.rollback();
       return res.status(500).json({
         success: false,
@@ -251,7 +251,7 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
         transaction
       );
     } catch (spendError) {
-      console.error('❌ [SUB] Erreur transaction NF:', spendError);
+      logger.error('❌ [SUB] Erreur transaction NF:', spendError);
       await transaction.rollback();
       const isRiskError = transactionAuthorizationService.constructor.isRiskError(spendError);
       return res.status(isRiskError ? spendError.httpStatus : 500).json({
@@ -628,6 +628,14 @@ router.get('/subscription-pricing', authenticateToken, async (req, res) => {
  */
 router.get('/follow-requests', authenticateToken, async (req, res) => {
   try {
+    // AUDIT R3-08a (2026-08-19) : aucune pagination — un compte privé un peu
+    // visible en accumule des milliers, avec le profil complet de chaque
+    // demandeur. L'app ne fait pas encore de défilement sur cet écran, d'où
+    // un plafond généreux plutôt qu'une page courte qui tronquerait un usage
+    // réel dès aujourd'hui.
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
     const requests = await UserFollow.findAll({
       where: { following_id: req.user.id, status: 'pending' },
       include: [{
@@ -635,7 +643,9 @@ router.get('/follow-requests', authenticateToken, async (req, res) => {
         as: 'follower',
         attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'profile_customization']
       }],
-      order: [['created_at', 'DESC']]
+      order: [['created_at', 'DESC']],
+      limit,
+      offset,
     });
 
     res.json({ success: true, message: 'Demandes de suivi récupérées avec succès', data: { requests } });

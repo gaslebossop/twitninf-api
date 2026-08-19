@@ -5,6 +5,7 @@
 
 const { Event, User } = require('../models');
 const { Op } = require('sequelize');
+const logger = require('../utils/logger');
 
 class EventController {
   // Obtenir tous les événements (accessible à tous)
@@ -57,7 +58,7 @@ class EventController {
         },
       });
     } catch (error) {
-      console.error('❌ Erreur lors de la récupération des événements:', error);
+      logger.error('❌ Erreur lors de la récupération des événements:', error);
       res.status(500).json({
         success: false,
         message: 'Erreur lors de la récupération des événements',
@@ -94,7 +95,7 @@ class EventController {
         data: activeEvent,
       });
     } catch (error) {
-      console.error('❌ Erreur lors de la récupération de l\'événement actif:', error);
+      logger.error('❌ Erreur lors de la récupération de l\'événement actif:', error);
       res.status(500).json({
         success: false,
         message: 'Erreur lors de la récupération de l\'événement actif',
@@ -144,7 +145,7 @@ class EventController {
         data: event,
       });
     } catch (error) {
-      console.error('❌ Erreur lors de la récupération de l\'événement:', error);
+      logger.error('❌ Erreur lors de la récupération de l\'événement:', error);
       res.status(500).json({
         success: false,
         message: 'Erreur lors de la récupération de l\'événement',
@@ -220,7 +221,7 @@ class EventController {
         message: 'Événement créé avec succès',
       });
     } catch (error) {
-      console.error('❌ Erreur lors de la création de l\'événement:', error);
+      logger.error('❌ Erreur lors de la création de l\'événement:', error);
       res.status(500).json({
         success: false,
         message: 'Erreur lors de la création de l\'événement',
@@ -284,7 +285,7 @@ class EventController {
         message: 'Événement mis à jour avec succès',
       });
     } catch (error) {
-      console.error('❌ Erreur lors de la mise à jour de l\'événement:', error);
+      logger.error('❌ Erreur lors de la mise à jour de l\'événement:', error);
       res.status(500).json({
         success: false,
         message: 'Erreur lors de la mise à jour de l\'événement',
@@ -324,7 +325,7 @@ class EventController {
         message: 'Événement activé avec succès',
       });
     } catch (error) {
-      console.error('❌ Erreur lors de l\'activation de l\'événement:', error);
+      logger.error('❌ Erreur lors de l\'activation de l\'événement:', error);
       res.status(500).json({
         success: false,
         message: 'Erreur lors de l\'activation de l\'événement',
@@ -355,7 +356,7 @@ class EventController {
         message: 'Événement désactivé avec succès',
       });
     } catch (error) {
-      console.error('❌ Erreur lors de la désactivation de l\'événement:', error);
+      logger.error('❌ Erreur lors de la désactivation de l\'événement:', error);
       res.status(500).json({
         success: false,
         message: 'Erreur lors de la désactivation de l\'événement',
@@ -384,7 +385,7 @@ class EventController {
         message: 'Événement supprimé avec succès',
       });
     } catch (error) {
-      console.error('❌ Erreur lors de la suppression de l\'événement:', error);
+      logger.error('❌ Erreur lors de la suppression de l\'événement:', error);
       res.status(500).json({
         success: false,
         message: 'Erreur lors de la suppression de l\'événement',
@@ -403,7 +404,7 @@ class EventController {
         message: 'Événements par défaut initialisés avec succès',
       });
     } catch (error) {
-      console.error('❌ Erreur lors de l\'initialisation des événements:', error);
+      logger.error('❌ Erreur lors de l\'initialisation des événements:', error);
       res.status(500).json({
         success: false,
         message: 'Erreur lors de l\'initialisation des événements',

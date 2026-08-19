@@ -58,7 +58,7 @@ souvent le seul fichier à ouvrir pour situer un endpoint existant.
 | `/api/username-market` | `usernameMarketRoutes.js` | marché des pseudos |
 | `/api/contests` | `contestRoutes.js` | concours |
 | `/api/verification`, `/api/verified-badges`, `/api/verification-style` | fichiers homonymes | certification de compte |
-| `/api/ads` | `adRoutes.js` (+ `advancedAdRoutes.js`) | publicité |
+| `/api/ads` | `adRoutes.js` | publicité |
 | `/api/user-challenges` | `userChallengeRoutes.js` | défis utilisateur |
 | `/api/inventory` | `inventoryRoutes.js` | objets/cosmétiques possédés |
 | `/api/admin/*` | `economyAdminRoutes.js`, `similarityAdminRoutes.js`, `shadowbanAdminRoutes.js`, `developerAdminRoutes.js`, `infrastructureAdminRoutes.js` | panels admin — jamais le modèle de données brut, voir la règle UI admin ci-dessous |

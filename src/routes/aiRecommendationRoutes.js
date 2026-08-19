@@ -20,6 +20,7 @@ const logger = require('../utils/logger');
 const { getAIBridge } = require('../services/aiRecommendationBridge');
 const { getVectorStore } = require('../services/vectorStoreService');
 const { engagementTargetId } = require('../utils/engagementTarget');
+const { stripInternalTweetFields } = require('../utils/stripInternalTweetFields');
 const paidContentService = require('../services/paidContentService');
 
 // ═══════════════════════════════════════════════════════════════════
@@ -79,7 +80,7 @@ router.get('/', authMiddleware.authenticateToken, async (req, res) => {
                 const tId = rec.tweet_id || rec.id;
                 const dbTweet = dbMap[tId];
                 if (dbTweet) {
-                    const tweetData = dbTweet.toJSON();
+                    const tweetData = stripInternalTweetFields(dbTweet.toJSON());
 
                     // Calculer les stats fraîches — sur un retweet pur, elles
                     // appartiennent au tweet d'origine, pas à la ligne retweet.

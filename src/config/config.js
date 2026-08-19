@@ -48,10 +48,23 @@ const config = {
       },
     } : {}),
     dialect: 'postgres',
+    // AUDIT B1-02 (2026-08-19), CRITIQUE — incident déjà survenu
+    // (`usernameMarketService.js:358-372`) : plusieurs fonctions appelées
+    // DEPUIS une transaction empruntent une connexion supplémentaire au pool
+    // (`transactionAuthorizationService._claimAuthorization`,
+    // `EconomyMetrics.purchaseVolume24h`...). Sous charge, ça vide le pool et
+    // bloque toute l'économie pendant `acquire` (60 s par défaut) avant
+    // d'échouer d'un coup. La vraie correction (faire circuler la
+    // transaction jusqu'à ces fonctions) change le moment où l'INSERT
+    // d'idempotence devient visible aux requêtes concurrentes — à vérifier
+    // avant d'y toucher, pas à appliquer mécaniquement sur le chemin
+    // anti-rejeu de l'argent. En attendant : un pool plus large éloigne le
+    // seuil, un délai d'acquisition plus court transforme une panne d'une
+    // minute en échec rapide et visible dans les journaux.
     pool: {
-      max: parseInt(process.env.DB_POOL_MAX, 10) || 10,
+      max: parseInt(process.env.DB_POOL_MAX, 10) || 25,
       min: parseInt(process.env.DB_POOL_MIN, 10) || 2,
-      acquire: parseInt(process.env.DB_POOL_ACQUIRE, 10) || 60000,
+      acquire: parseInt(process.env.DB_POOL_ACQUIRE, 10) || 8000,
       idle: parseInt(process.env.DB_POOL_IDLE, 10) || 10000
     },
     logging: false,

@@ -22,6 +22,22 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 require('dotenv').config();
 
+// AUDIT R4-05 (2026-08-19) : le pool de travail de libuv (4 fils par défaut)
+// sert à la fois `sharp` (envoi de média), TOUTES les opérations `fs`
+// asynchrones et `dns.lookup` — donc tous les appels réseau sortants
+// (push Expo, Spotify, g-auth, recommandeur Rust). Quatre envois d'image
+// simultanés suffisent à remplir le pool ; une résolution DNS pour une
+// notification push attend alors dans la même file, avec un symptôme
+// trompeur (les services tiers semblent lents alors qu'aucun ne l'est).
+// Doit être définie avant toute opération qui touche ce pool — c'est
+// pourquoi c'est ici, juste après le chargement de l'environnement, avant
+// tout `require` qui pourrait en déclencher une. Un `UV_THREADPOOL_SIZE`
+// déjà présent dans l'environnement du processus (unité systemd, pm2)
+// prime toujours sur ce repli.
+if (!process.env.UV_THREADPOOL_SIZE) {
+  process.env.UV_THREADPOOL_SIZE = '16';
+}
+
 const express = require('express');
 const { Op } = require('sequelize');
 const cors = require('cors');
@@ -350,9 +366,19 @@ app.use(morgan('combined', {
   }
 }));
 
-// Parser pour le corps des requêtes
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// AUDIT R4-08 (2026-08-19) : `JSON.parse` est entièrement synchrone (aucun
+// point de reprise) — un corps de 10 Mo mesure ~170 ms de gel total du
+// processus, sur N'IMPORTE QUELLE route, pour une API dont les corps JSON
+// légitimes (texte de tweet, identifiants, options) tiennent en quelques Ko.
+// Les envois de fichiers passent par `multer` avec leurs propres limites
+// (30 Mo stories/messages, 15 Mo images de tweet, 5 Mo avatars), pas par ce
+// parseur. Repéré `POST /api/behavior/batch` (le plus gros lot JSON trouvé :
+// max 50 actions, quelques Ko) sans trouver de route qui ait besoin de 10 Mo
+// — 1 Mo garde une marge large sur tout usage légitime identifié tout en
+// divisant le pire cas mesuré par 10, sans avoir pu auditer les 64 fichiers
+// de routes un par un pour l'exclure formellement.
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // Rattrapage des corps JSON mal encodes par les applications deja installees
 // — voir `middleware/jsonBodyRecovery`. Doit rester APRES les parseurs et
@@ -1739,14 +1765,32 @@ async function startServer() {
     });
 
     // Gestion des erreurs non capturées
+    //
+    // AUDIT B2-08 : les transports fichier de winston écrivent de façon
+    // asynchrone. Un `process.exit(1)` juste après `logger.error(...)` était
+    // une course — le processus pouvait mourir avant que la trace n'atteigne
+    // le disque, ce qui est précisément la ligne de journal dont on a le plus
+    // besoin pour diagnostiquer un plantage. On attend la fin de l'écriture
+    // (événement `finish` après `logger.end()`), avec un filet de 3 s pour ne
+    // pas laisser un processus zombie si un transport reste bloqué.
     process.on('uncaughtException', (error) => {
       logger.error('Exception non capturée:', error);
-      process.exit(1);
+      const exitOnce = () => process.exit(1);
+      logger.on('finish', exitOnce);
+      logger.end();
+      setTimeout(exitOnce, 3000).unref();
     });
 
+    // AUDIT B2-08 : `unhandledRejection` se déclenche pour N'IMPORTE QUELLE
+    // promesse rejetée sans `catch` dans tout le process — y compris une
+    // tâche de fond, un cron, ou un appel réseau accessoire lancé en
+    // tire-et-oublie. Faire tomber le serveur entier (et couper toutes les
+    // requêtes en cours, sans passer par l'arrêt gracieux SIGTERM/SIGINT
+    // ci-dessus) pour une promesse oubliée dans un composant secondaire est
+    // disproportionné. On journalise (avec `promise`, absent avant, pour
+    // savoir D'OÙ vient le rejet) et on laisse le service vivre.
     process.on('unhandledRejection', (reason, promise) => {
-      logger.error('Promesse rejetée non gérée:', reason);
-      process.exit(1);
+      logger.error('Promesse rejetée non gérée:', reason, promise);
     });
 
   } catch (error) {

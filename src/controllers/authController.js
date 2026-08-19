@@ -191,9 +191,19 @@ class AuthController {
 
       const { email } = req.body;
 
-      const result = await authService.forgotPassword(email);
-      res.status(200).json(result);
+      await authService.forgotPassword(email);
+      res.status(200).json({ success: true, message: 'Si l\'email existe, un lien de réinitialisation a été envoyé' });
     } catch (error) {
+      // AUDIT B2-07 : `statusCode` distingue « l'envoi n'est pas branché »
+      // (attendu tant que ce n'est pas implémenté, pas une vraie panne) d'une
+      // erreur inattendue — seule la seconde mérite un `logger.error`.
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({
+          success: false,
+          message: 'La réinitialisation par email n\'est pas disponible pour le moment. Contactez le support.',
+          code: error.code
+        });
+      }
       logger.error('Erreur dans forgotPassword:', error);
       res.status(500).json({
         success: false,

@@ -118,8 +118,16 @@ class Notification extends Model {
               message_id: record.content?.message_id || null,
             }
           };
+          // AUDIT R4-01 (2026-08-19) : appelé à chaque notification créée, y
+          // compris dans la diffusion en série de R3-07 — sans délai, un
+          // `exp.host` lent occupe un contexte d'exécution (et une connexion
+          // base si l'appelant est dans une transaction) sans borne. « non
+          // bloquant » dans le commentaire au-dessus suppose une erreur ;
+          // un appel qui n'échoue pas mais n'aboutit jamais n'est jamais
+          // attrapé, il est attendu.
           await axios.post('https://exp.host/--/api/v2/push/send', payload, {
-            headers: { 'Content-Type': 'application/json' }
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 5000
           });
         }
       } catch (pushError) {

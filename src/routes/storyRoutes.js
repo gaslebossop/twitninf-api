@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
 const multer = require('multer');
 const sharp = require('sharp');
 const fs = require('fs');
@@ -770,13 +770,24 @@ router.delete('/:storyId', authenticateToken, async (req, res) => {
 async function purgeExpiredStories() {
   try {
     const cutoff = new Date(Date.now() - ARCHIVE_WINDOW_MS);
-    const pinned = await StoryHighlightItem.findAll({ attributes: ['story_id'] });
-    const pinnedIds = [...new Set(pinned.map((item) => String(item.story_id)))];
 
-    const where = { expires_at: { [Op.lt]: cutoff } };
-    if (pinnedIds.length) where.id = { [Op.notIn]: pinnedIds };
-
-    const expired = await Story.findAll({ where, paranoid: false, limit: 500 });
+    // AUDIT R3-10 (2026-08-19) : la table des épinglages ne fait QUE croître
+    // (une story épinglée n'est jamais supprimée) et était chargée en
+    // entier, sans filtre, à chaque passage de la purge, pour bâtir un
+    // littéral `NOT IN` — sur lequel aucun index ne peut aider. À terme, la
+    // purge devient plus coûteuse que ce qu'elle purge, puis cesse de
+    // pouvoir s'exécuter (littéral de plusieurs dizaines de Mo). `NOT
+    // EXISTS` transforme ça en anti-jointure indexée, de taille constante.
+    const expired = await Story.findAll({
+      where: {
+        expires_at: { [Op.lt]: cutoff },
+        id: {
+          [Op.notIn]: literal('(SELECT story_id FROM story_highlight_items)')
+        }
+      },
+      paranoid: false,
+      limit: 500
+    });
     if (!expired.length) return 0;
 
     for (const story of expired) {

@@ -292,16 +292,41 @@ async function drawContest(contestId) {
 
     // Recontrôle intégral : c'est l'état maintenant qui décide.
     const eligible = [];
+    const rejected = [];
     for (const entry of entries) {
       const { ok, missing } = await checkConditions(contest, entry.user_id);
       if (ok) {
-        entry.status = 'eligible';
-        entry.rejected_reason = null;
         eligible.push(entry);
       } else {
-        entry.status = 'rejected';
         entry.rejected_reason = missing.map((m) => m.label).join(', ').slice(0, 80);
+        rejected.push(entry);
       }
+    }
+
+    // AUDIT B1-05 : marquer éligible/rejeté n'est qu'un enregistrement de
+    // résultat, pas une opération d'argent — écrit en lot, hors de la
+    // transaction, pour que sa durée ne dépende plus du nombre de
+    // participants (avant : un `save()` par participant, sous le verrou de
+    // trésorerie du versement ci-dessous).
+    if (eligible.length > 0) {
+      await ContestEntry.update(
+        { status: 'eligible', rejected_reason: null },
+        { where: { id: eligible.map((e) => e.id) } }
+      );
+    }
+    // `rejected_reason` varie par entrée : groupées par valeur distincte,
+    // c'est toujours un nombre borné de requêtes, jamais une par participant.
+    const byReason = new Map();
+    for (const entry of rejected) {
+      const ids = byReason.get(entry.rejected_reason) || [];
+      ids.push(entry.id);
+      byReason.set(entry.rejected_reason, ids);
+    }
+    for (const [reason, ids] of byReason) {
+      await ContestEntry.update(
+        { status: 'rejected', rejected_reason: reason },
+        { where: { id: ids } }
+      );
     }
 
     // Ordre déterministe et vérifiable à partir de la graine révélée.
@@ -316,8 +341,11 @@ async function drawContest(contestId) {
     });
 
     await sequelize.transaction(async (transaction) => {
-      for (const entry of entries) {
-        await entry.save({ transaction });
+      // Bornée par `contest.winners_count`, contrairement à la boucle sur
+      // `entries` d'avant (B1-05) : le verrou de trésorerie pris plus bas par
+      // `settleEscrow` n'est plus tenu le temps de tout le concours.
+      for (const w of winners) {
+        await w.entry.save({ transaction, fields: ['is_winner', 'rank'] });
       }
 
       // Versement dans la MÊME transaction que la clôture : soit les gagnants

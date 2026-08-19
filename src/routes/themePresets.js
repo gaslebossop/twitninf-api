@@ -6,6 +6,7 @@ const express = require('express');
 const router = express.Router();
 const ThemePresetService = require('../services/themePresetService');
 const { authenticateToken, requireAdmin } = require('../middleware/authMiddleware');
+const logger = require('../utils/logger');
 
 /**
  * GET /api/theme-presets
@@ -21,7 +22,7 @@ router.get('/', authenticateToken, async (req, res) => {
       message: 'Presets de thèmes récupérés avec succès'
     });
   } catch (error) {
-    console.error('❌ Erreur lors de la récupération des presets:', error);
+    logger.error('❌ Erreur lors de la récupération des presets:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur lors de la récupération des presets de thèmes'
@@ -52,7 +53,7 @@ router.get('/:themeId', authenticateToken, async (req, res) => {
       message: 'Preset de thème récupéré avec succès'
     });
   } catch (error) {
-    console.error('❌ Erreur lors de la récupération du preset:', error);
+    logger.error('❌ Erreur lors de la récupération du preset:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur lors de la récupération du preset de thème'
@@ -83,7 +84,7 @@ router.get('/:themeId/preview', authenticateToken, async (req, res) => {
       message: 'Preview du thème récupéré avec succès'
     });
   } catch (error) {
-    console.error('❌ Erreur lors de la récupération du preview:', error);
+    logger.error('❌ Erreur lors de la récupération du preview:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur lors de la récupération du preview du thème'

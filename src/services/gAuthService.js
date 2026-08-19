@@ -205,6 +205,10 @@ async function exchangeCode(code, codeVerifier) {
   });
 
   const basic = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
+  // AUDIT R4-01 (2026-08-19), sur le chemin de connexion : sans délai, un
+  // fournisseur d'identité lent sans tomber laisse la requête ouverte
+  // indéfiniment — connexion HTTP, contexte, jusqu'à ce que le client
+  // réessaie et empile une requête bloquée de plus.
   const response = await fetch(new URL('/oauth/token', ISSUER), {
     method: 'POST',
     headers: {
@@ -212,6 +216,7 @@ async function exchangeCode(code, codeVerifier) {
       authorization: `Basic ${basic}`,
     },
     body: body.toString(),
+    signal: AbortSignal.timeout(8000),
   });
 
   if (!response.ok) {
@@ -225,6 +230,7 @@ async function exchangeCode(code, codeVerifier) {
 async function fetchUserinfo(accessToken) {
   const response = await fetch(new URL('/oauth/userinfo', ISSUER), {
     headers: { authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) {
     throw new Error(`userinfo g-auth refusé (${response.status})`);

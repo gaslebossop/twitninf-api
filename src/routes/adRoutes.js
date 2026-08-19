@@ -168,7 +168,11 @@ router.post('/advertisements', authenticateToken, async (req, res) => {
 router.get('/campaigns', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { status, page = 1, limit = 10 } = req.query;
+    const { status, page = 1, limit: rawLimit = 10 } = req.query;
+    // AUDIT R3-11 (2026-08-19) : aucun plafond ici, contrairement au reste du
+    // dépôt — combiné à R1-03 (N+1 par campagne), `?limit=1000` permettait de
+    // saturer le pool de connexions sans aucun outil, depuis un compte ordinaire.
+    const limit = Math.min(Math.max(parseInt(rawLimit, 10) || 10, 1), 100);
 
     const whereClause = { user_id: userId };
     if (status) {
@@ -194,16 +198,44 @@ router.get('/campaigns', authenticateToken, async (req, res) => {
       offset: (parseInt(page) - 1) * parseInt(limit)
     });
 
-    // Ajouter les statistiques à chaque campagne
-    const campaignsWithStats = await Promise.all(
-      campaigns.rows.map(async (campaign) => {
-        const stats = await adService.getCampaignStats(campaign.id);
-        return {
-          ...campaign.toJSON(),
-          stats
-        };
-      })
-    );
+    // AUDIT R1-03 (2026-08-19) : `adService.getCampaignStats(id)` par
+    // campagne refaisait un `findByPk` + `include` déjà en main ci-dessus,
+    // puis 4 agrégats séquentiels par publicité — ~900 requêtes pour une
+    // page de 20 campagnes × 10 publicités. Une seule liste de publicités
+    // (déjà chargée par l'`include`), 3 requêtes groupées pour toute la
+    // page. ~900 → 4.
+    const allAds = campaigns.rows.flatMap((campaign) => campaign.advertisements || []);
+    const perAdStats = await Advertisement.statsForIds(allAds);
+
+    const campaignsWithStats = campaigns.rows.map((campaign) => {
+      const ads = campaign.advertisements || [];
+      let totalImpressions = 0;
+      let totalClicks = 0;
+      let totalEngagements = 0;
+      let totalSpent = 0;
+      for (const ad of ads) {
+        const s = perAdStats.get(String(ad.id));
+        if (!s) continue;
+        totalImpressions += s.impressions;
+        totalClicks += s.clicks;
+        totalEngagements += s.engagements;
+        totalSpent += s.spent;
+      }
+
+      return {
+        ...campaign.toJSON(),
+        stats: {
+          total_impressions: totalImpressions,
+          total_clicks: totalClicks,
+          total_engagements: totalEngagements,
+          total_spent: totalSpent,
+          ctr: totalImpressions > 0 ? (totalClicks / totalImpressions * 100).toFixed(2) : 0,
+          engagement_rate: totalImpressions > 0 ? (totalEngagements / totalImpressions * 100).toFixed(2) : 0,
+          cost_per_impression: totalImpressions > 0 ? (totalSpent / totalImpressions).toFixed(4) : 0,
+          cost_per_click: totalClicks > 0 ? (totalSpent / totalClicks).toFixed(4) : 0
+        }
+      };
+    });
 
     res.json({
       success: true,
@@ -232,7 +264,10 @@ router.get('/campaigns', authenticateToken, async (req, res) => {
 router.get('/advertisements', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { status, page = 1, limit = 10 } = req.query;
+    const { status, page = 1, limit: rawLimit = 10 } = req.query;
+    // AUDIT R3-11 (2026-08-19) : même correctif que /campaigns — pas de
+    // plafond, combiné à R1-04 (3 COUNT par publicité).
+    const limit = Math.min(Math.max(parseInt(rawLimit, 10) || 10, 1), 100);
 
     const whereClause = { user_id: userId };
     if (status) {
@@ -256,16 +291,25 @@ router.get('/advertisements', authenticateToken, async (req, res) => {
       offset: (parseInt(page) - 1) * parseInt(limit)
     });
 
-    // Ajouter les statistiques à chaque publicité
-    const adsWithStats = await Promise.all(
-      advertisements.rows.map(async (ad) => {
-        const stats = await adService.getAdvertisementStats(ad.id);
-        return {
-          ...ad.toJSON(),
-          stats
-        };
-      })
-    );
+    // AUDIT R1-04 (2026-08-19) : `getAdvertisementStats(id)` refaisait un
+    // `findByPk` déjà en main ci-dessus, puis 3 `COUNT` séquentiels par
+    // publicité — page de 20 = 80 requêtes. 3 requêtes groupées pour toute
+    // la page. 80 → 3.
+    const adsStats = await Advertisement.statsForIds(advertisements.rows);
+
+    const adsWithStats = advertisements.rows.map((ad) => {
+      const s = adsStats.get(String(ad.id)) || { impressions: 0, clicks: 0, engagements: 0, ctr: 0, engagement_rate: 0 };
+      return {
+        ...ad.toJSON(),
+        stats: {
+          impressions: s.impressions,
+          clicks: s.clicks,
+          engagements: s.engagements,
+          ctr: s.ctr,
+          engagement_rate: s.engagement_rate
+        }
+      };
+    });
 
     res.json({
       success: true,
@@ -777,23 +821,35 @@ router.get('/stats', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Statistiques des campagnes
+    // AUDIT R3-06 (2026-08-19) : l'`include` des publicités n'était lu nulle
+    // part — tout le reste du gestionnaire n'utilise que `campaigns.length`
+    // et `campaign.status` ; les chiffres viennent tous de
+    // `getCampaignStats`. Une jointure entière (toutes colonnes, y compris
+    // les contenus créatifs) était donc chargée puis jetée. Même famille que
+    // R1-04 : la boucle séquentielle `for … await` par campagne est
+    // remplacée par les mêmes requêtes groupées.
     const campaigns = await AdCampaign.findAll({
       where: { user_id: userId },
-      include: [{ model: Advertisement, as: 'advertisements' }]
+      attributes: ['id', 'status'],
     });
+
+    const allAds = campaigns.length === 0 ? [] : await Advertisement.findAll({
+      where: { campaign_id: campaigns.map((c) => c.id) },
+      attributes: ['id', 'campaign_id', 'cost_per_impression'],
+    });
+    const perAdStats = await Advertisement.statsForIds(allAds);
 
     let totalImpressions = 0;
     let totalClicks = 0;
     let totalEngagements = 0;
     let totalSpent = 0;
-
-    for (const campaign of campaigns) {
-      const stats = await adService.getCampaignStats(campaign.id);
-      totalImpressions += stats.total_impressions;
-      totalClicks += stats.total_clicks;
-      totalEngagements += stats.total_engagements;
-      totalSpent += parseFloat(stats.total_spent);
+    for (const ad of allAds) {
+      const s = perAdStats.get(String(ad.id));
+      if (!s) continue;
+      totalImpressions += s.impressions;
+      totalClicks += s.clicks;
+      totalEngagements += s.engagements;
+      totalSpent += s.spent;
     }
 
     // Solde TWC actuel

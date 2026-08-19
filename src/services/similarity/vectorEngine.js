@@ -18,6 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const logger = require('../../utils/logger');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONSTANTS
@@ -184,6 +185,11 @@ function vecAddWeighted(acc, vec, weight) {
 
 /**
  * Top-K par score (Partial sort, O(n) pour petit K).
+ *
+ * Toujours utilisée ailleurs dans le dépôt (`recommendationEngine.js`) —
+ * `VectorStore.search()` n'en a plus besoin depuis l'AUDIT R4-06
+ * (2026-08-19) : elle maintient désormais son propre tampon borné pendant
+ * le parcours, au lieu d'allouer la liste complète puis de la trier ici.
  */
 function topK(items, k) {
   if (items.length <= k) {
@@ -351,15 +357,42 @@ class VectorStore {
    */
   search(queryVec, k = 20, exclude = null) {
     const t0 = Date.now();
-    const candidates = [];
+
+    // AUDIT R4-06 (2026-08-19) : l'ancienne version allouait un objet
+    // `{id, score}` par entrée de l'index — y compris pour les 99,98 % que
+    // `topK` jetterait ensuite — avant de tout trier. Ici, un tampon borné à
+    // `k` (tri par insertion sur un tableau minuscule) : la pression mémoire
+    // et la collecte qui suivait disparaissent. Le calcul du score, lui,
+    // reste entier — c'est le découpage en tranches (asynchrone) qui
+    // supprimerait le gel restant, pas ce point-ci.
+    const results = [];
+    let minScore = -Infinity;
 
     for (const [id, vec] of this.index) {
       if (exclude && exclude.has(id)) continue;
       const score = cosineSim(queryVec, vec);
-      candidates.push({ id, score });
+
+      if (results.length < k) {
+        // Insertion triée (ordre décroissant) tant que le tampon n'est pas plein.
+        let i = results.length;
+        while (i > 0 && results[i - 1].score < score) {
+          results[i] = results[i - 1];
+          i--;
+        }
+        results[i] = { id, score };
+        if (results.length === k) minScore = results[k - 1].score;
+      } else if (score > minScore) {
+        // Remplace le pire élément du tampon, puis le repositionne.
+        let i = k - 1;
+        while (i > 0 && results[i - 1].score < score) {
+          results[i] = results[i - 1];
+          i--;
+        }
+        results[i] = { id, score };
+        minScore = results[k - 1].score;
+      }
     }
 
-    const results = topK(candidates, k);
     const elapsed = Date.now() - t0;
 
     this.stats.searches++;
@@ -391,7 +424,13 @@ class VectorStore {
    *     [id_len bytes]   UTF-8     : ID
    *     [DIMS * 4 bytes] float32[] : vecteur
    */
-  save() {
+  // AUDIT R4-03 (2026-08-19) : `fs.writeFileSync` bloquait le fil principal
+  // jusqu'à la fin de l'écriture (~1,4 s mesurés à 100 000 vecteurs, deux
+  // fois par appel de `_periodicSave` — un gel total du processus, pas une
+  // requête ralentie), toutes les 5 minutes. Passage en asynchrone, plus une
+  // écriture atomique (fichier temporaire puis renommage) : un redémarrage
+  // pendant l'écriture ne laisse plus de `.vdb` tronqué.
+  async save() {
     try {
       if (!fs.existsSync(this.dataDir)) {
         fs.mkdirSync(this.dataDir, { recursive: true });
@@ -423,10 +462,12 @@ class VectorStore {
       }
 
       const filePath = path.join(this.dataDir, `${this.name}.vdb`);
-      fs.writeFileSync(filePath, buf);
+      const tmpPath = `${filePath}.tmp`;
+      await fs.promises.writeFile(tmpPath, buf);
+      await fs.promises.rename(tmpPath, filePath);
       return entries.length;
     } catch (err) {
-      console.error(`❌ [VectorStore:${this.name}] Erreur sauvegarde: ${err.message}`);
+      logger.error(`❌ [VectorStore:${this.name}] Erreur sauvegarde: ${err.message}`);
       return 0;
     }
   }
@@ -437,6 +478,17 @@ class VectorStore {
   load() {
     try {
       const filePath = path.join(this.dataDir, `${this.name}.vdb`);
+
+      // AUDIT B2-05 (2026-08-19) : un `.tmp` résiduel ne peut provenir que
+      // d'un `save()` interrompu (crash/redémarrage) — `save()` le supprime
+      // toujours lui-même via le `rename` qui le remplace. Purger ici, avant
+      // toute lecture, évite qu'il traîne indéfiniment dans `dataDir`.
+      const tmpPath = `${filePath}.tmp`;
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+        console.warn(`⚠️ [VectorStore:${this.name}] ${tmpPath} résiduel supprimé (sauvegarde interrompue précédente)`);
+      }
+
       if (!fs.existsSync(filePath)) return 0;
 
       const buf = fs.readFileSync(filePath);
@@ -465,7 +517,7 @@ class VectorStore {
       console.log(`📂 [VectorStore:${this.name}] ${this.index.size} vecteurs chargés depuis ${filePath}`);
       return this.index.size;
     } catch (err) {
-      console.error(`❌ [VectorStore:${this.name}] Erreur chargement: ${err.message}`);
+      logger.error(`❌ [VectorStore:${this.name}] Erreur chargement: ${err.message}`);
       return 0;
     }
   }

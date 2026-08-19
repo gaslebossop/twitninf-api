@@ -221,7 +221,9 @@ class VideoRecommendationService {
     if (!this._initialized) return;
     try {
       this.engine.setFollow(followerId, followingId, isFollow);
-    } catch (e) {}
+    } catch (e) {
+      logger.error(`❌ [VideoReco] Failed to set follow ${followerId}->${followingId}:`, e.message);
+    }
   }
 
   /**
@@ -252,7 +254,9 @@ class VideoRecommendationService {
     if (!this._initialized) return;
     try {
       this.engine.addUser(userId);
-    } catch (e) {}
+    } catch (e) {
+      logger.error(`❌ [VideoReco] Failed to add new user ${userId}:`, e.message);
+    }
   }
 }
 

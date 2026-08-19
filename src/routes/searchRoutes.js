@@ -5,7 +5,9 @@ const router = express.Router();
 // Import des modèles et services
 const { User, Tweet, TweetLike, TweetRetweet, sequelize } = require('../models');
 const { Op } = require('sequelize');
-const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
+const { jsonbArrayOverlap } = require('../utils/hashtagFilter');
+const { stripInternalTweetFields } = require('../utils/stripInternalTweetFields');
+const { authenticateToken, optionalAuthenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
 const { streamSearchSummary } = require('../services/searchSummaryService');
 const paidContentService = require('../services/paidContentService');
@@ -88,7 +90,7 @@ router.get('/test', async (req, res) => {
     // Test de recherche de hashtags
     const testHashtagTweets = await Tweet.findAll({
       where: {
-        hashtags: { [Op.overlap]: ['test'] },
+        [Op.and]: [jsonbArrayOverlap(sequelize, 'hashtags', ['test'])],
         is_private: false,
         moderation_status: 'approved'
       },
@@ -121,7 +123,7 @@ router.get('/test', async (req, res) => {
  * GET /api/search
  * Recherche globale (utilisateurs et tweets)
  */
-router.get('/', [
+router.get('/', optionalAuthenticateToken, [
   query('q').trim().isLength({ min: 1, max: 100 }).withMessage('Le terme de recherche doit contenir entre 1 et 100 caractères'),
   query('type').optional().isIn(['all', 'users', 'tweets', 'hashtags']).withMessage('Type de recherche invalide'),
   query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
@@ -130,8 +132,6 @@ router.get('/', [
   handleValidationErrors
 ], async (req, res) => {
   try {
-    logger.info('🔍 Recherche globale - Query params:', req.query);
-    
     const {
       q: query,
       type = 'all',
@@ -165,74 +165,36 @@ router.get('/', [
         sortOrder: sort === 'latest' ? 'DESC' : 'DESC'
       });
 
-      // Enrichir les tweets avec les statistiques et interactions utilisateur
-      const enrichedTweets = await Promise.all(tweets.map(async (tweet) => {
-        // Compter les likes, retweets et réponses
-        const likeCount = await TweetLike.count({ where: { tweet_id: tweet.id } });
-        const retweetCount = await TweetRetweet.count({ where: { tweet_id: tweet.id } });
-        const replyCount = await Tweet.count({ 
-          where: { parent_tweet_id: tweet.id }
-        });
+      // AUDIT R1-05 (2026-08-19) : 5 requêtes + un décodage JWT complet PAR
+      // TWEET (jusqu'à 250 requêtes + 50 vérifications HMAC bloquantes pour
+      // 50 résultats). Le jeton est maintenant décodé une seule fois par
+      // `optionalAuthenticateToken` (route publique : `req.user` peut être
+      // `null`), et les stats sont regroupées comme sur le fil.
+      const tweetIds = tweets.map((tweet) => String(tweet.id));
+      const [searchLikes, searchRts, searchReplies, searchLiked, searchRetweeted] = await Promise.all([
+        TweetLike.countLikesForTweets(tweetIds),
+        TweetRetweet.countRetweetsForTweets(tweetIds),
+        Tweet.countRepliesForTweets(tweetIds),
+        req.user?.id ? TweetLike.likedTweetIdsForUser(req.user.id, tweetIds) : Promise.resolve(new Set()),
+        req.user?.id ? TweetRetweet.retweetedTweetIdsForUser(req.user.id, tweetIds) : Promise.resolve(new Set()),
+      ]);
 
-        // Vérifier si l'utilisateur connecté a liké/retweeté ce tweet (si authentifié)
-        let isLiked = false;
-        let isRetweeted = false;
-        
-        // Vérifier si l'utilisateur est authentifié via le header Authorization
-        const authHeader = req.headers.authorization;
-        logger.info(`🔍 Recherche de tweets - Auth header: ${authHeader ? 'Présent' : 'Absent'}`);
-        
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-          try {
-            const token = authHeader.substring(7);
-            logger.info(`🔑 Token extrait, longueur: ${token.length}`);
-            
-            const jwt = require('jsonwebtoken');
-            const config = require('../config/config');
-            
-            logger.info(`🔧 Tentative de décodage du JWT avec secret: ${config.jwt.secret ? 'Présent' : 'Absent'}`);
-            
-            const decoded = jwt.verify(token, config.jwt.secret);
-            logger.info(`✅ JWT décodé avec succès:`, { userId: decoded.id, username: decoded.username });
-            
-            if (decoded && decoded.id) {
-              logger.info(`👤 Utilisateur authentifié: ${decoded.id}`);
-              isLiked = await TweetLike.hasUserLikedTweet(decoded.id, tweet.id);
-              isRetweeted = await TweetRetweet.hasUserRetweetedTweet(decoded.id, tweet.id);
-              logger.info(`📊 Tweet ${tweet.id} - Interactions: Like=${isLiked}, Retweet=${isRetweeted}`);
-            } else {
-              logger.warn(`⚠️ JWT décodé mais pas d'userId:`, decoded);
-            }
-          } catch (error) {
-            // Token invalide, continuer sans authentification
-            logger.error(`❌ Erreur lors du décodage du JWT:`, error.message);
-            logger.debug('Token invalide lors de la recherche de tweets, recherche publique');
-          }
-        } else {
-          logger.info('🔍 Recherche publique - Pas d\'authentification');
-        }
-
-        const enrichedTweet = {
-          ...tweet.toJSON(),
+      const enrichedTweets = tweets.map((tweet) => {
+        const tid = String(tweet.id);
+        return {
+          ...stripInternalTweetFields(tweet.toJSON()),
           stats: {
-            likes: likeCount,
-            retweets: retweetCount,
-            replies: replyCount,
+            likes: searchLikes.get(tid) || 0,
+            retweets: searchRts.get(tid) || 0,
+            replies: searchReplies.get(tid) || 0,
             views: tweet.view_count || 0
           },
           user_interaction: {
-            is_liked: isLiked,
-            is_retweeted: isRetweeted
+            is_liked: searchLiked.has(tid),
+            is_retweeted: searchRetweeted.has(tid)
           }
         };
-
-        logger.info(`📝 Tweet ${tweet.id} enrichi:`, {
-          stats: enrichedTweet.stats,
-          user_interaction: enrichedTweet.user_interaction
-        });
-
-        return enrichedTweet;
-      }));
+      });
 
       // Contenus payants : la recherche renvoie du texte de tweet comme le
       // fil. Sans masquage ici, il suffisait de chercher un mot du contenu
@@ -296,7 +258,7 @@ router.get('/', [
     });
 
   } catch (error) {
-    console.error('💥 Erreur lors de la recherche globale:', error);
+    logger.error('💥 Erreur lors de la recherche globale:', error);
     logger.error('Erreur lors de la recherche globale:', error);
     res.status(500).json({
       success: false,
@@ -390,7 +352,7 @@ router.get('/users', [
  * GET /api/search/tweets
  * Recherche de tweets
  */
-router.get('/tweets', [
+router.get('/tweets', optionalAuthenticateToken, [
   query('q').trim().isLength({ min: 1, max: 100 }).withMessage('Le terme de recherche doit contenir entre 1 et 100 caractères'),
   query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
   query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
@@ -433,7 +395,7 @@ router.get('/tweets', [
 
     // Filtre par hashtag
     if (hashtag) {
-      whereClause.hashtags = { [Op.overlap]: [hashtag] };
+      whereClause[Op.and] = [jsonbArrayOverlap(sequelize, 'hashtags', [hashtag])];
     }
 
     // Filtre par utilisateur
@@ -441,78 +403,50 @@ router.get('/tweets', [
       whereClause.user_id = from_user;
     }
 
-    // Utiliser la méthode searchTweets du modèle Tweet
-    const tweets = await Tweet.searchTweets(query, {
-      limit: parseInt(limit),
+    // AUDIT R2-02 (2026-08-19) : `whereClause` ci-dessus ne contient PAS le
+    // terme recherché (appliqué seulement dans `searchTweets`) ni
+    // `deleted_at`, donc le `COUNT` qui suivait portait sur TOUS les tweets
+    // publics approuvés de la base — un total sans rapport avec les
+    // résultats (`hasMore` restait vrai indéfiniment, défilement infini qui
+    // ne se termine jamais), et la requête la plus coûteuse de la route.
+    // `limit + 1` donne `hasMore` pour zéro requête supplémentaire.
+    const requestedLimit = parseInt(limit);
+    const rawTweets = await Tweet.searchTweets(query, {
+      limit: requestedLimit + 1,
       offset: parseInt(offset),
       includeReplies: type === 'replies',
       includeRetweets: type === 'retweets',
       sortBy: sort === 'popular' ? 'view_count' : 'created_at',
       sortOrder: sort === 'latest' ? 'DESC' : 'DESC'
     });
+    const hasMore = rawTweets.length > requestedLimit;
+    const tweets = rawTweets.slice(0, requestedLimit);
 
-    // Enrichir les tweets avec les statistiques et interactions utilisateur
-    const enrichedTweets = await Promise.all(tweets.map(async (tweet) => {
-      // Compter les likes, retweets et réponses
-      const likeCount = await TweetLike.count({ where: { tweet_id: tweet.id } });
-      const retweetCount = await TweetRetweet.count({ where: { tweet_id: tweet.id } });
-      const replyCount = await Tweet.count({ 
-        where: { parent_tweet_id: tweet.id }
-      });
+    const tweetIds = tweets.map((tweet) => String(tweet.id));
+    const [searchLikes, searchRts, searchReplies, searchLiked, searchRetweeted] = await Promise.all([
+      TweetLike.countLikesForTweets(tweetIds),
+      TweetRetweet.countRetweetsForTweets(tweetIds),
+      Tweet.countRepliesForTweets(tweetIds),
+      req.user?.id ? TweetLike.likedTweetIdsForUser(req.user.id, tweetIds) : Promise.resolve(new Set()),
+      req.user?.id ? TweetRetweet.retweetedTweetIdsForUser(req.user.id, tweetIds) : Promise.resolve(new Set()),
+    ]);
 
-      // Vérifier si l'utilisateur connecté a liké/retweeté ce tweet (si authentifié)
-      let isLiked = false;
-      let isRetweeted = false;
-      
-      // Vérifier si l'utilisateur est authentifié via le header Authorization
-      const authHeader = req.headers.authorization;
-      logger.info(`🔍 Recherche de tweets - Auth header: ${authHeader ? 'Présent' : 'Absent'}`);
-      
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        try {
-          const token = authHeader.substring(7);
-          const jwt = require('jsonwebtoken');
-          const config = require('../config/config');
-          const decoded = jwt.verify(token, config.jwt.secret);
-          
-          if (decoded && decoded.id) {
-            logger.info(`👤 Utilisateur authentifié: ${decoded.id}`);
-            isLiked = await TweetLike.hasUserLikedTweet(decoded.id, tweet.id);
-            isRetweeted = await TweetRetweet.hasUserRetweetedTweet(decoded.id, tweet.id);
-            logger.info(`📊 Tweet ${tweet.id} - Interactions: Like=${isLiked}, Retweet=${isRetweeted}`);
-          }
-        } catch (error) {
-          // Token invalide, continuer sans authentification
-          logger.debug('Token invalide lors de la recherche de tweets, recherche publique');
-        }
-      } else {
-        logger.info('🔍 Recherche publique - Pas d\'authentification');
-      }
-
-      const enrichedTweet = {
-        ...tweet.toJSON(),
+    const enrichedTweets = tweets.map((tweet) => {
+      const tid = String(tweet.id);
+      return {
+        ...stripInternalTweetFields(tweet.toJSON()),
         stats: {
-          likes: likeCount,
-          retweets: retweetCount,
-          replies: replyCount,
+          likes: searchLikes.get(tid) || 0,
+          retweets: searchRts.get(tid) || 0,
+          replies: searchReplies.get(tid) || 0,
           views: tweet.view_count || 0
         },
         user_interaction: {
-          is_liked: isLiked,
-          is_retweeted: isRetweeted
+          is_liked: searchLiked.has(tid),
+          is_retweeted: searchRetweeted.has(tid)
         }
       };
-
-      logger.info(`📝 Tweet ${tweet.id} enrichi:`, {
-        stats: enrichedTweet.stats,
-        user_interaction: enrichedTweet.user_interaction
-      });
-
-      return enrichedTweet;
-    }));
-
-    // Compter le total
-    const totalCount = await Tweet.count({ where: whereClause });
+    });
 
     if (!(await paidContentService.maskTweetsOrFail(enrichedTweets, req.user?.id, res))) return;
 
@@ -523,10 +457,9 @@ router.get('/tweets', [
         query,
         tweets: enrichedTweets,
         pagination: {
-          total: totalCount,
-          limit: parseInt(limit),
+          limit: requestedLimit,
           offset: parseInt(offset),
-          hasMore: offset + enrichedTweets.length < totalCount
+          hasMore
         }
       }
     });
@@ -592,7 +525,7 @@ router.get('/tweets/authenticated', [
 
     // Filtre par hashtag
     if (hashtag) {
-      whereClause.hashtags = { [Op.overlap]: [hashtag] };
+      whereClause[Op.and] = [jsonbArrayOverlap(sequelize, 'hashtags', [hashtag])];
     }
 
     // Filtre par utilisateur
@@ -600,48 +533,48 @@ router.get('/tweets/authenticated', [
       whereClause.user_id = from_user;
     }
 
-    // Utiliser la méthode searchTweets du modèle Tweet
-    const tweets = await Tweet.searchTweets(query, {
-      limit: parseInt(limit),
+    // AUDIT R2-02 (2026-08-19) : même correctif que la copie précédente —
+    // `limit + 1` au lieu d'un `COUNT` sur un prédicat qui ne contient pas
+    // le terme recherché.
+    const requestedLimit = parseInt(limit);
+    const rawTweets = await Tweet.searchTweets(query, {
+      limit: requestedLimit + 1,
       offset: parseInt(offset),
       includeReplies: type === 'replies',
       includeRetweets: type === 'retweets',
       sortBy: sort === 'popular' ? 'view_count' : 'created_at',
       sortOrder: sort === 'latest' ? 'DESC' : 'DESC'
     });
+    const hasMore = rawTweets.length > requestedLimit;
+    const tweets = rawTweets.slice(0, requestedLimit);
 
-    // Enrichir les tweets avec les statistiques et interactions utilisateur
-    const enrichedTweets = await Promise.all(tweets.map(async (tweet) => {
-      // Compter les likes, retweets et réponses
-      const likeCount = await TweetLike.count({ where: { tweet_id: tweet.id } });
-      const retweetCount = await TweetRetweet.count({ where: { tweet_id: tweet.id } });
-      const replyCount = await Tweet.count({ 
-        where: { parent_tweet_id: tweet.id }
-      });
+    // AUDIT R1-05 (2026-08-19) : troisième copie du même bloc — regroupée
+    // comme les deux autres.
+    const tweetIds = tweets.map((tweet) => String(tweet.id));
+    const [searchLikes, searchRts, searchReplies, searchLiked, searchRetweeted] = await Promise.all([
+      TweetLike.countLikesForTweets(tweetIds),
+      TweetRetweet.countRetweetsForTweets(tweetIds),
+      Tweet.countRepliesForTweets(tweetIds),
+      TweetLike.likedTweetIdsForUser(userId, tweetIds),
+      TweetRetweet.retweetedTweetIdsForUser(userId, tweetIds),
+    ]);
 
-      // Récupérer les interactions de l'utilisateur authentifié
-      const isLiked = await TweetLike.hasUserLikedTweet(userId, tweet.id);
-      const isRetweeted = await TweetRetweet.hasUserRetweetedTweet(userId, tweet.id);
-      
-      logger.info(`📊 Tweet ${tweet.id} - Interactions pour ${userId}: Like=${isLiked}, Retweet=${isRetweeted}`);
-
+    const enrichedTweets = tweets.map((tweet) => {
+      const tid = String(tweet.id);
       return {
-        ...tweet.toJSON(),
+        ...stripInternalTweetFields(tweet.toJSON()),
         stats: {
-          likes: likeCount,
-          retweets: retweetCount,
-          replies: replyCount,
+          likes: searchLikes.get(tid) || 0,
+          retweets: searchRts.get(tid) || 0,
+          replies: searchReplies.get(tid) || 0,
           views: tweet.view_count || 0
         },
         user_interaction: {
-          is_liked: isLiked,
-          is_retweeted: isRetweeted
+          is_liked: searchLiked.has(tid),
+          is_retweeted: searchRetweeted.has(tid)
         }
       };
-    }));
-
-    // Compter le total
-    const totalCount = await Tweet.count({ where: whereClause });
+    });
 
     if (!(await paidContentService.maskTweetsOrFail(enrichedTweets, req.user.id, res))) return;
 
@@ -652,10 +585,9 @@ router.get('/tweets/authenticated', [
         query,
         tweets: enrichedTweets,
         pagination: {
-          total: totalCount,
-          limit: parseInt(limit),
+          limit: requestedLimit,
           offset: parseInt(offset),
-          hasMore: offset + enrichedTweets.length < totalCount
+          hasMore
         }
       }
     });
@@ -691,7 +623,7 @@ router.get('/hashtags', [
     // Recherche de tweets contenant le hashtag
     const tweetsWithHashtag = await Tweet.findAll({
       where: {
-        hashtags: { [Op.overlap]: [query] },
+        [Op.and]: [jsonbArrayOverlap(sequelize, 'hashtags', [query])],
         is_private: false,
         moderation_status: 'approved',
         parent_tweet_id: null // Exclure les réponses

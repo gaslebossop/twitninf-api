@@ -66,7 +66,7 @@ async function bestHoursFor(userId, timeZone = DEFAULT_TIME_ZONE) {
     LEFT JOIN tweet_likes l ON l.tweet_id = t.id
     LEFT JOIN tweet_retweets rt ON rt.tweet_id = t.id
     LEFT JOIN tweets rp ON rp.parent_tweet_id = t.id AND rp.deleted_at IS NULL
-    WHERE t.user_id::text = :userId
+    WHERE t.user_id = :userId::uuid
       AND t.created_at >= NOW() - INTERVAL '90 days'
       AND t.deleted_at IS NULL
       AND t.parent_tweet_id IS NULL

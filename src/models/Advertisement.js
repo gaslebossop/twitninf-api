@@ -2,23 +2,52 @@ const { DataTypes, Model } = require('sequelize');
 const logger = require('../utils/logger');
 
 class Advertisement extends Model {
+  /**
+   * AUDIT R1-04 (2026-08-19) : équivalent de `getAdStats()`/`getTotalSpent()`
+   * pour un LOT de publicités — 3 requêtes groupées au lieu de 4 par
+   * publicité (dont un `findByPk` redondant quand l'appelant a déjà les
+   * instances en main). Retourne une Map id → { impressions, clicks,
+   * engagements, spent, ctr, engagement_rate }.
+   */
+  static async statsForIds(advertisements = []) {
+    const ids = advertisements.map((ad) => String(ad.id));
+    const [impressionsMap, clicksMap, engagementsMap] = await Promise.all([
+      this.sequelize.models.AdImpression.countByAdvertisementIds(ids),
+      this.sequelize.models.AdClick.countByAdvertisementIds(ids),
+      this.sequelize.models.AdEngagement.countByAdvertisementIds(ids),
+    ]);
+
+    const stats = new Map();
+    for (const ad of advertisements) {
+      const id = String(ad.id);
+      const impressions = impressionsMap.get(id) || 0;
+      const clicks = clicksMap.get(id) || 0;
+      const engagements = engagementsMap.get(id) || 0;
+      stats.set(id, {
+        impressions,
+        clicks,
+        engagements,
+        spent: impressions * ad.cost_per_impression,
+        ctr: impressions > 0 ? (clicks / impressions * 100).toFixed(2) : 0,
+        engagement_rate: impressions > 0 ? (engagements / impressions * 100).toFixed(2) : 0,
+      });
+    }
+    return stats;
+  }
+
   // Méthode pour obtenir les statistiques de la publicité
   async getAdStats() {
     const ad = this.toJSON();
-    
-    // Calculer les statistiques en temps réel
-    const impressionCount = await this.countImpressions();
-    const clickCount = await this.countClicks();
-    const engagementCount = await this.countEngagements();
-    
+    const stats = (await Advertisement.statsForIds([this])).get(String(this.id));
+
     return {
       ...ad,
       stats: {
-        impressions: impressionCount,
-        clicks: clickCount,
-        engagements: engagementCount,
-        ctr: clickCount > 0 ? (clickCount / impressionCount * 100).toFixed(2) : 0,
-        engagement_rate: engagementCount > 0 ? (engagementCount / impressionCount * 100).toFixed(2) : 0
+        impressions: stats.impressions,
+        clicks: stats.clicks,
+        engagements: stats.engagements,
+        ctr: stats.ctr,
+        engagement_rate: stats.engagement_rate
       }
     };
   }

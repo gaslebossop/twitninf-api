@@ -88,6 +88,10 @@ class VideoService {
       ffmpeg.ffprobe(inputPath, (err, metadata) => {
         if (err) {
           logger.error('Erreur ffprobe:', err);
+          // AUDIT S3 (2026-08-19) : seul chemin d'échec qui laissait le
+          // fichier temporaire (jusqu'à 500 Mo) sur disque indéfiniment —
+          // celui de la compression, juste en dessous, le fait déjà.
+          fs.unlink(inputPath, () => {});
           return reject(new Error('Impossible de lire les métadonnées de la vidéo.'));
         }
 

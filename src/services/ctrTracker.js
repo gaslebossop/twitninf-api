@@ -55,6 +55,7 @@ async function trackInteraction(userId, tweetId, interactionType, dwellMs = null
         'X-Service-Key': internalSecret(),
       },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(3000),
     });
 
     if (!response.ok) {

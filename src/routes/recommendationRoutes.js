@@ -6,6 +6,7 @@ const similarity = require('../services/similarity');
 const { Tweet, User, UserFollow, TweetLike, TweetRetweet } = require('../models');
 const { Op, fn, col, literal } = require('sequelize');
 const { ultraSafeClean } = require('../utils/circularRefCleaner');
+const { stripInternalTweetFields } = require('../utils/stripInternalTweetFields');
 const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
 const paidContentService = require('../services/paidContentService');
 const { withFeedCache } = require('../services/feedCache');
@@ -114,7 +115,7 @@ async function batchEnrichTweets(userId, dbTweets, engineRecos) {
   const enrichedTweets = [];
 
   for (const dbTweet of dbTweets) {
-    const tweetData = dbTweet.toJSON();
+    const tweetData = stripInternalTweetFields(dbTweet.toJSON());
     tweetData.content = tweetData.content || '';
 
     const likes = likeCountMap[tweetData.id] || 0;
@@ -261,6 +262,12 @@ async function buildSimilarityRecommendations(userId, limit, offset, routeName, 
     // ont des réponses, on ajoute une réponse (limité à 3 max par le reste du code)
     let extraRepliesMap = new Map();
     if (repliesCount === 0 && recommendedParentIds.size > 0) {
+      // AUDIT R3-01 (2026-08-19) : une seule réponse par parent est retenue
+      // ci-dessous (3 au maximum au total) — sans `limit`, un unique tweet
+      // viral parmi les 10 recommandés (des milliers de réponses) faisait
+      // charger l'intégralité de ses réponses, jointes à 4 tables, pour n'en
+      // garder qu'une. Plafond mécanique : jamais plus de 3 par parent n'est
+      // utile, quel que soit le nombre de parents.
       const potentialReplies = await Tweet.findAll({
         where: { parent_tweet_id: { [Op.in]: Array.from(recommendedParentIds) }, deleted_at: null },
         include: [
@@ -277,6 +284,7 @@ async function buildSimilarityRecommendations(userId, limit, offset, routeName, 
           },
         ],
         order: [['created_at', 'ASC']],
+        limit: recommendedParentIds.size * 3,
       });
 
       for (const reply of potentialReplies) {

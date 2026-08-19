@@ -33,6 +33,7 @@ const {
   DIMS, createVec, vectorize, cosineSim, vecEWMA,
   vecAddWeighted, vecNormalize, topK, VectorStore
 } = require('./vectorEngine');
+const logger = require('../../utils/logger');
 const botDetectionService = require('../BotDetectionService');
 const semanticSimilarityService = require('../semanticSimilarityService');
 
@@ -216,7 +217,7 @@ class SimilarityRecommendationEngine {
         `   🌓 Visibilité algo: ${this.authorVisibility.size} comptes, ${this.hashtagRules.size} règles hashtag`
       );
     } catch (err) {
-      console.error('   ⚠️ reloadShadowbanMaps:', err.message);
+      logger.error('   ⚠️ reloadShadowbanMaps:', err.message);
     }
   }
 
@@ -285,7 +286,7 @@ class SimilarityRecommendationEngine {
       const elapsed = Date.now() - t0;
       console.log(`🚀 [Similarity V2] Moteur prêt en ${elapsed}ms (${this.tweetStore.size} tweets, ${this.userStore.size} users)`);
     } catch (err) {
-      console.error('❌ [Similarity V2] Échec initialisation:', err);
+      logger.error('❌ [Similarity V2] Échec initialisation:', err);
     }
   }
 
@@ -299,7 +300,7 @@ class SimilarityRecommendationEngine {
 
     const t0 = Date.now();
     const { Tweet, TweetLike, TweetRetweet } = models;
-    const { Op } = require('sequelize');
+    const { Op, fn, col } = require('sequelize');
     const startTs = this.lastSyncTs || new Date(Date.now() - 3600000); // 1h par défaut si nul
 
     try {
@@ -314,9 +315,13 @@ class SimilarityRecommendationEngine {
         await this.onNewTweet(t.id, t.user_id, t.content, t.media_urls, t.parent_tweet_id, null, t.tweet_type);
       }
 
+      // AUDIT R4-04b (2026-08-19) : seuls `user_id`/`tweet_id` sont utilisés
+      // plus bas ; le reste du fichier fait déjà `attributes: [...]` sur ces
+      // mêmes modèles (`:455`, `:463`, `:585`) — c'était un oubli, pas un choix.
       // 2. Nouvelles interactions (Likes, RT)
       const newLikes = await TweetLike.findAll({
         where: { created_at: { [Op.gt]: startTs } },
+        attributes: ['user_id', 'tweet_id'],
         raw: true
       });
       for (const l of newLikes) {
@@ -325,6 +330,7 @@ class SimilarityRecommendationEngine {
 
       const newRTs = await TweetRetweet.findAll({
         where: { created_at: { [Op.gt]: startTs } },
+        attributes: ['user_id', 'tweet_id', 'retweet_type'],
         raw: true
       });
       for (const rt of newRTs) {
@@ -333,19 +339,33 @@ class SimilarityRecommendationEngine {
 
       // 3. Détection des suppressions (Sync simple)
       // On vérifie les utilisateurs actifs dans la dernière heure
-      const activeUserIds = new Set([
+      const activeUserIds = [...new Set([
         ...newLikes.map(l => String(l.user_id)),
         ...newRTs.map(rt => String(rt.user_id))
-      ]);
+      ])];
 
-      for (const uid of activeUserIds) {
-        const dbLikeCount = await TweetLike.count({ where: { user_id: uid } });
-        const memInteractions = this.userInteractions.get(uid);
-        const memLikeCount = memInteractions ? memInteractions.size : 0;
+      // AUDIT R4-04a (2026-08-19) : un `COUNT(*)` séquentiel PAR utilisateur
+      // actif (jusqu'à des milliers par heure, ~2 ms chacun, une connexion du
+      // pool monopolisée pendant toute la boucle) remplacé par une seule
+      // agrégation groupée.
+      if (activeUserIds.length > 0) {
+        const counts = await TweetLike.findAll({
+          where: { user_id: activeUserIds },
+          attributes: ['user_id', [fn('COUNT', col('id')), 'count']],
+          group: ['user_id'],
+          raw: true
+        });
+        const dbLikeCountByUser = new Map(counts.map((c) => [String(c.user_id), Number(c.count) || 0]));
 
-        // Si moins de likes en DB qu'en mémoire, c'est qu'il y a eu un UNLIKE
-        if (dbLikeCount < memLikeCount - 1) {
-          await this.recalculateUserVector(uid, models);
+        for (const uid of activeUserIds) {
+          const dbLikeCount = dbLikeCountByUser.get(uid) || 0;
+          const memInteractions = this.userInteractions.get(uid);
+          const memLikeCount = memInteractions ? memInteractions.size : 0;
+
+          // Si moins de likes en DB qu'en mémoire, c'est qu'il y a eu un UNLIKE
+          if (dbLikeCount < memLikeCount - 1) {
+            await this.recalculateUserVector(uid, models);
+          }
         }
       }
 
@@ -354,7 +374,7 @@ class SimilarityRecommendationEngine {
         console.log(`🔄 [Sync] Terminé en ${Date.now() - t0}ms (${newTweets.length} tweets, ${newLikes.length + newRTs.length} interactions)`);
       }
     } catch (err) {
-      console.error('⚠️ [Sync] Erreur:', err.message);
+      logger.error('⚠️ [Sync] Erreur:', err.message);
     }
     return true;
   }
@@ -392,7 +412,7 @@ class SimilarityRecommendationEngine {
       console.log(`✨ [Recalculate] Vecteur rafraîchi pour @${userId}`);
       return true;
     } catch (err) {
-      console.error(`⚠️ [Recalculate] Erreur pour ${userId}:`, err.message);
+      logger.error(`⚠️ [Recalculate] Erreur pour ${userId}:`, err.message);
       return false;
     }
   }
@@ -481,7 +501,7 @@ class SimilarityRecommendationEngine {
 
       console.log(`   📊 Meta enrichies chargées: ${this.tweetMeta.size} tweets, ${this.followGraph.size} follow graphs`);
     } catch (err) {
-      console.error('   ⚠️ Erreur chargement meta enrichies:', err.message);
+      logger.error('   ⚠️ Erreur chargement meta enrichies:', err.message);
     }
   }
 
@@ -537,7 +557,7 @@ class SimilarityRecommendationEngine {
 
       console.log(`   📈 Engagement chargé: ${likeCounts.length} like groups, ${rtCounts.length} RT groups, ${replyCounts.length} reply groups`);
     } catch (err) {
-      console.error('   ⚠️ Erreur chargement engagement:', err.message);
+      logger.error('   ⚠️ Erreur chargement engagement:', err.message);
     }
   }
 
@@ -567,7 +587,7 @@ class SimilarityRecommendationEngine {
       }
       console.log(`   👤 ${users.length} profils auteurs chargés`);
     } catch (err) {
-      console.error('   ⚠️ Erreur chargement author meta:', err.message);
+      logger.error('   ⚠️ Erreur chargement author meta:', err.message);
     }
   }
 
@@ -596,7 +616,7 @@ class SimilarityRecommendationEngine {
       }
       console.log(`   🔗 ${follows.length} relations de follow chargées`);
     } catch (err) {
-      console.error('   ⚠️ Erreur chargement follow graph:', err.message);
+      logger.error('   ⚠️ Erreur chargement follow graph:', err.message);
     }
   }
 
@@ -704,18 +724,22 @@ class SimilarityRecommendationEngine {
         let vec = vectorize(tweet.content);
         const hasMedia = Array.isArray(tweet.media_urls) && tweet.media_urls.length > 0;
 
-        // Si la vectorisation échoue (ex: vidéo sans texte), on utilise un vecteur nul 
+        // Si la vectorisation échoue (ex: vidéo sans texte), on utilise un vecteur nul
         // pour qu'elle puisse tout de même être recommandée par l'engagement (trending/collab/freshness)
         if (!vec) {
           if (hasMedia || tweet.tweet_type === 'video') {
-            vec = new Float32Array(256); // ZERO vector (DIMS = 256)
+            // AUDIT B2-01 : `DIMS` importé au lieu d'une dimension recopiée en
+            // dur — c'était le `256` figé ici (vs `768` réel) qui faisait
+            // rejeter ce vecteur par `upsert` (mauvaise taille), silencieusement.
+            vec = new Float32Array(DIMS);
           } else {
             continue;
           }
         }
 
         if (vec) {
-          this.tweetStore.upsert(tweet.id, vec);
+          const upserted = this.tweetStore.upsert(tweet.id, vec);
+          if (!upserted) continue;
 
           const hashtags = Array.isArray(tweet.hashtags)
             ? tweet.hashtags.map(h => h.toLowerCase())
@@ -815,14 +839,14 @@ class SimilarityRecommendationEngine {
       this._buildHashtagAffinities(tweets);
 
       // Sauvegarder
-      this.tweetStore.save();
-      this.userStore.save();
+      await this.tweetStore.save();
+      await this.userStore.save();
 
       const elapsed = Date.now() - t0;
       console.log(`   🏁 Rebuild V2 terminé en ${elapsed}ms`);
 
     } catch (err) {
-      console.error('   ❌ Erreur rebuild:', err.message);
+      logger.error('   ❌ Erreur rebuild:', err.message);
     }
   }
 
@@ -1732,16 +1756,16 @@ class SimilarityRecommendationEngine {
   }
 
   /** Sauvegarde périodique des index */
-  _periodicSave() {
+  async _periodicSave() {
     try {
       this._purgeDiscoveryPool();
-      const t = this.tweetStore.save();
-      const u = this.userStore.save();
+      const t = await this.tweetStore.save();
+      const u = await this.userStore.save();
       if (t || u) {
         console.log(`💾 [Similarity V2] Index sauvegardés: ${t || 0} tweets, ${u || 0} users`);
       }
     } catch (err) {
-      console.error('❌ [Similarity V2] Erreur sauvegarde périodique:', err.message);
+      logger.error('❌ [Similarity V2] Erreur sauvegarde périodique:', err.message);
     }
   }
 

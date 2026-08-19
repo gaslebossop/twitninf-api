@@ -166,7 +166,13 @@ class SmartRecommendationEngine {
       cacheHits: 0,
       averageProcessingTime: 0,
       accuracyScore: 0,
-      userSatisfaction: 0
+      userSatisfaction: 0,
+      // AUDIT B2-04 : les 26 fonctions de scoring repliaient sur une note
+      // neutre en cas d'erreur sans laisser aucune trace — un composant
+      // cassé était indistinguable d'un composant en bon état. Ce compteur
+      // rend la dégradation observable, sur le modèle de
+      // `featureFlagService.js` (`stats.errors`).
+      scoringErrors: 0
     };
 
     // 📊 Données comportementales chargées
@@ -710,15 +716,21 @@ class SmartRecommendationEngine {
       const trendingHashtags = await this.analyzeTrendingHashtags();
 
       // 🚫 3. Vérifier les shadowbans (pour filtrer les tweets d'utilisateurs shadowbannés)
-      const shadowbanChecks = new Map();
+      //
+      // AUDIT R1-10 (2026-08-19) : cette Map était remplie SOUS le
+      // `Promise.all` ci-dessous — tous les rappels la lisaient avant que le
+      // premier `await` n'ait eu le temps d'y écrire, donc systématiquement
+      // en échec de cache à la première vague. Dédoublonner AVANT la boucle
+      // rend le cache réellement utile pour un auteur publiant plusieurs
+      // tweets de la page.
+      const uniqueAuthorIds = [...new Set(tweets.map((tweet) => tweet.author_id))];
+      const shadowbanStatuses = await Promise.all(
+        uniqueAuthorIds.map((authorId) => this.checkShadowbanStatus(authorId))
+      );
+      const shadowbanChecks = new Map(uniqueAuthorIds.map((id, i) => [id, shadowbanStatuses[i]]));
 
       const scoredTweets = await Promise.all(tweets.map(async (tweet) => {
-        // Vérifier le shadowban de l'auteur (avec cache)
-        let shadowbanStatus = shadowbanChecks.get(tweet.author_id);
-        if (!shadowbanStatus) {
-          shadowbanStatus = await this.checkShadowbanStatus(tweet.author_id);
-          shadowbanChecks.set(tweet.author_id, shadowbanStatus);
-        }
+        const shadowbanStatus = shadowbanChecks.get(tweet.author_id);
 
         // Si l'utilisateur est shadowbanned, réduire drastiquement la visibilité
         if (shadowbanStatus.isShadowbanned) {
@@ -1108,38 +1120,39 @@ class SmartRecommendationEngine {
    */
   async enrichWithMetadata(tweets, userId) {
     try {
-      return await Promise.all(tweets.map(async (tweet) => {
+      // AUDIT R1-08 (2026-08-19) : 5 requêtes par tweet — regroupées comme
+      // dans `tweetRecommendationService.enrichTweetsWithUserData`, même
+      // motif. Les wrappers `getTweetLikeCount`/`hasUserLiked`/… restent
+      // inchangés pour leurs autres appelants ponctuels (un seul tweet).
+      const idsWithTweetId = tweets.filter((t) => t.id).map((t) => String(t.id));
+      const [likesMap, rtMap, repliesMap, likedSet, rtSet] = await Promise.all([
+        TweetLike.countLikesForTweets(idsWithTweetId),
+        TweetRetweet.countRetweetsForTweets(idsWithTweetId),
+        Tweet.countRepliesForTweets(idsWithTweetId),
+        TweetLike.likedTweetIdsForUser(userId, idsWithTweetId),
+        TweetRetweet.retweetedTweetIdsForUser(userId, idsWithTweetId),
+      ]);
+
+      return tweets.map((tweet) => {
         const enriched = { ...tweet };
 
-        // Statistiques d'engagement
         if (tweet.id) {
-          const [likeCount, retweetCount, replyCount] = await Promise.all([
-            this.getTweetLikeCount(tweet.id),
-            this.getTweetRetweetCount(tweet.id),
-            this.getTweetReplyCount(tweet.id)
-          ]);
-
+          const tid = String(tweet.id);
           enriched.stats = {
-            likes: likeCount,
-            retweets: retweetCount,
-            replies: replyCount,
+            likes: likesMap.get(tid) || 0,
+            retweets: rtMap.get(tid) || 0,
+            replies: repliesMap.get(tid) || 0,
             views: tweet.view_count || 0
           };
 
-          // Interactions utilisateur
-          const [isLiked, isRetweeted] = await Promise.all([
-            this.hasUserLiked(userId, tweet.id),
-            this.hasUserRetweeted(userId, tweet.id)
-          ]);
-
           enriched.userInteraction = {
-            isLiked,
-            isRetweeted
+            isLiked: likedSet.has(tid),
+            isRetweeted: rtSet.has(tid)
           };
         }
 
         return enriched;
-      }));
+      });
     } catch (error) {
       logger.error('❌ Erreur enrichissement:', error);
       return tweets;
@@ -1719,6 +1732,22 @@ class SmartRecommendationEngine {
   }
 
   /**
+   * AUDIT B2-04 : repli commun aux fonctions de scoring ci-dessous. La
+   * stratégie de repli (une valeur neutre plutôt que de casser tout le fil)
+   * ne change pas — c'est bien de journaliser sans limite qu'il fallait
+   * éviter : ces fonctions sont appelées une fois par tweet et par candidat
+   * (cf. B2-01). Échantillonné à 1/100 ; le compteur, lui, n'est jamais
+   * échantillonné — c'est lui qui rend la dégradation visible.
+   */
+  _scoringFallback(fnName, error, fallbackValue) {
+    this.metrics.scoringErrors++;
+    if (this.metrics.scoringErrors % 100 === 1) {
+      logger.warn(`⚠️ [SmartReco] ${fnName} repli sur ${fallbackValue}:`, error?.message || error);
+    }
+    return fallbackValue;
+  }
+
+  /**
    * Méthodes de vérification et calculs de scores spécialisés
    */
   async userFollowsAuthor(userId, authorId) {
@@ -1728,7 +1757,7 @@ class SmartRecommendationEngine {
       });
       return !!follow;
     } catch (error) {
-      return false;
+      return this._scoringFallback('userFollowsAuthor', error, false);
     }
   }
 
@@ -1739,7 +1768,7 @@ class SmartRecommendationEngine {
       });
       return !!follow;
     } catch (error) {
-      return false;
+      return this._scoringFallback('authorFollowsUser', error, false);
     }
   }
 
@@ -1765,7 +1794,7 @@ class SmartRecommendationEngine {
 
       return mutualCount;
     } catch (error) {
-      return 0;
+      return this._scoringFallback('getMutualConnections', error, 0);
     }
   }
 
@@ -1792,7 +1821,7 @@ class SmartRecommendationEngine {
 
       return likes + retweets;
     } catch (error) {
-      return 0;
+      return this._scoringFallback('getEngagementHistory', error, 0);
     }
   }
 
@@ -1815,7 +1844,7 @@ class SmartRecommendationEngine {
 
       return Math.min(20, bonus);
     } catch (error) {
-      return 0;
+      return this._scoringFallback('calculateSimilarityBonus', error, 0);
     }
   }
 
@@ -1823,7 +1852,7 @@ class SmartRecommendationEngine {
     try {
       return await TweetLike.count({ where: { tweet_id: tweetId } });
     } catch (error) {
-      return 0;
+      return this._scoringFallback('getTweetLikeCount', error, 0);
     }
   }
 
@@ -1831,7 +1860,7 @@ class SmartRecommendationEngine {
     try {
       return await TweetRetweet.count({ where: { tweet_id: tweetId } });
     } catch (error) {
-      return 0;
+      return this._scoringFallback('getTweetRetweetCount', error, 0);
     }
   }
 
@@ -1839,7 +1868,7 @@ class SmartRecommendationEngine {
     try {
       return await Tweet.count({ where: { parent_tweet_id: tweetId } });
     } catch (error) {
-      return 0;
+      return this._scoringFallback('getTweetReplyCount', error, 0);
     }
   }
 
@@ -1860,7 +1889,7 @@ class SmartRecommendationEngine {
 
       return Math.min(100, (relevantHashtags.length / tweet.hashtags.length) * 100);
     } catch (error) {
-      return 0;
+      return this._scoringFallback('calculateHashtagRelevance', error, 0);
     }
   }
 
@@ -1883,7 +1912,7 @@ class SmartRecommendationEngine {
       
       return Math.max(0, 100 - (minDistance * 10));
     } catch (error) {
-      return 50;
+      return this._scoringFallback('calculateTimeOfDayScore', error, 50);
     }
   }
 
@@ -1906,7 +1935,7 @@ class SmartRecommendationEngine {
 
       return Math.min(100, engagementPerHour * 5);
     } catch (error) {
-      return 0;
+      return this._scoringFallback('calculateTrendingScore', error, 0);
     }
   }
 
@@ -1924,7 +1953,7 @@ class SmartRecommendationEngine {
 
       return Math.min(100, momentumScore * (Math.log10(views) / 3));
     } catch (error) {
-      return 0;
+      return this._scoringFallback('calculateMomentumScore', error, 0);
     }
   }
 
@@ -1944,7 +1973,7 @@ class SmartRecommendationEngine {
 
       return Math.min(100, matchScore);
     } catch (error) {
-      return 0;
+      return this._scoringFallback('calculateTopicMatch', error, 0);
     }
   }
 
@@ -1955,7 +1984,7 @@ class SmartRecommendationEngine {
 
       return tweetLanguage === userLanguage ? 100 : 0;
     } catch (error) {
-      return 50;
+      return this._scoringFallback('calculateLanguageMatch', error, 50);
     }
   }
 
@@ -1963,13 +1992,13 @@ class SmartRecommendationEngine {
     try {
       const tweetType = this.getTweetType(tweet);
       const preferences = userProfile.contentPreferences?.contentTypes || {};
-      
+
       const preference = preferences[tweetType] || 0;
       const maxPreference = Math.max(...Object.values(preferences), 1);
-      
+
       return (preference / maxPreference) * 100;
     } catch (error) {
-      return 50;
+      return this._scoringFallback('calculateContentAffinity', error, 50);
     }
   }
 
@@ -1986,7 +2015,7 @@ class SmartRecommendationEngine {
       // Cette méthode peut être développée pour analyser les utilisateurs similaires
       return 50;
     } catch (error) {
-      return 0;
+      return this._scoringFallback('calculateSimilarUserScore', error, 0);
     }
   }
 
@@ -1994,12 +2023,12 @@ class SmartRecommendationEngine {
     try {
       const tweetHour = new Date(tweet.created_at).getHours();
       const preferredHours = userProfile.engagementPatterns?.preferredTimeSlots || [12, 18, 21];
-      
+
       if (preferredHours.includes(tweetHour)) return 100;
-      
+
       return 30; // Score de base
     } catch (error) {
-      return 50;
+      return this._scoringFallback('calculateInteractionPattern', error, 50);
     }
   }
 
@@ -2008,10 +2037,10 @@ class SmartRecommendationEngine {
       const content = (tweet.content || '').toLowerCase();
       const hashtags = tweet.hashtags || [];
       const words = content.split(/\s+/).filter(word => word.length > 3);
-      
+
       return [...new Set([...hashtags, ...words.slice(0, 5)])];
     } catch (error) {
-      return [];
+      return this._scoringFallback('extractTopics', error, []);
     }
   }
 
@@ -2021,7 +2050,7 @@ class SmartRecommendationEngine {
       // Cette logique peut être développée pour tracker les tweets vus
       return false;
     } catch (error) {
-      return false;
+      return this._scoringFallback('isRecentlySeen', error, false);
     }
   }
 
@@ -2032,7 +2061,7 @@ class SmartRecommendationEngine {
       });
       return !!like;
     } catch (error) {
-      return false;
+      return this._scoringFallback('hasUserLiked', error, false);
     }
   }
 
@@ -2043,7 +2072,7 @@ class SmartRecommendationEngine {
       });
       return !!retweet;
     } catch (error) {
-      return false;
+      return this._scoringFallback('hasUserRetweeted', error, false);
     }
   }
 
@@ -2058,7 +2087,7 @@ class SmartRecommendationEngine {
         }
       });
     } catch (error) {
-      return 1000;
+      return this._scoringFallback('estimateTotalAvailable', error, 1000);
     }
   }
 
@@ -2081,7 +2110,7 @@ class SmartRecommendationEngine {
       
       return Math.round(((authorDiversity + topicDiversity) / 2) * 100);
     } catch (error) {
-      return 70;
+      return this._scoringFallback('calculateDiversityScore', error, 70);
     }
   }
 
@@ -2098,7 +2127,7 @@ class SmartRecommendationEngine {
       const averageRelevance = relevanceScores.reduce((a, b) => a + b, 0) / relevanceScores.length;
       return Math.round(averageRelevance);
     } catch (error) {
-      return 50;
+      return this._scoringFallback('calculateRelevanceScore', error, 50);
     }
   }
 
@@ -2116,7 +2145,7 @@ class SmartRecommendationEngine {
       const averageFreshness = freshnessScores.reduce((a, b) => a + b, 0) / freshnessScores.length;
       return Math.round(averageFreshness);
     } catch (error) {
-      return 50;
+      return this._scoringFallback('calculateFreshnessScore', error, 50);
     }
   }
 
@@ -2143,7 +2172,7 @@ class SmartRecommendationEngine {
       
       return entry.data;
     } catch (error) {
-      return null;
+      return this._scoringFallback('getFromCache', error, null);
     }
   }
 

@@ -29,6 +29,7 @@ async function createAgentTaskIssue(proposal) {
         'Content-Type': 'application/json',
         'X-GitHub-Api-Version': '2022-11-28',
       },
+      signal: AbortSignal.timeout(8000),
       body: JSON.stringify({
         title: `[Forge] ${proposal.title}`,
         body: [

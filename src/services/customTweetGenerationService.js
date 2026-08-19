@@ -31,7 +31,7 @@ async function fetchWritingSamples(userId) {
   const rows = await sequelize.query(`
     SELECT t.content
     FROM tweets t
-    WHERE t.user_id::text = :userId
+    WHERE t.user_id = :userId::uuid
       AND t.deleted_at IS NULL
       AND t.parent_tweet_id IS NULL
       AND COALESCE(t.is_retweet, false) = false

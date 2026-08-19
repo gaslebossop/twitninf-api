@@ -78,7 +78,15 @@ class EconomyMetrics {
     return w ? toAmount(w.balance) : 0;
   }
 
-  static async purchaseVolume24h(currencyId) {
+  // AUDIT B1-01 (2026-08-19), point c — cette aide était la seule des trois
+  // à ne pas propager `dbTransaction` : appelée à l'intérieur d'une
+  // transaction (via `refresh()`, elle-même appelée par 20 sites de
+  // l'économie), elle empruntait une SECONDE connexion au pool pendant que
+  // la transaction appelante détenait déjà la sienne — risque
+  // d'interblocage sous charge (pool de 10, verrous tenus jusqu'au COMMIT).
+  // Corrige au passage une incohérence de lecture : ce volume était calculé
+  // sur un état de la base différent de celui des soldes.
+  static async purchaseVolume24h(currencyId, dbTransaction = null) {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const rows = await Transaction.findAll({
       where: {
@@ -87,7 +95,8 @@ class EconomyMetrics {
         status: 'COMPLETED',
         createdAt: { [Op.gte]: since }
       },
-      attributes: ['amountInEur', 'amount']
+      attributes: ['amountInEur', 'amount'],
+      transaction: dbTransaction
     });
     const volumeEur = rows.reduce((s, t) => s + toAmount(t.amountInEur), 0);
     const volumeTwc = rows.reduce((s, t) => s + toAmount(t.amount), 0);
@@ -105,7 +114,7 @@ class EconomyMetrics {
 
     const circulating = await this.sumBalances(currencyId, dbTransaction);
     const treasury = await this.getTreasuryBalance(currencyId, dbTransaction);
-    const { volumeEur, volumeTwc, count } = await this.purchaseVolume24h(currencyId);
+    const { volumeEur, volumeTwc, count } = await this.purchaseVolume24h(currencyId, dbTransaction);
 
     const userHeld = roundTWC(circulating - treasury);
 

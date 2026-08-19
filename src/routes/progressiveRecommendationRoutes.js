@@ -68,17 +68,21 @@ router.get('/', authenticateToken, async (req, res) => {
     
     const userId = req.user.id;
     const {
-      limit = 50,
+      limit: rawLimit = 50,
       offset = 0,
       includeUser = true,
       includeStats = true,
       group = 'auto' // auto, initial, expansion, viral
     } = req.query;
+    // AUDIT R3-11 (2026-08-19) : seule route de fil du dépôt sans plafond de
+    // page — alignée sur la limite déjà appliquée ailleurs (`tweetRoutes.js`
+    // : max 100).
+    const limit = Math.min(Math.max(parseInt(rawLimit, 10) || 50, 1), 100);
 
     logger.info(`🚀 Demande de recommandations progressives pour ${userId} (groupe: ${group})`);
 
     const context = {
-      limit: parseInt(limit),
+      limit,
       offset: parseInt(offset),
       includeUser: includeUser === 'true',
       includeStats: includeStats === 'true',

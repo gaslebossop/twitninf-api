@@ -1,14 +1,21 @@
 const express = require('express');
 const userSimilarityService = require('../services/userSimilarityService');
-const { authenticateToken } = require('../middleware/authMiddleware');
+const { authenticateToken, requireAdminRole } = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
 
 const router = express.Router();
 
+// AUDIT S2 (2026-08-19) : ce routeur importait `authenticateToken` sans
+// jamais l'utiliser — les 4 routes étaient accessibles sans authentification,
+// dont `/reload` (rechargement de l'index en mémoire depuis le disque, effet
+// de déni de service en martelage) et `/similar/:userId` (données dérivées
+// d'un utilisateur arbitraire).
+router.use(authenticateToken);
+
 /**
  * @route GET /api/user-similarity/similar/:userId
  * @desc Get similar users based on interactions
- * @access Public/Private (depending on requirements, keeping it public-ish for now if userId provided)
+ * @access Private
  */
 router.get('/similar/:userId', async (req, res) => {
   try {
@@ -35,8 +42,7 @@ router.get('/similar/:userId', async (req, res) => {
  * @desc Manually trigger a sync of similarity data (Admin only)
  * @access Private (Admin)
  */
-const { requireAdminRole } = require('../middleware/authMiddleware');
-router.post('/sync', authenticateToken, requireAdminRole, async (req, res) => {
+router.post('/sync', requireAdminRole, async (req, res) => {
   try {
     const count = await userSimilarityService.syncAllUsers();
     return res.json({
@@ -55,8 +61,9 @@ router.post('/sync', authenticateToken, requireAdminRole, async (req, res) => {
 /**
  * @route POST /api/user-similarity/reload
  * @desc Force reload vectors from disk into memory
+ * @access Private (Admin) — opération coûteuse, martelable sans ce contrôle.
  */
-router.post('/reload', async (req, res) => {
+router.post('/reload', requireAdminRole, async (req, res) => {
   try {
     await userSimilarityService.initialize(true);
     return res.json({

@@ -3,6 +3,7 @@ const router = express.Router();
 const { authenticateToken } = require('../middleware/authMiddleware');
 const { Tweet, User, TweetLike, TweetRetweet, UserBehaviorData, sequelize } = require('../models');
 const { Op } = require('sequelize');
+const logger = require('../utils/logger');
 const { resolveTimeZone, hourInZoneSql } = require('../utils/timezone');
 
 const formatDateKey = (input) => {
@@ -87,7 +88,7 @@ router.get('/:userId/overview', authenticateToken, async (req, res) => {
         COALESCE(SUM(view_count), 0) as total_views,
         COALESCE(AVG(view_count), 0) as avg_views_per_tweet
       FROM tweets 
-      WHERE user_id::text = :userId
+      WHERE user_id = :userId::uuid
         AND created_at >= :startDate 
         AND deleted_at IS NULL
     `, {
@@ -110,7 +111,7 @@ router.get('/:userId/overview', authenticateToken, async (req, res) => {
           (SELECT COUNT(*) FROM tweets WHERE parent_tweet_id = t.id) as comments_count,
           (SELECT COUNT(*) FROM user_behavior_data WHERE target_id::text = t.id::text AND target_type = 'tweet' AND action_type = 'tweet_share') as shares_count
         FROM tweets t
-        WHERE t.user_id::text = :userId
+        WHERE t.user_id = :userId::uuid
           AND t.created_at >= :startDate 
           AND t.deleted_at IS NULL
       ) as tweet_engagement
@@ -125,7 +126,7 @@ router.get('/:userId/overview', authenticateToken, async (req, res) => {
         COUNT(CASE WHEN uf.following_id = :userId AND uf.status = 'active' THEN 1 END) as follower_count,
         COUNT(CASE WHEN uf.follower_id = :userId AND uf.status = 'active' THEN 1 END) as following_count
       FROM user_follows uf
-      WHERE (uf.following_id::text = :userId OR uf.follower_id::text = :userId)
+      WHERE (uf.following_id = :userId::uuid OR uf.follower_id = :userId::uuid)
     `, {
       replacements: { userId },
       type: sequelize.QueryTypes.SELECT
@@ -183,7 +184,7 @@ router.get('/:userId/overview', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Erreur récupération stats utilisateur:', error);
+    logger.error('❌ Erreur récupération stats utilisateur:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur lors de la récupération des statistiques',
@@ -247,7 +248,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
         DATE(created_at) as date,
         COUNT(*) as tweets
       FROM tweets 
-      WHERE user_id::text = :userId
+      WHERE user_id = :userId::uuid
         AND created_at >= :startDate 
         AND created_at <= :endDate
         AND deleted_at IS NULL
@@ -285,8 +286,16 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
         -- vue vaut 0, pas un trou.
         COALESCE(COUNT(*), 0) as views
       FROM user_behavior_data ubd
-      JOIN tweets t ON t.id::text = ubd.target_id AND ubd.target_type = 'tweet'
-      WHERE t.user_id::text = :userId
+      -- AUDIT R2-01 (2026-08-19) : ancien code castait t.id::text, ce qui
+      -- rendait l'index UUID de tweets.id inutilisable pour cette jointure.
+      -- target_id est un STRING polymorphe (peut contenir un hashtag, une
+      -- URL de lien, etc. selon target_type) : le caster en ::uuid sans
+      -- garde ferait échouer la requête dès qu'une ligne non-'tweet' est
+      -- évaluée. Le CASE protège le cast (Postgres garantit qu'une branche
+      -- non retenue n'est jamais évaluée), et laisse t.id sans cast pour
+      -- que l'index reste utilisable.
+      JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' THEN ubd.target_id::uuid END
+      WHERE t.user_id = :userId::uuid
         AND ubd.action_type IN ('tweet_view', 'media_view')
         AND ubd.timestamp >= :startDate 
         AND ubd.timestamp <= :endDate
@@ -308,7 +317,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
         COUNT(*) as likes
       FROM tweet_likes tl
       JOIN tweets t ON tl.tweet_id = t.id
-      WHERE t.user_id::text = :userId
+      WHERE t.user_id = :userId::uuid
         AND tl.created_at >= :startDate 
         AND tl.created_at <= :endDate
         AND t.deleted_at IS NULL
@@ -328,7 +337,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
         COUNT(*) as retweets
       FROM tweet_retweets tr
       JOIN tweets t ON tr.tweet_id = t.id
-      WHERE t.user_id::text = :userId
+      WHERE t.user_id = :userId::uuid
         AND tr.created_at >= :startDate 
         AND tr.created_at <= :endDate
         AND t.deleted_at IS NULL
@@ -348,7 +357,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
         COUNT(*) as comments
       FROM tweets reply
       JOIN tweets t ON reply.parent_tweet_id = t.id
-      WHERE t.user_id::text = :userId
+      WHERE t.user_id = :userId::uuid
         AND reply.created_at >= :startDate 
         AND reply.created_at <= :endDate
         AND t.deleted_at IS NULL
@@ -367,8 +376,10 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
         DATE(ubd.created_at) as date,
         COUNT(*) as shares
       FROM user_behavior_data ubd
-      JOIN tweets t ON t.id::text = ubd.target_id::text
-      WHERE t.user_id::text = :userId
+      -- AUDIT R2-01 (2026-08-19) : voir la note plus haut sur le même motif
+      -- (target_id polymorphe, cast protégé par CASE).
+      JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' THEN ubd.target_id::uuid END
+      WHERE t.user_id = :userId::uuid
         AND ubd.target_type = 'tweet'
         AND ubd.action_type = 'tweet_share'
         AND ubd.created_at >= :startDate
@@ -409,7 +420,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
         DATE(created_at) as date,
         COUNT(*) as followers_gained
       FROM user_follows
-      WHERE following_id::text = :userId
+      WHERE following_id = :userId::uuid
         AND status = 'active'
         AND created_at >= :startDate
         AND created_at <= :endDate
@@ -460,7 +471,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Erreur récupération stats quotidiennes:', error);
+    logger.error('❌ Erreur récupération stats quotidiennes:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur lors de la récupération des statistiques quotidiennes',
@@ -508,45 +519,77 @@ router.get('/:userId/top-tweets', authenticateToken, async (req, res) => {
     // Requête pour obtenir les tweets les plus performants
     const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
 
+    // AUDIT R2-07 (2026-08-19) : trois jointures « un vers plusieurs » sur la
+    // même table de gauche se multipliaient entre elles avant l'agrégation
+    // (un tweet à 100 likes/20 retweets/50 réponses produisait 100 000
+    // lignes intermédiaires, à trier pour dédupliquer via COUNT(DISTINCT)) —
+    // probablement la requête la plus chère de toute l'API. La sous-requête
+    // `sh` agrégeait en plus TOUTE `user_behavior_data`, sans filtre sur
+    // l'utilisateur. Chaque compteur est maintenant agrégé séparément, et
+    // restreint aux seuls tweets de l'utilisateur (`user_tweets`), avant la
+    // jointure — un JOIN, pas un produit.
     const topTweets = await sequelize.query(`
-      SELECT 
-        t.id,
-        t.content,
-        t.view_count as views,
-        t.created_at,
-        COUNT(DISTINCT tl.id) as likes,
-        COUNT(DISTINCT tr.id) as retweets,
-        COUNT(DISTINCT reply.id) as comments,
-        COALESCE(sh.shares, 0) as shares,
-        (COUNT(DISTINCT tl.id) + COUNT(DISTINCT tr.id) + COUNT(DISTINCT reply.id) + COALESCE(sh.shares, 0)) as total_engagement,
-        CASE 
-          WHEN t.view_count > 0 
-          THEN ((COUNT(DISTINCT tl.id) + COUNT(DISTINCT tr.id) + COUNT(DISTINCT reply.id) + COALESCE(sh.shares, 0)) * 100.0 / t.view_count)
-          ELSE 0 
-        END as engagement_rate,
-        (
-          COALESCE(t.view_count, 0) +
-          COUNT(DISTINCT tl.id) +
-          COUNT(DISTINCT tr.id) +
-          COUNT(DISTINCT reply.id) +
-          COALESCE(sh.shares, 0)
-        ) as performance_score
-      FROM tweets t
-      LEFT JOIN tweet_likes tl ON t.id = tl.tweet_id
-      LEFT JOIN tweet_retweets tr ON t.id = tr.tweet_id
-      LEFT JOIN tweets reply ON t.id = reply.parent_tweet_id
-      LEFT JOIN (
+      WITH user_tweets AS (
+        SELECT id, content, view_count, created_at
+        FROM tweets
+        WHERE user_id = :userId::uuid
+          AND created_at >= :startDate
+          AND parent_tweet_id IS NULL
+          AND deleted_at IS NULL
+      ),
+      likes_agg AS (
+        SELECT tweet_id, COUNT(*) AS likes
+        FROM tweet_likes
+        WHERE tweet_id IN (SELECT id FROM user_tweets)
+        GROUP BY tweet_id
+      ),
+      retweets_agg AS (
+        SELECT tweet_id, COUNT(*) AS retweets
+        FROM tweet_retweets
+        WHERE tweet_id IN (SELECT id FROM user_tweets)
+        GROUP BY tweet_id
+      ),
+      replies_agg AS (
+        SELECT parent_tweet_id, COUNT(*) AS comments
+        FROM tweets
+        WHERE parent_tweet_id IN (SELECT id FROM user_tweets)
+        GROUP BY parent_tweet_id
+      ),
+      shares_agg AS (
         SELECT target_id::text AS tweet_id, COUNT(*) AS shares
         FROM user_behavior_data
         WHERE target_type = 'tweet' AND action_type = 'tweet_share'
+          AND target_id::text IN (SELECT id::text FROM user_tweets)
         GROUP BY target_id::text
-      ) sh ON sh.tweet_id = t.id::text
-      WHERE t.user_id::text = :userId
-        AND t.created_at >= :startDate 
-        AND t.parent_tweet_id IS NULL
-        AND t.deleted_at IS NULL
-      GROUP BY t.id, t.content, t.view_count, t.created_at, sh.shares
-      ORDER BY performance_score DESC, views DESC, likes DESC, retweets DESC, comments DESC, t.created_at DESC
+      )
+      SELECT
+        ut.id,
+        ut.content,
+        ut.view_count as views,
+        ut.created_at,
+        COALESCE(la.likes, 0) as likes,
+        COALESCE(ra.retweets, 0) as retweets,
+        COALESCE(rpa.comments, 0) as comments,
+        COALESCE(sa.shares, 0) as shares,
+        (COALESCE(la.likes, 0) + COALESCE(ra.retweets, 0) + COALESCE(rpa.comments, 0) + COALESCE(sa.shares, 0)) as total_engagement,
+        CASE
+          WHEN ut.view_count > 0
+          THEN ((COALESCE(la.likes, 0) + COALESCE(ra.retweets, 0) + COALESCE(rpa.comments, 0) + COALESCE(sa.shares, 0)) * 100.0 / ut.view_count)
+          ELSE 0
+        END as engagement_rate,
+        (
+          COALESCE(ut.view_count, 0) +
+          COALESCE(la.likes, 0) +
+          COALESCE(ra.retweets, 0) +
+          COALESCE(rpa.comments, 0) +
+          COALESCE(sa.shares, 0)
+        ) as performance_score
+      FROM user_tweets ut
+      LEFT JOIN likes_agg la ON la.tweet_id = ut.id
+      LEFT JOIN retweets_agg ra ON ra.tweet_id = ut.id
+      LEFT JOIN replies_agg rpa ON rpa.parent_tweet_id = ut.id
+      LEFT JOIN shares_agg sa ON sa.tweet_id = ut.id::text
+      ORDER BY performance_score DESC, views DESC, likes DESC, retweets DESC, comments DESC, ut.created_at DESC
       LIMIT :limit
     `, {
       replacements: { userId, startDate, limit: parsedLimit },
@@ -578,7 +621,7 @@ router.get('/:userId/top-tweets', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Erreur récupération top tweets:', error);
+    logger.error('❌ Erreur récupération top tweets:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur lors de la récupération des tweets performants',
@@ -636,7 +679,7 @@ router.get('/:userId/activity', authenticateToken, async (req, res) => {
         ${hourInZoneSql('created_at')} as hour,
         COUNT(*) as tweet_count
       FROM tweets
-      WHERE user_id::text = :userId
+      WHERE user_id = :userId::uuid
         AND created_at >= :startDate
         AND deleted_at IS NULL
       GROUP BY 1
@@ -651,19 +694,20 @@ router.get('/:userId/activity', authenticateToken, async (req, res) => {
       WITH audience_events AS (
         SELECT tl.created_at AS occurred_at
         FROM tweet_likes tl JOIN tweets t ON t.id = tl.tweet_id
-        WHERE t.user_id::text = :userId AND t.deleted_at IS NULL
+        WHERE t.user_id = :userId::uuid AND t.deleted_at IS NULL
         UNION ALL
         SELECT tr.created_at AS occurred_at
         FROM tweet_retweets tr JOIN tweets t ON t.id = tr.tweet_id
-        WHERE t.user_id::text = :userId AND t.deleted_at IS NULL
+        WHERE t.user_id = :userId::uuid AND t.deleted_at IS NULL
         UNION ALL
         SELECT reply.created_at AS occurred_at
         FROM tweets reply JOIN tweets t ON t.id = reply.parent_tweet_id
-        WHERE t.user_id::text = :userId AND t.deleted_at IS NULL AND reply.deleted_at IS NULL
+        WHERE t.user_id = :userId::uuid AND t.deleted_at IS NULL AND reply.deleted_at IS NULL
         UNION ALL
         SELECT ubd.created_at AS occurred_at
-        FROM user_behavior_data ubd JOIN tweets t ON t.id::text = ubd.target_id::text
-        WHERE t.user_id::text = :userId AND t.deleted_at IS NULL
+        -- AUDIT R2-01 (2026-08-19) : même motif, voir la note plus haut.
+        FROM user_behavior_data ubd JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' THEN ubd.target_id::uuid END
+        WHERE t.user_id = :userId::uuid AND t.deleted_at IS NULL
           AND ubd.target_type = 'tweet' AND ubd.action_type = 'tweet_share'
       )
       SELECT
@@ -714,7 +758,7 @@ router.get('/:userId/activity', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Erreur récupération activité utilisateur:', error);
+    logger.error('❌ Erreur récupération activité utilisateur:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur lors de la récupération des données d\'activité',
@@ -745,20 +789,22 @@ router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
       WITH audience_events AS (
         SELECT tl.user_id AS actor_id, 'like'::text AS event_type
         FROM tweet_likes tl JOIN tweets t ON t.id = tl.tweet_id
-        WHERE t.user_id::text = :userId AND tl.created_at >= :startDate AND t.deleted_at IS NULL
+        WHERE t.user_id = :userId::uuid AND tl.created_at >= :startDate AND t.deleted_at IS NULL
         UNION ALL
         SELECT tr.user_id AS actor_id, 'retweet'::text AS event_type
         FROM tweet_retweets tr JOIN tweets t ON t.id = tr.tweet_id
-        WHERE t.user_id::text = :userId AND tr.created_at >= :startDate AND t.deleted_at IS NULL
+        WHERE t.user_id = :userId::uuid AND tr.created_at >= :startDate AND t.deleted_at IS NULL
         UNION ALL
         SELECT reply.user_id AS actor_id, 'reply'::text AS event_type
         FROM tweets reply JOIN tweets t ON t.id = reply.parent_tweet_id
-        WHERE t.user_id::text = :userId AND reply.created_at >= :startDate
+        WHERE t.user_id = :userId::uuid AND reply.created_at >= :startDate
           AND t.deleted_at IS NULL AND reply.deleted_at IS NULL
         UNION ALL
         SELECT ubd.user_id AS actor_id, 'share'::text AS event_type
-        FROM user_behavior_data ubd JOIN tweets t ON t.id::text = ubd.target_id::text
-        WHERE t.user_id::text = :userId AND ubd.created_at >= :startDate
+        -- AUDIT R2-01 (2026-08-19) : cast protégé par CASE, voir la note du
+        -- même motif plus haut dans ce fichier (target_id polymorphe).
+        FROM user_behavior_data ubd JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' THEN ubd.target_id::uuid END
+        WHERE t.user_id = :userId::uuid AND ubd.created_at >= :startDate
           AND ubd.target_type = 'tweet' AND ubd.action_type = 'tweet_share' AND t.deleted_at IS NULL
       ), audience_users AS (
         SELECT actor_id, COUNT(*) AS event_count
@@ -797,7 +843,7 @@ router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
           COALESCE(SUM(duration_ms) FILTER (WHERE action_type = 'time_spent'), 0) AS total_time_ms,
           COALESCE(AVG(duration_ms) FILTER (WHERE action_type = 'time_spent'), 0) AS avg_time_spent_ms
         FROM user_behavior_data
-        WHERE user_id::text = :userId AND created_at >= :startDate
+        WHERE user_id = :userId::uuid AND created_at >= :startDate
       `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
       sequelize.query(`
         SELECT
@@ -805,7 +851,7 @@ router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
           COUNT(DISTINCT COALESCE(device_id, family_id::text)) AS devices,
           MAX(COALESCE(last_used_at, created_at)) AS last_session_at
         FROM sessions
-        WHERE user_id::text = :userId AND created_at >= :startDate
+        WHERE user_id = :userId::uuid AND created_at >= :startDate
       `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
       sequelize.query(`${audienceEventsCte}
         SELECT
@@ -876,38 +922,46 @@ router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
           COUNT(DISTINCT region) FILTER (WHERE permission_status = 'granted' AND region IS NOT NULL) AS regions,
           MAX(captured_at) FILTER (WHERE permission_status = 'granted') AS last_captured_at
         FROM user_location_events
-        WHERE user_id::text = :userId AND captured_at >= :startDate
+        WHERE user_id = :userId::uuid AND captured_at >= :startDate
       `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
       sequelize.query(`
         SELECT
           (SELECT COUNT(*) FROM stories s
-            WHERE s.user_id::text = :userId AND s.created_at >= :startDate AND s.deleted_at IS NULL) AS stories_created,
+            WHERE s.user_id = :userId::uuid AND s.created_at >= :startDate AND s.deleted_at IS NULL) AS stories_created,
           (SELECT COALESCE(SUM(s.views_count), 0) FROM stories s
-            WHERE s.user_id::text = :userId AND s.created_at >= :startDate AND s.deleted_at IS NULL) AS story_views,
+            WHERE s.user_id = :userId::uuid AND s.created_at >= :startDate AND s.deleted_at IS NULL) AS story_views,
           (SELECT COALESCE(SUM(s.likes_count), 0) FROM stories s
-            WHERE s.user_id::text = :userId AND s.created_at >= :startDate AND s.deleted_at IS NULL) AS story_likes,
+            WHERE s.user_id = :userId::uuid AND s.created_at >= :startDate AND s.deleted_at IS NULL) AS story_likes,
           (SELECT COALESCE(SUM(pv.view_count), 0) FROM profile_views pv
-            WHERE pv.profile_id::text = :userId AND pv.viewed_on >= CAST(:startDate AS date)) AS canonical_profile_views,
+            WHERE pv.profile_id = :userId::uuid AND pv.viewed_on >= CAST(:startDate AS date)) AS canonical_profile_views,
           (SELECT COUNT(*) FROM scheduled_tweets st
-            WHERE st.user_id::text = :userId AND st.created_at >= :startDate) AS scheduled_posts,
+            WHERE st.user_id = :userId::uuid AND st.created_at >= :startDate) AS scheduled_posts,
           (SELECT COUNT(*) FROM scheduled_tweets st
-            WHERE st.user_id::text = :userId AND st.created_at >= :startDate AND st.status = 'published') AS published_scheduled_posts,
+            WHERE st.user_id = :userId::uuid AND st.created_at >= :startDate AND st.status = 'published') AS published_scheduled_posts,
           (SELECT COUNT(*) FROM paid_contents pc
-            WHERE pc.creator_id::text = :userId AND pc.created_at >= :startDate) AS paid_offers,
+            WHERE pc.creator_id = :userId::uuid AND pc.created_at >= :startDate) AS paid_offers,
           (SELECT COUNT(*) FROM content_purchases cp
-            WHERE cp.creator_id::text = :userId AND cp.created_at >= :startDate AND cp.refunded_at IS NULL) AS paid_sales,
+            WHERE cp.creator_id = :userId::uuid AND cp.created_at >= :startDate AND cp.refunded_at IS NULL) AS paid_sales,
           (SELECT COALESCE(SUM(cp.creator_net_twc), 0) FROM content_purchases cp
-            WHERE cp.creator_id::text = :userId AND cp.created_at >= :startDate AND cp.refunded_at IS NULL) AS paid_revenue_twc,
+            WHERE cp.creator_id = :userId::uuid AND cp.created_at >= :startDate AND cp.refunded_at IS NULL) AS paid_revenue_twc,
           (SELECT COALESCE(AVG(labels.quality_score), 0)
-            FROM tweet_llm_labels labels JOIN tweets t ON t.id::text = labels.tweet_id::text
-            WHERE t.user_id::text = :userId AND t.created_at >= :startDate AND t.deleted_at IS NULL) AS average_quality_score,
+            -- AUDIT R2-01 (2026-08-19) : tweet_llm_labels.tweet_id est déjà
+            -- UUID (voir moderationController.js, l.tweet_id = t.id sans
+            -- cast, qui fonctionne) — les deux ::text ne faisaient que
+            -- rendre l'index de tweets.id inutilisable pour rien.
+            FROM tweet_llm_labels labels JOIN tweets t ON t.id = labels.tweet_id
+            WHERE t.user_id = :userId::uuid AND t.created_at >= :startDate AND t.deleted_at IS NULL) AS average_quality_score,
           (SELECT COALESCE(AVG(labels.toxicity_score), 0)
-            FROM tweet_llm_labels labels JOIN tweets t ON t.id::text = labels.tweet_id::text
-            WHERE t.user_id::text = :userId AND t.created_at >= :startDate AND t.deleted_at IS NULL) AS average_toxicity_score,
+            -- AUDIT R2-01 (2026-08-19) : tweet_llm_labels.tweet_id est déjà
+            -- UUID (voir moderationController.js, l.tweet_id = t.id sans
+            -- cast, qui fonctionne) — les deux ::text ne faisaient que
+            -- rendre l'index de tweets.id inutilisable pour rien.
+            FROM tweet_llm_labels labels JOIN tweets t ON t.id = labels.tweet_id
+            WHERE t.user_id = :userId::uuid AND t.created_at >= :startDate AND t.deleted_at IS NULL) AS average_toxicity_score,
           (SELECT COALESCE(SUM(tq.total_views), 0) FROM tweet_queue tq
-            WHERE tq.user_id::text = :userId AND tq.queued_at >= :startDate) AS algorithmic_views,
+            WHERE tq.user_id = :userId::uuid AND tq.queued_at >= :startDate) AS algorithmic_views,
           (SELECT COALESCE(SUM(tq.evaluation_count), 0) FROM tweet_queue tq
-            WHERE tq.user_id::text = :userId AND tq.queued_at >= :startDate) AS algorithm_evaluations
+            WHERE tq.user_id = :userId::uuid AND tq.queued_at >= :startDate) AS algorithm_evaluations
       `, { replacements: { userId, startDate }, type: sequelize.QueryTypes.SELECT }),
       User.findByPk(userId, {
         attributes: ['declared_age', 'birth_day', 'birth_month', 'demographics_validated_at', 'location_consent_status'],
@@ -1006,7 +1060,7 @@ router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Erreur recuperation insights approfondis:', error);
+    logger.error('Erreur recuperation insights approfondis:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur lors de la recuperation des insights approfondis',
@@ -1063,7 +1117,7 @@ router.get('/:userId/best-time', authenticateToken, async (req, res) => {
       LEFT JOIN tweet_likes l ON l.tweet_id = t.id
       LEFT JOIN tweet_retweets rt ON rt.tweet_id = t.id
       LEFT JOIN tweets rp ON rp.parent_tweet_id = t.id AND rp.deleted_at IS NULL
-      WHERE t.user_id::text = :userId
+      WHERE t.user_id = :userId::uuid
         AND t.created_at >= :startDate
         AND t.deleted_at IS NULL
         AND t.parent_tweet_id IS NULL
@@ -1120,7 +1174,7 @@ router.get('/:userId/best-time', authenticateToken, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('❌ Erreur calcul meilleur créneau:', error);
+    logger.error('❌ Erreur calcul meilleur créneau:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur lors du calcul des meilleurs créneaux',
@@ -1191,7 +1245,7 @@ router.get('/:userId/engagement-breakdown', authenticateToken, async (req, res) 
         LEFT JOIN tweet_likes tl ON t.id = tl.tweet_id
         LEFT JOIN tweet_retweets tr ON t.id = tr.tweet_id
         LEFT JOIN tweets reply ON t.id = reply.parent_tweet_id
-        WHERE t.user_id::text = :userId
+        WHERE t.user_id = :userId::uuid
           AND t.created_at >= :startDate 
           AND t.deleted_at IS NULL
         GROUP BY t.id
@@ -1220,7 +1274,7 @@ router.get('/:userId/engagement-breakdown', authenticateToken, async (req, res) 
     });
 
   } catch (error) {
-    console.error('❌ Erreur récupération répartition engagement:', error);
+    logger.error('❌ Erreur récupération répartition engagement:', error);
     res.status(500).json({
       success: false,
       message: 'Erreur lors de la récupération de la répartition de l\'engagement',

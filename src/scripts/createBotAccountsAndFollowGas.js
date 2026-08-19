@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const { Op } = require('sequelize');
 const logger = require('../utils/logger');
 const { sequelize, User, UserFollow, closeConnection } = require('../models');

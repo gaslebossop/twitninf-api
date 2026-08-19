@@ -2,16 +2,31 @@ const { DataTypes, Model } = require('sequelize');
 const logger = require('../utils/logger');
 
 class AdCampaign extends Model {
-  // Méthode pour obtenir les statistiques de la campagne
+  /**
+   * AUDIT R1-03 (2026-08-19) : l'ancienne version rechargeait les publicités
+   * QUATRE fois (une par agrégat, chacun via `getAdvertisements()`) puis
+   * bouclait dessus une par une — `C × (1 + 4×(1+A))` requêtes pour une page
+   * de campagnes. Une seule liste, chargée une fois, passée aux 3 requêtes
+   * groupées de `Advertisement.statsForIds`. ~900 → 4 pour une page type.
+   */
   async getCampaignStats() {
     const campaign = this.toJSON();
-    
-    // Calculer les statistiques en temps réel
-    const totalImpressions = await this.getTotalImpressions();
-    const totalClicks = await this.getTotalClicks();
-    const totalEngagements = await this.getTotalEngagements();
-    const totalSpent = await this.getTotalSpent();
-    
+    const Advertisement = this.sequelize.models.Advertisement;
+
+    const advertisements = this.advertisements || (await this.getAdvertisements());
+    const perAdStats = await Advertisement.statsForIds(advertisements);
+
+    let totalImpressions = 0;
+    let totalClicks = 0;
+    let totalEngagements = 0;
+    let totalSpent = 0;
+    for (const stats of perAdStats.values()) {
+      totalImpressions += stats.impressions;
+      totalClicks += stats.clicks;
+      totalEngagements += stats.engagements;
+      totalSpent += stats.spent;
+    }
+
     return {
       ...campaign,
       stats: {

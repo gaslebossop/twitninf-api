@@ -17,6 +17,15 @@ const FRAUD_BYPASS_EXCLUDED_PATHS = [
   '/api/auth/login',
   '/api/payments',
   '/api/new-economy/purchase',
+  // AUDIT 3.2 (2026-08-19) : les quatre autres routes créditrices/débitrices
+  // de `newEconomyRoutes.js` n'étaient pas exclues — un attaquant qui usurpe
+  // le statut first-party (en-têtes falsifiables + JWT valide d'un compte
+  // qu'il contrôle) leur faisait sauter le scoring de vélocité Rust, sur du
+  // transfert ou du minage de monnaie.
+  '/api/new-economy/spend',
+  '/api/new-economy/mining/submit',
+  '/api/new-economy/exchange',
+  '/api/new-economy/transfer',
   '/api/premium/subscribe',
   '/api/users/purchase-subscription',
   '/api/users/purchase-premium',

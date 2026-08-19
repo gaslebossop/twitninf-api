@@ -6,6 +6,7 @@
  */
 
 // Services principaux
+const logger = require('../../utils/logger');
 const AutomationEngine = require('./automationEngine');
 const GeminiIntelligence = require('./geminiIntelligence');
 const ReplyManager = require('./replyManager');
@@ -46,7 +47,7 @@ class PolicierCongoService {
       
       console.log('🚔 PolicierCongo Service initialisé avec succès');
     } catch (error) {
-      console.error('❌ Erreur lors de l\'initialisation de PolicierCongo:', error);
+      logger.error('❌ Erreur lors de l\'initialisation de PolicierCongo:', error);
     }
   }
 
@@ -60,7 +61,7 @@ class PolicierCongoService {
         await this.memoryManager.forceSave();
         console.log('💾 Mémoire sauvegardée avec succès avant l\'arrêt.');
       } catch (error) {
-        console.error('❌ Erreur lors de la sauvegarde finale de la mémoire:', error);
+        logger.error('❌ Erreur lors de la sauvegarde finale de la mémoire:', error);
       }
     };
 

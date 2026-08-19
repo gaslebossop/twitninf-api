@@ -12,6 +12,25 @@ const router = express.Router();
 router.use(authenticateToken);
 
 /**
+ * Verrou temporaire sur l'achat de monnaie (AUDIT 3.2, 2026-08-19).
+ *
+ * `paymentMethod` n'était qu'une chaîne choisie par le client, jamais
+ * vérifiée contre un paiement réel — aucun SDK Stripe/PayPal n'est installé,
+ * et l'app n'étant sur aucun store, il n'y a pas non plus de reçu App
+ * Store/Play Store à valider. N'importe quel compte authentifié pouvait donc
+ * créditer son solde gratuitement via `mintFromPurchase`.
+ *
+ * Bloque avant même la validation du corps de la requête, le temps qu'un
+ * vrai moyen de paiement soit branché. Retirer uniquement à ce moment-là.
+ */
+function purchaseLockedUntilRealPayment(req, res) {
+  return res.status(503).json({
+    success: false,
+    message: 'Achat de monnaie temporairement indisponible.',
+  });
+}
+
+/**
  * @route GET /api/new-economy/packages/:currencyId
  * @desc Obtenir les packages d'achat disponibles
  * @access Private
@@ -25,7 +44,7 @@ router.get('/packages/:currencyId', [
  * @desc Acheter des TwitCoins
  * @access Private
  */
-router.post('/purchase', [
+router.post('/purchase', purchaseLockedUntilRealPayment, [
   body('currencyId')
     .isUUID()
     .withMessage('ID de cryptomonnaie invalide'),

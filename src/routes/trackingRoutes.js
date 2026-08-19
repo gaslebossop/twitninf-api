@@ -47,6 +47,7 @@ router.post('/', [authenticateToken], async (req, res) => {
           experiment_id: experiment_id || null,
           variant_id: variant_id || null,
         }),
+        signal: AbortSignal.timeout(3000),
       });
 
       if (!response.ok) {

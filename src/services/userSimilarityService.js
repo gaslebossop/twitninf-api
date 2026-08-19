@@ -98,7 +98,7 @@ class UserSimilarityService {
       }
 
       // 4. Save to disk and reload in memory
-      this.store.save();
+      await this.store.save();
       await this.initialize(true);
       logger.info(`✅ User similarity sync complete: ${syncCount} users updated.`);
       

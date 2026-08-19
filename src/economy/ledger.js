@@ -121,6 +121,38 @@ class EconomyLedger {
     return wallet;
   }
 
+  /**
+   * AUDIT B1-08 (2026-08-19), ÉLEVÉ — verrouille PLUSIEURS portefeuilles dans
+   * un ordre total (trié par clé userId:currencyId), jamais dans l'ordre où
+   * l'appelant les énumère. L'ordre différait selon la méthode
+   * (utilisateur→trésorerie ici, trésorerie→utilisateur là, ordre des
+   * arguments ailleurs) : deux opérations parfaitement normales qui se
+   * croisent (ex. un achat et une récompense sur le même compte) peuvent
+   * réclamer les deux mêmes verrous en sens inverse — un interblocage que
+   * PostgreSQL résout en tuant l'une des deux transactions au hasard,
+   * c'est-à-dire une opération d'argent qui échoue sans raison
+   * compréhensible. Reprend le motif déjà utilisé et documenté dans
+   * `usernameMarketService.js:374-379` pour le même problème sur `users`.
+   *
+   * @param {Array<{userId: string, currencyId: string}>} pairs
+   * @param {import('sequelize').Transaction} dbTransaction
+   * @returns {Promise<Map<string, UserWallet>>} clé `${userId}:${currencyId}` → portefeuille verrouillé
+   */
+  static async lockWallets(pairs, dbTransaction) {
+    const sorted = [...pairs].sort((a, b) => {
+      const ka = `${a.userId}:${a.currencyId}`;
+      const kb = `${b.userId}:${b.currencyId}`;
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
+    const out = new Map();
+    for (const { userId, currencyId } of sorted) {
+      const key = `${userId}:${currencyId}`;
+      if (out.has(key)) continue; // même portefeuille demandé deux fois (ex. transfert vers soi-même)
+      out.set(key, await this.lockWallet(userId, currencyId, dbTransaction));
+    }
+    return out;
+  }
+
   static async createTx(row, dbTransaction) {
     const transactionHash = crypto.randomBytes(32).toString('hex');
     return Transaction.create(
@@ -238,13 +270,18 @@ class EconomyLedger {
         itemId: meta?.itemId || null
       });
 
-    const userWallet = await this.lockWallet(userId, currencyId, dbTransaction);
+    // AUDIT B1-08 : verrous triés (userId:currencyId), pas dans l'ordre
+    // utilisateur→trésorerie fixe d'avant — voir `lockWallets`.
+    const wallets = await this.lockWallets(
+      [{ userId, currencyId }, { userId: TREASURY_USER_ID, currencyId }],
+      dbTransaction
+    );
+    const userWallet = wallets.get(`${userId}:${currencyId}`);
+    const treasuryWallet = wallets.get(`${TREASURY_USER_ID}:${currencyId}`);
     const balance = toAmount(userWallet.balance);
     if (balance < spend) {
       throw new Error('Solde insuffisant');
     }
-
-    const treasuryWallet = await this.lockWallet(TREASURY_USER_ID, currencyId, dbTransaction);
 
     const tx = await this.createTx(
       {
@@ -301,7 +338,17 @@ class EconomyLedger {
       return { success: false, reason: 'Montant trop faible' };
     }
 
-    const treasuryWallet = await this.lockWallet(TREASURY_USER_ID, currencyId, dbTransaction);
+    // AUDIT B1-08 : verrous triés — la vérification du solde de la
+    // trésorerie, qui se faisait avant de verrouiller l'utilisateur pour
+    // échouer tôt, passe après l'acquisition des deux verrous (même
+    // résultat, seul le moment du contrôle change — voir le "point de
+    // vigilance" du constat).
+    const wallets = await this.lockWallets(
+      [{ userId: TREASURY_USER_ID, currencyId }, { userId, currencyId }],
+      dbTransaction
+    );
+    const treasuryWallet = wallets.get(`${TREASURY_USER_ID}:${currencyId}`);
+    const userWallet = wallets.get(`${userId}:${currencyId}`);
     const treasuryBalance = toAmount(treasuryWallet.balance);
 
     if (treasuryBalance < reward) {
@@ -313,7 +360,6 @@ class EconomyLedger {
       );
     }
 
-    const userWallet = await this.lockWallet(userId, currencyId, dbTransaction);
     const priceEur = await this.priceEurOf(currencyId, dbTransaction);
 
     const tx = await this.createTx(
@@ -403,13 +449,24 @@ class EconomyLedger {
       merchantId: 'p2p'
     });
 
-    const fromWallet = await this.lockWallet(fromUserId, currencyId, dbTransaction);
+    // AUDIT B1-08 : verrous triés — l'ordre suivait auparavant celui des
+    // arguments (émetteur, destinataire, trésorerie), donc s'inversait
+    // mécaniquement selon le sens du transfert : deux virements croisés
+    // simultanés (A→B et B→A) réclamaient les mêmes verrous en sens inverse.
+    const wallets = await this.lockWallets(
+      [
+        { userId: fromUserId, currencyId },
+        { userId: toUserId, currencyId },
+        { userId: TREASURY_USER_ID, currencyId }
+      ],
+      dbTransaction
+    );
+    const fromWallet = wallets.get(`${fromUserId}:${currencyId}`);
+    const toWallet = wallets.get(`${toUserId}:${currencyId}`);
+    const treasuryWallet = wallets.get(`${TREASURY_USER_ID}:${currencyId}`);
     if (toAmount(fromWallet.balance) < gross) {
       throw new Error('Solde insuffisant');
     }
-
-    const toWallet = await this.lockWallet(toUserId, currencyId, dbTransaction);
-    const treasuryWallet = await this.lockWallet(TREASURY_USER_ID, currencyId, dbTransaction);
 
     const tx = await this.createTx(
       {
@@ -619,7 +676,22 @@ class EconomyLedger {
       throw new Error('Solde cible invalide');
     }
 
-    const wallet = await this.lockWallet(userId, currencyId, dbTransaction);
+    // AUDIT B1-08 : verrous triés dès le départ, même si la trésorerie ne
+    // sert qu'à la branche débit ci-dessous — sinon cette méthode
+    // verrouillerait toujours l'utilisateur en premier, alors que les autres
+    // méthodes du grand livre (spendToTreasury, rewardFromTreasury...)
+    // trient désormais l'ordre par identifiant : deux méthodes différentes
+    // sur la même paire de portefeuilles doivent s'accorder sur le MÊME
+    // ordre, pas juste chacune sur un ordre interne cohérent. Re-verrouiller
+    // le même portefeuille (branche crédit, via `adminCredit`) est sans
+    // risque : `FOR UPDATE` réentrant sur une ligne déjà tenue par cette
+    // transaction ne bloque pas.
+    const wallets = await this.lockWallets(
+      [{ userId, currencyId }, { userId: TREASURY_USER_ID, currencyId }],
+      dbTransaction
+    );
+    const wallet = wallets.get(`${userId}:${currencyId}`);
+    const treasuryWalletPreLocked = wallets.get(`${TREASURY_USER_ID}:${currencyId}`);
     const current = toAmount(wallet.balance);
     const diff = roundTWC(target - current);
 
@@ -630,7 +702,7 @@ class EconomyLedger {
     if (diff > 0) {
       await this.adminCredit(userId, currencyId, diff, reason, dbTransaction);
     } else {
-      const treasuryWallet = await this.lockWallet(TREASURY_USER_ID, currencyId, dbTransaction);
+      const treasuryWallet = treasuryWalletPreLocked;
       const debit = Math.abs(diff);
       if (current < debit) {
         throw new Error('Impossible de réduire le solde en dessous de zéro');
@@ -696,13 +768,20 @@ class EconomyLedger {
         itemId: toCurrencyId
       });
 
-    const fromWallet = await this.lockWallet(userId, fromCurrencyId, dbTransaction);
+    // AUDIT B1-08, cas 3 — l'ordre suivait `fromCurrencyId` puis
+    // `toCurrencyId` : deux conversions inverses simultanées pour le même
+    // compte (A→B et B→A) réclamaient les mêmes verrous en sens inverse.
+    const wallets = await this.lockWallets(
+      [{ userId, currencyId: fromCurrencyId }, { userId, currencyId: toCurrencyId }],
+      dbTransaction
+    );
+    const fromWallet = wallets.get(`${userId}:${fromCurrencyId}`);
+    const toWallet = wallets.get(`${userId}:${toCurrencyId}`);
     const fromBalance = toAmount(fromWallet.balance);
     if (fromBalance < debit) {
       throw new Error('Solde insuffisant');
     }
 
-    const toWallet = await this.lockWallet(userId, toCurrencyId, dbTransaction);
     const credit = roundTWC(debit * Number(rate));
     const newFromBalance = roundTWC(fromBalance - debit);
     const newToBalance = roundTWC(toAmount(toWallet.balance) + credit);
@@ -858,7 +937,15 @@ class EconomyLedger {
     }
     const requested = assertPositive(amount, 'Montant à retirer');
 
-    const wallet = await this.lockWallet(userId, currencyId, dbTransaction);
+    // AUDIT B1-08 : verrous triés, comme les autres méthodes du grand livre
+    // sur la même paire de portefeuilles (utilisateur/trésorerie) — voir
+    // `adminSetBalance` juste au-dessus pour le même raisonnement.
+    const wallets = await this.lockWallets(
+      [{ userId, currencyId }, { userId: TREASURY_USER_ID, currencyId }],
+      dbTransaction
+    );
+    const wallet = wallets.get(`${userId}:${currencyId}`);
+    const treasuryWalletPreLocked = wallets.get(`${TREASURY_USER_ID}:${currencyId}`);
     const current = toAmount(wallet.balance);
     if (current <= 0) {
       return { tx: null, amount: 0 };
@@ -869,7 +956,7 @@ class EconomyLedger {
       return { tx: null, amount: 0 };
     }
 
-    const treasuryWallet = await this.lockWallet(TREASURY_USER_ID, currencyId, dbTransaction);
+    const treasuryWallet = treasuryWalletPreLocked;
     await wallet.update({ balance: roundTWC(current - toBurn) }, { transaction: dbTransaction });
     await treasuryWallet.update(
       { balance: roundTWC(toAmount(treasuryWallet.balance) + toBurn) },

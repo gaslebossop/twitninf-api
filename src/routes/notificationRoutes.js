@@ -412,6 +412,7 @@ router.post('/test', [
         const pushRes = await fetch('https://exp.host/--/api/v2/push/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(5000),
           body: JSON.stringify({
             to: user.id_notif,
             sound: 'default',

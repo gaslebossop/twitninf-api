@@ -67,6 +67,9 @@ class EconomyAdminController {
     if (!Array.isArray(items) || !items.length) {
       return res.status(400).json({ success: false, message: 'items requis (userId, currencyId, amount par compte)' });
     }
+    if (items.length > 500) {
+      return res.status(400).json({ success: false, message: '500 items maximum par appel' });
+    }
     for (const item of items) {
       if (!item?.userId || !item?.currencyId || !(Number(item.amount) > 0)) {
         return res.status(400).json({ success: false, message: 'Chaque item requiert userId, currencyId et un amount > 0' });
@@ -84,7 +87,14 @@ class EconomyAdminController {
         touchedCurrencyIds.add(item.currencyId);
       }
 
-      await Promise.all([...touchedCurrencyIds].map((id) => EconomyMetrics.refresh(id, dbTransaction)));
+      // AUDIT B1-06(b) : une transaction Sequelize tient une seule connexion —
+      // `Promise.all` ne parallélise rien ici, il ne fait que demander
+      // simultanément une connexion supplémentaire par monnaie touchée
+      // (`EconomyMetrics.refresh` → `purchaseVolume24h`, cf. B1-01), au risque
+      // de vider le pool en un seul appel admin. Séquentiel, sans perte réelle.
+      for (const id of touchedCurrencyIds) {
+        await EconomyMetrics.refresh(id, dbTransaction);
+      }
       await dbTransaction.commit();
 
       const totalsByCurrency = {};

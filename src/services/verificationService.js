@@ -369,25 +369,16 @@ Réponds UNIQUEMENT avec un JSON strict dans ce format exact:
 
 `;
     
-    // Enregistrer le prompt dans un fichier temporaire
-    try {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const tempDir = path.join(__dirname, '../../temp');
-      
-      // Créer le dossier temp s'il n'existe pas
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-      }
-      
-      const filename = `verification-prompt-${timestamp}.txt`;
-      const filepath = path.join(tempDir, filename);
-      
-      fs.writeFileSync(filepath, prompt, 'utf8');
-      logger.info(`📝 Prompt verification enregistré dans: ${filepath}`);
-    } catch (error) {
-      logger.error('❌ Erreur lors de l\'enregistrement du prompt:', error);
-    }
-    
+    // AUDIT B2-02 (critique) : ce prompt embarque l'identité déclarée du
+    // demandeur (nom complet, tweets récents, réponses libres du formulaire
+    // dont profession/organisation) — l'écrire sur disque, sans purge, dans
+    // un dossier suivi par git a exposé publiquement des données
+    // personnelles réelles (13 fichiers concernés, traités séparément avec
+    // le propriétaire). L'écriture est supprimée ; `debug` (muet en
+    // production, cf. `config.logging.level`) suffit si le contenu doit
+    // rester inspectable en développement.
+    logger.debug(`📝 Prompt verification généré pour user=${userData?.user?.id || 'inconnu'}`);
+
     return prompt;
   }
 

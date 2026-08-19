@@ -15,6 +15,8 @@
  *  6. Prompt minimaliste — zéro exemple imposé, l'IA s'adapte au contexte brut
  */
 
+const logger = require('../../utils/logger');
+
 // ─── Modèle & limites ────────────────────────────────────────────────────────
 
 const DEFAULT_CLAUDE_MODEL =
@@ -248,7 +250,7 @@ function createDefaultMemoryAdapters(overrides = {}) {
         }
         return { ok: true };
       } catch (err) {
-        console.error('[persistAfterTurn]', err.message);
+        logger.error('[persistAfterTurn]', err.message);
         return { ok: false };
       }
     }
@@ -659,7 +661,7 @@ class ContextBuilder {
       }
       return await fn.apply(this.memory, args);
     } catch (err) {
-      console.error(`[ContextBuilder] Erreur ${method} :`, err.message);
+      logger.error(`[ContextBuilder] Erreur ${method} :`, err.message);
       return fallback;
     }
   }
