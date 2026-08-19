@@ -28,12 +28,13 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
 - **Section en cours :** R3 — pagination et taille des réponses.
-- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 10 constats écrits
+- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 11 constats écrits
   (R3-01 `recommendationRoutes.js:264`, R3-02 `messageRoutes.js:489`,
   R3-03 `messageRoutes.js:517`, R3-04 `messageRoutes.js:1844`,
   R3-05 clause `IN` géante 16 sites, R3-06 `adRoutes.js:781`,
   R3-07 `tweetRoutes.js:1603`, R3-08 4 routes de liste non paginées,
-  R3-09 `SELECT *` sur `tweets` 54 sites, R3-10 `storyRoutes.js:773`).
+  R3-09 `SELECT *` sur `tweets` 54 sites, R3-10 `storyRoutes.js:773`,
+  R3-11 3 routes sans plafond de taille de page).
 - **Déjà passé en revue pour R3 :** inventaire des 57 `findAll` sans `limit`
   dans `src/routes/` et `src/controllers/` (liste établie par balayage
   automatique — **attention, ce balayage rate les appels dont un `include`
@@ -61,11 +62,14 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   devises), `contestRoutes.js:358/458` (borné par les gagnants),
   `userRoutes.js:505` et `:790` (attributs explicites, aucune fuite de
   colonne), `User.getPublicProfile()` (liste blanche explicite).
-  **Reste à faire pour clore R3 :** (ii) `userRoutes.js:1028`,
-  `progressiveRecommendationRoutes.js:637`, `searchRoutes.js:89` à regarder ;
-  (iii) les 15 fichiers de routes qui lisent `req.query.limit` **sans**
-  `query('limit')` de validation (liste à re-établir par grep) ; (iv) écrire le
-  récapitulatif de fin de section.
+  **Reste à faire pour clore R3 :** (iv) écrire le récapitulatif de fin de
+  section, puis passer R3 à TERMINÉE. Le point (iii) est traité par R3-11 ;
+  vérifiés clampés donc SAINS : `paidContentService.js:544`,
+  `creatorRadarService.js:41`, `eventPassService.js:649`,
+  `moderationRoutes.js:597` (max 5000, admin), `searchRoutes.js` (7 routes),
+  `tweetRoutes.js` `/:id/likes` `/:id/retweets` `/:id/replies`,
+  `userRoutes.js:891` ; `authRoutes.js:395` est une route bouchon sans accès
+  base (sain).
 
   **PISTE POUR S2 (ne pas publier le détail) :** `src/models/Tweet.js:498`,
   valeur par défaut de la colonne `metadata`, croisée avec l'absence de liste
