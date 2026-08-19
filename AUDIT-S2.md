@@ -30,11 +30,12 @@ Deux balayages complémentaires, tous deux menés sur l'intégralité de
 
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
+| **Critique** | **1** | Élévation de privilèges : une permission d'administration limitée permet d'accorder n'importe quel rôle, y compris le plus élevé du système, sans plafond |
 | **Élevée** | **2** | Absence totale de contrôle d'appartenance sur tout un routeur (IDOR généralisé) ; route d'administration accessible sans authentification, avec effet de déni de service |
 | Moyenne | 1 | Exposition de données dérivées d'un utilisateur arbitraire, sans authentification |
 | Faible | 1 | Exposition d'informations internes de fonctionnement |
 
-**À ce stade : 4 constats, dont 2 de gravité élevée.** Trois d'entre eux sont
+**À ce stade : 5 constats, dont 1 critique et 2 de gravité élevée.** Trois d'entre eux sont
 **concentrés sur un seul et même fichier de routes** (constats « userSimilarity »),
 qui n'a manifestement jamais reçu de contrôle d'accès — ce qui rend leur
 correction simple : une seule ligne de middleware les traite d'un coup. Le
@@ -79,6 +80,13 @@ couverte, **bien maîtrisée**.
 - **Routes publiques légitimes :** pages légales, ressources statiques,
   tuiles et polices de la carte, inscription et connexion. Elles n'ont pas
   vocation à être authentifiées et ne sont pas comptées comme des constats.
+- **Routeur de modération :** examiné en détail — c'est, avec un seul défaut
+  près (voir le constat critique ci-dessus), le mieux protégé du dépôt. Chaque
+  route sensible porte une permission nommée précise plutôt qu'un contrôle de
+  rôle générique (`can_suspend_users`, `can_ban_users`, `can_verify_users`,
+  `can_manage_moderators`…), et les routes de configuration globale exigent
+  spécifiquement le rôle le plus élevé. C'est une bonne conception, à l'unique
+  endroit près où elle n'a pas de plafond.
 
 ## Suite
 
