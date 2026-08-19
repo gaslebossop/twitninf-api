@@ -30,7 +30,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Section en cours :** R4 — travail bloquant (boucle d'événements).
 - **Couvert :** R1 (10 constats), R2 (12 constats), R3 (11 constats + section
   « vérifié et trouvé sain » + récapitulatif) — **R3 TERMINÉE**.
-- **Couvert pour R4 :** 4 constats écrits (R4-01 appels réseau sans délai
+- **Couvert pour R4 :** 5 constats écrits (R4-01 appels réseau sans délai
   d'attente — inventaire complet des 14 appels sortants de `src/`, 7 sans
   délai / 7 avec ; les appels de `src/scripts/test_*.js` sont des scripts de
   test hors production et ont été écartés ; R4-02 `bcryptjs` pur JS au coût 12,
@@ -42,8 +42,13 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   et `_periodicSave` en enchaîne deux ;
   R4-04 `similarity/recommendationEngine.js:296` `syncWithDB` horaire — un
   `COUNT` par utilisateur actif + tables entières en `_loadEnrichedMeta:455/463`
-  et `_loadFollowGraph:577`).
-- **Reprendre à :** `readFileSync`/`writeFileSync` sur chemins de requête —
+  et `_loadFollowGraph:577` ;
+  R4-05 pool libuv à 4 fils partagé entre `sharp`, `fs` et `dns.lookup`,
+  `UV_THREADPOOL_SIZE` défini nulle part).
+- **Reprendre à :** (traitement d'image = fait, c'est R4-05 ; vérifié SAIN :
+  `heifDecoder.js` — `fs.promises`, `execFile` avec délai de 20 s, nettoyage en
+  `finally` ; aucun `execSync`/`spawnSync` dans tout `src/`.)
+  `readFileSync`/`writeFileSync` sur chemins de requête —
   inventaire déjà fait, à trier (`similarity/vectorEngine.js:426/442` = fait,
   c'est R4-03) : `vectorStoreService.js:207/229/243/249` (même forme que R4-03
   mais en JSON, à chiffrer),
@@ -54,9 +59,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   (Vérifié SAIN : `searchSummaryService.js` — `ensureCacheLoaded` ne s'exécute
   qu'une fois via un drapeau, et `persistCache` utilise `fs.promises` avec une
   file d'écriture sérialisée. `bcrypt` = fait, c'est R4-02.) Ensuite :
-  traitement d'image (`sharp`/HEIC — noter que `sharp` délègue à libvips hors
-  fil principal, donc vérifier plutôt `heifDecoder.js` et les conversions
-  synchrones), boucles sur gros tableaux dans les gestionnaires, et les
+  boucles sur gros tableaux dans les gestionnaires, et les
   `setImmediate` de `tweetRoutes.js` (1419, 1845, 2565) et
   `messageRoutes.js:1636`.
 - **Pistes déjà repérées pour R4, à vérifier en premier :**
