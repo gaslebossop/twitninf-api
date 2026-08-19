@@ -31,16 +31,17 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9), B1 (8) — **R1 à B1
   TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
   récapitulatif.
-- **Prochain pas :** B2 démarrée. **1 constat écrit : B2-01** (Float32Array(256)
-  vs DIMS=768 — bruit journaux + tweets média jamais vectorisés). Continuer avec
-  la piste 2 ci-dessous.
+- **Prochain pas :** B2 démarrée. **2 constats écrits : B2-01** (Float32Array(256)
+  vs DIMS=768 — bruit journaux + tweets média jamais vectorisés) et **B2-02**
+  (prompt de vérification contenant l'identité écrit sur disque, jamais purgé,
+  `temp/` non ignoré → 13 fichiers suivis dans un dépôt public — **CRITIQUE,
+  propriétaire notifié**). Continuer avec la piste 3 ci-dessous.
 
 - **Pistes déjà repérées pour B2, à écrire en priorité :**
   1. ~~`recommendationEngine.js:711` `Float32Array(256)` vs `DIMS = 768`~~ →
      **écrit, constat B2-01.**
-  2. `src/services/verificationService.js:385` écrit
-     `temp/verification-prompt-<horodatage>.txt` à chaque vérification, jamais
-     supprimé — le disque se remplit.
+  2. ~~`verificationService.js:385` fichiers `temp/` jamais purgés~~ →
+     **écrit, constat B2-02** (à reprendre côté S1 pour l'exposition publique).
   3. Les `catch` des appels réseau de R4-01 : un appel sans délai d'attente
      n'échoue jamais, donc son `catch` ne journalise jamais rien.
   4. `src/services/similarity/vectorEngine.js:394` `save()` n'est pas atomique
