@@ -31,19 +31,26 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9) — **R1 à R4
   TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
   récapitulatif.
-- **Couvert pour B1 :** 1 constat écrit (B1-01, `src/economy/metrics.js:100`
+- **Couvert pour B1 :** 2 constats écrits (B1-01, `src/economy/metrics.js:100`
   `EconomyMetrics.refresh` — verrou de ligne global sur la monnaie, `SUM` de
   toute la table des portefeuilles sous ce verrou, et `purchaseVolume24h`
   (`:81`) qui emprunte une **seconde** connexion hors transaction → risque
-  d'interblocage sur le pool ; 20 appelants recensés).
+  d'interblocage sur le pool ; 20 appelants recensés ;
+  B1-02 `transactionAuthorizationService.js:318` `_claimAuthorization` +
+  `:409` `_recordReplayMismatch` écrivent hors de la transaction de l'appelant,
+  avec `DB_POOL_MAX=10` et `acquire=60000` — incident déjà survenu, documenté
+  dans `usernameMarketService.js:358-372`).
 - **Reprendre à :** inventaire des 76 `sequelize.transaction(` de `src/`.
   Déjà vérifié SAIN : `newEconomyService.js:371` `submitMiningProof` (verrou
-  sur la ligne du round, pas sur `users` — bonne granularité).
-  À regarder ensuite, dans l'ordre : `usernameMarketService.js:205/255/348/378`
-  (plusieurs verrous `users` dans la même transaction → **ordre de
-  verrouillage** à vérifier), `communityModerationService.js` (7 `FOR UPDATE`),
-  `casinoService.js:242`, `transactionAuthorizationService.js`,
-  `paidContentService.js`, `gAuthService.js:317`,
+  sur la ligne du round, pas sur `users` — bonne granularité) ;
+  `usernameMarketService.js:374` `buyListing` (verrous pris dans un **ordre
+  déterministe par id**, `NO KEY UPDATE` justifié en commentaire — exemplaire) ;
+  `economy/ledger.js:155/395/687` (`authorize` appelé **avant** `lockWallet`,
+  donc aucun verrou tenu pendant l'autorisation ; exemption
+  `INTERNAL_CONVERSION_EXEMPTION` documentée à `:684`).
+  À regarder ensuite, dans l'ordre : `communityModerationService.js`
+  (7 `FOR UPDATE`), `casinoService.js:242`, `paidContentService.js`,
+  `gAuthService.js:317`,
   `policiercongo/policiercongov3/platformTools.js:705`,
   `customTweetGenerationService.js:96`, `BotDetectionService.js:254`,
   `tweetEditService.js:114`, `virtualCurrencyController.js:562`.
