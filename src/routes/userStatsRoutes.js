@@ -294,7 +294,15 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       -- évaluée. Le CASE protège le cast (Postgres garantit qu'une branche
       -- non retenue n'est jamais évaluée), et laisse t.id sans cast pour
       -- que l'index reste utilisable.
-      JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' THEN ubd.target_id::uuid END
+      --
+      -- BUGFIX (2026-08-20) : target_type = 'tweet' seul ne garantit pas que
+      -- target_id soit un UUID nu — neuralRankRoutes.js écrit aussi
+      -- 'promoted:<advertisement_id>' pour les tweets sponsorisés vus/partagés
+      -- (voir neuralRankRoutes.js), toujours avec target_type = 'tweet'. Sans
+      -- la vérification de forme ci-dessous, ce cast lève
+      -- "invalid input syntax for type uuid" et fait échouer TOUTE la requête
+      -- (donc tout /daily) dès qu'une seule vue de tweet promu existe.
+      JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' AND ubd.target_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN ubd.target_id::uuid END
       WHERE t.user_id = :userId::uuid
         AND ubd.action_type IN ('tweet_view', 'media_view')
         AND ubd.timestamp >= :startDate 
@@ -378,7 +386,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       FROM user_behavior_data ubd
       -- AUDIT R2-01 (2026-08-19) : voir la note plus haut sur le même motif
       -- (target_id polymorphe, cast protégé par CASE).
-      JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' THEN ubd.target_id::uuid END
+      JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' AND ubd.target_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN ubd.target_id::uuid END
       WHERE t.user_id = :userId::uuid
         AND ubd.target_type = 'tweet'
         AND ubd.action_type = 'tweet_share'
@@ -706,7 +714,7 @@ router.get('/:userId/activity', authenticateToken, async (req, res) => {
         UNION ALL
         SELECT ubd.created_at AS occurred_at
         -- AUDIT R2-01 (2026-08-19) : même motif, voir la note plus haut.
-        FROM user_behavior_data ubd JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' THEN ubd.target_id::uuid END
+        FROM user_behavior_data ubd JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' AND ubd.target_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN ubd.target_id::uuid END
         WHERE t.user_id = :userId::uuid AND t.deleted_at IS NULL
           AND ubd.target_type = 'tweet' AND ubd.action_type = 'tweet_share'
       )
@@ -803,7 +811,7 @@ router.get('/:userId/deep-insights', authenticateToken, async (req, res) => {
         SELECT ubd.user_id AS actor_id, 'share'::text AS event_type
         -- AUDIT R2-01 (2026-08-19) : cast protégé par CASE, voir la note du
         -- même motif plus haut dans ce fichier (target_id polymorphe).
-        FROM user_behavior_data ubd JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' THEN ubd.target_id::uuid END
+        FROM user_behavior_data ubd JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' AND ubd.target_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN ubd.target_id::uuid END
         WHERE t.user_id = :userId::uuid AND ubd.created_at >= :startDate
           AND ubd.target_type = 'tweet' AND ubd.action_type = 'tweet_share' AND t.deleted_at IS NULL
       ), audience_users AS (
