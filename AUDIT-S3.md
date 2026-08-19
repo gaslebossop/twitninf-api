@@ -22,12 +22,12 @@ un client peut-il influencer un montant ou rejouer une opération créditrice.
 
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
-| **Critique** | **1** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie |
+| **Critique** | **2** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie ; l'état serveur qui conditionne l'attribution d'une récompense exclusive à stock limité peut être forgé entièrement côté client |
 | **Moyenne** | **2** | Un mécanisme de confiance destiné au trafic applicatif légitime repose sur des informations entièrement fournies par le client, sans attache cryptographique — il conditionne l'exemption de plusieurs limites de débit, y compris sur l'opération créditrice ci-dessus ; un chemin d'échec d'upload laisse un fichier volumineux sur disque indéfiniment, sans purge |
 
-**À ce stade : 3 constats, dont 1 critique.** Les deux premiers se combinent :
-le second lève la limite de débit qui aurait pu, à défaut d'autre chose,
-borner l'ampleur du premier.
+**À ce stade : 4 constats, dont 2 critiques.** Les deux constats moyens
+touchent le premier constat critique : le second lève la limite de débit qui
+aurait pu, à défaut d'autre chose, borner son ampleur.
 
 ## Constat critique — détail (décompte uniquement ici, méthode complète transmise au propriétaire)
 
@@ -38,6 +38,18 @@ effectué n'intervienne à aucune étape de la chaîne d'appel — recherche men
 sur l'ensemble du dépôt et sur ses dépendances déclarées, sans résultat. Le
 seul contrôle en amont est un moteur de score de risque comportemental, qui
 n'atteste pas qu'un paiement a eu lieu.
+
+## Constat critique (2/2) — détail (décompte uniquement ici)
+
+Une route destinée à faire progresser un défi accepte directement, sans
+recalcul côté serveur à partir d'une activité réelle, la valeur de
+progression envoyée par le client. Cette valeur devient l'état qu'une autre
+route consulte ensuite pour décider si le défi est complété, puis si sa
+récompense peut être réclamée. Une troisième route s'appuie sur cet état
+pour attribuer un objet exclusif à stock limité. Aucune des trois étapes ne
+revérifie que la progression correspond à une activité réellement
+accomplie : un compte peut se déclarer complet et réclamer sans jamais avoir
+rempli aucune condition.
 
 ## Constat moyen — détail (décompte uniquement ici)
 
