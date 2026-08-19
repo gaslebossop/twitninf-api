@@ -28,9 +28,24 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
 - **Section en cours :** R3 — pagination et taille des réponses.
-- **Couvert :** R1 (10 constats), R2 (12 constats).
-- **Reste :** R3, R4, B1, B2, S1, S2, S3.
-- **Prochain pas :** démarrer R3, aucun constat R3 encore écrit.
+- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 1 constat écrit
+  (R3-01, `recommendationRoutes.js:264`).
+- **Déjà passé en revue pour R3 :** inventaire des 57 `findAll` sans `limit`
+  dans `src/routes/` et `src/controllers/` (liste établie par balayage
+  automatique) ; vérification que `GET /api/tweets` **est** borné
+  (`query('limit').isInt({max:100})`, `tweetRoutes.js:182`) et que
+  `/api/recommendations` **est** borné (`Math.min(..., 10)`,
+  `recommendationRoutes.js:528`) — ce ne sont donc pas des constats.
+- **Reprendre à :** suite de l'inventaire des `findAll` sans `limit`, dans
+  l'ordre : `messageRoutes.js` (458, 489, 834, 1231, 1243, 1480, 1636, 1844),
+  `userRoutes.js` (406, 423, 631, 840-862), `storyRoutes.js` (141-773),
+  `tweetRoutes.js` (335, 415, 590, 1603, 1609, 3302), puis
+  `recommendationRoutes.js` (autres lignes), `moderationController.js`
+  (2294-2326), `contestRoutes.js`, `adRoutes.js`, `supportRoutes.js`.
+  Ensuite : `SELECT *` / attributs sur-sérialisés, et listes renvoyées
+  entières (15 fichiers de routes lisent `req.query.limit` **sans**
+  `query('limit')` de validation — liste à re-établir par grep).
+- **Reste :** R3 (en cours), R4, B1, B2, S1, S2, S3.
 
 ## Règles de la routine
 
