@@ -30,16 +30,21 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Section en cours :** R4 — travail bloquant (boucle d'événements).
 - **Couvert :** R1 (10 constats), R2 (12 constats), R3 (11 constats + section
   « vérifié et trouvé sain » + récapitulatif) — **R3 TERMINÉE**.
-- **Couvert pour R4 :** 2 constats écrits (R4-01 appels réseau sans délai
+- **Couvert pour R4 :** 3 constats écrits (R4-01 appels réseau sans délai
   d'attente — inventaire complet des 14 appels sortants de `src/`, 7 sans
   délai / 7 avec ; les appels de `src/scripts/test_*.js` sont des scripts de
   test hors production et ont été écartés ; R4-02 `bcryptjs` pur JS au coût 12,
   `src/models/User.js:2/8/651/661` — **mesuré** : 335 ms par hachage, retard
   max de la boucle d'événements 93 ms, ~90 % de capacité perdue pendant le
-  calcul ; méthode de mesure reproductible décrite dans le constat).
+  calcul ; méthode de mesure reproductible décrite dans le constat ;
+  R4-03 `similarity/vectorEngine.js:394` `writeFileSync` de ~300 Mo toutes les
+  5 min dans le processus API — **mesuré** : 2,7 s de gel pour 100 k vecteurs,
+  et `_periodicSave` en enchaîne deux).
 - **Reprendre à :** `readFileSync`/`writeFileSync` sur chemins de requête —
-  inventaire déjà fait, à trier : `vectorStoreService.js:207/229/243/249`,
-  `similarity/vectorEngine.js:426/442`, `videoEditService.js:267`,
+  inventaire déjà fait, à trier (`similarity/vectorEngine.js:426/442` = fait,
+  c'est R4-03) : `vectorStoreService.js:207/229/243/249` (même forme que R4-03
+  mais en JSON, à chiffrer),
+  `videoEditService.js:267`,
   `verificationService.js:385`, `nfMapWebView.js:680`,
   `policiercongo/schedulerManager.js:81/98`,
   `policiercongo/InstructionManager.js:105/123`, `tweetImageService.js:66`.
