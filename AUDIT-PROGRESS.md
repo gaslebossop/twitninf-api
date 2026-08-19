@@ -31,7 +31,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9) — **R1 à R4
   TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
   récapitulatif.
-- **Couvert pour B1 :** 6 constats écrits (B1-01, `src/economy/metrics.js:100`
+- **Couvert pour B1 :** 7 constats écrits (B1-01, `src/economy/metrics.js:100`
   `EconomyMetrics.refresh` — verrou de ligne global sur la monnaie, `SUM` de
   toute la table des portefeuilles sous ce verrou, et `purchaseVolume24h`
   (`:81`) qui emprunte une **seconde** connexion hors transaction → risque
@@ -52,7 +52,10 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   trésorerie, ligne partagée par toute l'économie ;
   B1-06 `messageRoutes.js:845` (une requête hors `tx` par participant, sans
   plafond client) et `economyAdminController.js:87` (`Promise.all` de `refresh`
-  sur la même transaction → N connexions hors `tx` simultanées)).
+  sur la même transaction → N connexions hors `tx` simultanées) ;
+  B1-07 les **42** méthodes statiques de modèles n'acceptent aucune transaction
+  — inventaire complet dans le constat ; seuls 2 sites les appellent depuis une
+  transaction aujourd'hui (`messageRoutes.js:847` et `:1002`)).
 - **Reprendre à :** inventaire des 76 `sequelize.transaction(` de `src/`.
   Déjà vérifié SAIN : `newEconomyService.js:371` `submitMiningProof` (verrou
   sur la ligne du round, pas sur `users` — bonne granularité) ;
@@ -84,10 +87,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `EconomyMetrics.refresh` **sur la même transaction**, cf. B1-01c amplifié),
   = B1-06 ; `messagingManager.js:46` et `InstructionManager.js:55/73` vérifiés
   SAINS ;
-  **LACUNE CONNUE du balayage B1-04 :** il ne voyait que les fonctions en
-  minuscule, donc **pas** les méthodes statiques de modèles
-  (`UserFollow.isFollowing`, etc.). Revue à faire : toutes les méthodes
-  statiques des modèles, sous l'angle « accepte-t-elle une transaction ? ».
+  **Lacune du balayage B1-04 comblée par B1-07** (méthodes statiques de
+  modèles : 42 recensées, 2 sites d'appel sous transaction).
   (ii) `communityModerationService.js` (7 `FOR UPDATE`), `casinoService.js:208`,
   `paidContentService.js`, `gAuthService.js:317`,
 
