@@ -31,7 +31,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9) — **R1 à R4
   TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
   récapitulatif.
-- **Couvert pour B1 :** 5 constats écrits (B1-01, `src/economy/metrics.js:100`
+- **Couvert pour B1 :** 6 constats écrits (B1-01, `src/economy/metrics.js:100`
   `EconomyMetrics.refresh` — verrou de ligne global sur la monnaie, `SUM` de
   toute la table des portefeuilles sous ce verrou, et `purchaseVolume24h`
   (`:81`) qui emprunte une **seconde** connexion hors transaction → risque
@@ -49,7 +49,10 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   second est un **contrôle d'accès lu hors transaction**, à reprendre en S2 ;
   B1-05 `contestService.js:274` `drawContest` — transaction non bornée (1 UPDATE
   par participation) qui tient un `FOR UPDATE` sur le portefeuille de la
-  trésorerie, ligne partagée par toute l'économie).
+  trésorerie, ligne partagée par toute l'économie ;
+  B1-06 `messageRoutes.js:845` (une requête hors `tx` par participant, sans
+  plafond client) et `economyAdminController.js:87` (`Promise.all` de `refresh`
+  sur la même transaction → N connexions hors `tx` simultanées)).
 - **Reprendre à :** inventaire des 76 `sequelize.transaction(` de `src/`.
   Déjà vérifié SAIN : `newEconomyService.js:371` `submitMiningProof` (verrou
   sur la ligne du round, pas sur `users` — bonne granularité) ;
@@ -79,8 +82,12 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   FAIT, 6 sites : `contestService.js:319` = B1-05 ; **restent à examiner**
   `economyAdminController.js:81` (boucle `burnFraudulent` + `Promise.all` de
   `EconomyMetrics.refresh` **sur la même transaction**, cf. B1-01c amplifié),
-  `messagingManager.js:46`, `messageRoutes.js:845`,
-  `policiercongo/InstructionManager.js:55/73` ;
+  = B1-06 ; `messagingManager.js:46` et `InstructionManager.js:55/73` vérifiés
+  SAINS ;
+  **LACUNE CONNUE du balayage B1-04 :** il ne voyait que les fonctions en
+  minuscule, donc **pas** les méthodes statiques de modèles
+  (`UserFollow.isFollowing`, etc.). Revue à faire : toutes les méthodes
+  statiques des modèles, sous l'angle « accepte-t-elle une transaction ? ».
   (ii) `communityModerationService.js` (7 `FOR UPDATE`), `casinoService.js:208`,
   `paidContentService.js`, `gAuthService.js:317`,
 
