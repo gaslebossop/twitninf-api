@@ -30,7 +30,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Section en cours :** R4 — travail bloquant (boucle d'événements).
 - **Couvert :** R1 (10 constats), R2 (12 constats), R3 (11 constats + section
   « vérifié et trouvé sain » + récapitulatif) — **R3 TERMINÉE**.
-- **Couvert pour R4 :** 7 constats écrits (R4-01 appels réseau sans délai
+- **Couvert pour R4 :** 8 constats écrits (R4-01 appels réseau sans délai
   d'attente — inventaire complet des 14 appels sortants de `src/`, 7 sans
   délai / 7 avec ; les appels de `src/scripts/test_*.js` sont des scripts de
   test hors production et ont été écartés ; R4-02 `bcryptjs` pur JS au coût 12,
@@ -50,7 +50,9 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   pour 100 k vecteurs, atténué par un cache d'une minute par utilisateur ;
   R4-07 `vectorStoreService.js:198` `_persistInteractions` — lecture, dedup
   O(n²) et écriture synchrones sur le chemin du fil IA, **mesuré** 85 ms de gel
-  au plafond de 5 000 interactions).
+  au plafond de 5 000 interactions ;
+  R4-08 `server.js:354` `express.json({limit:'10mb'})` global — **mesuré**
+  170 ms de `JSON.parse` bloquant).
 - **Reprendre à :** (traitement d'image = fait, c'est R4-05 ; vérifié SAIN :
   `heifDecoder.js` — `fs.promises`, `execFile` avec délai de 20 s, nettoyage en
   `finally` ; aucun `execSync`/`spawnSync` dans tout `src/`.)
@@ -76,6 +78,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `readFileSync`/`writeFileSync` dans les gestionnaires, traitement d'image
   (`sharp`, HEIC), `bcrypt` synchrone, `JSON.parse` sur gros volumes, et
   appels réseau sans délai d'attente (`fetch`/`axios` sans `timeout`).
+- **PISTE POUR S3 (ne pas publier le détail) :** `src/server.js:279`, la
+  fonction `skip` du limiteur de débit global.
 - **PISTE POUR B2 :** `similarity/recommendationEngine.js:711` crée un
   `new Float32Array(256)` alors que `DIMS = 768` (`vectorEngine.js:26`) ; le
   commentaire « DIMS = 256 » est périmé. `VectorStore.upsert` (`:311`) refuse
