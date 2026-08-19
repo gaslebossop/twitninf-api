@@ -28,9 +28,9 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
 - **Section en cours :** R3 — pagination et taille des réponses.
-- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 3 constats écrits
+- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 4 constats écrits
   (R3-01 `recommendationRoutes.js:264`, R3-02 `messageRoutes.js:489`,
-  R3-03 `messageRoutes.js:517`).
+  R3-03 `messageRoutes.js:517`, R3-04 `messageRoutes.js:1844`).
 - **Déjà passé en revue pour R3 :** inventaire des 57 `findAll` sans `limit`
   dans `src/routes/` et `src/controllers/` (liste établie par balayage
   automatique — **attention, ce balayage rate les appels dont un `include`
