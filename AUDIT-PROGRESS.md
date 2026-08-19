@@ -15,8 +15,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 | R1 | Rapidité | Requêtes N+1 | **TERMINÉE** | `AUDIT-R1.md` |
 | R2 | Rapidité | Index et requêtes lentes | **TERMINÉE** | `AUDIT-R2.md` |
 | R3 | Rapidité | Pagination et taille des réponses | **TERMINÉE** | `AUDIT-R3.md` |
-| R4 | Rapidité | Travail bloquant (boucle d'événements) | **EN COURS** | `AUDIT-R4.md` |
-| B1 | Robustesse | Verrous et concurrence | À FAIRE | `AUDIT-B1.md` |
+| R4 | Rapidité | Travail bloquant (boucle d'événements) | **TERMINÉE** | `AUDIT-R4.md` |
+| B1 | Robustesse | Verrous et concurrence | **EN COURS** | `AUDIT-B1.md` |
 | B2 | Robustesse | Erreurs et journaux | À FAIRE | `AUDIT-B2.md` |
 | S1 | Sécurité | Secrets dans l'historique git | À FAIRE | `AUDIT-S1.md` |
 | S2 | Sécurité | Autorisation et IDOR | À FAIRE | `AUDIT-S2.md` |
@@ -27,59 +27,26 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** R4 — travail bloquant (boucle d'événements).
-- **Couvert :** R1 (10 constats), R2 (12 constats), R3 (11 constats + section
-  « vérifié et trouvé sain » + récapitulatif) — **R3 TERMINÉE**.
-- **Couvert pour R4 :** 8 constats écrits (R4-01 appels réseau sans délai
-  d'attente — inventaire complet des 14 appels sortants de `src/`, 7 sans
-  délai / 7 avec ; les appels de `src/scripts/test_*.js` sont des scripts de
-  test hors production et ont été écartés ; R4-02 `bcryptjs` pur JS au coût 12,
-  `src/models/User.js:2/8/651/661` — **mesuré** : 335 ms par hachage, retard
-  max de la boucle d'événements 93 ms, ~90 % de capacité perdue pendant le
-  calcul ; méthode de mesure reproductible décrite dans le constat ;
-  R4-03 `similarity/vectorEngine.js:394` `writeFileSync` de ~300 Mo toutes les
-  5 min dans le processus API — **mesuré** : 2,7 s de gel pour 100 k vecteurs,
-  et `_periodicSave` en enchaîne deux ;
-  R4-04 `similarity/recommendationEngine.js:296` `syncWithDB` horaire — un
-  `COUNT` par utilisateur actif + tables entières en `_loadEnrichedMeta:455/463`
-  et `_loadFollowGraph:577` ;
-  R4-05 pool libuv à 4 fils partagé entre `sharp`, `fs` et `dns.lookup`,
-  `UV_THREADPOOL_SIZE` défini nulle part ;
-  R4-06 `similarity/vectorEngine.js:352` `search()` = parcours linéaire
-  synchrone de tout l'index sur le chemin du fil — **mesuré** : 169 ms de gel
-  pour 100 k vecteurs, atténué par un cache d'une minute par utilisateur ;
-  R4-07 `vectorStoreService.js:198` `_persistInteractions` — lecture, dedup
-  O(n²) et écriture synchrones sur le chemin du fil IA, **mesuré** 85 ms de gel
-  au plafond de 5 000 interactions ;
-  R4-08 `server.js:354` `express.json({limit:'10mb'})` global — **mesuré**
-  170 ms de `JSON.parse` bloquant).
-- **Reprendre à :** (traitement d'image = fait, c'est R4-05 ; vérifié SAIN :
-  `heifDecoder.js` — `fs.promises`, `execFile` avec délai de 20 s, nettoyage en
-  `finally` ; aucun `execSync`/`spawnSync` dans tout `src/`.)
-  `readFileSync`/`writeFileSync` sur chemins de requête —
-  inventaire déjà fait, à trier (`similarity/vectorEngine.js:426/442` = R4-03 ;
-  `vectorStoreService.js:207/229/243/249` = R4-07) :
-  `videoEditService.js:267`,
-  `verificationService.js:385`, `nfMapWebView.js:680`,
-  `policiercongo/schedulerManager.js:81/98`,
-  `policiercongo/InstructionManager.js:105/123`, `tweetImageService.js:66`.
-  (Vérifié SAIN : `searchSummaryService.js` — `ensureCacheLoaded` ne s'exécute
-  qu'une fois via un drapeau, et `persistCache` utilise `fs.promises` avec une
-  file d'écriture sérialisée. `bcrypt` = fait, c'est R4-02.) Ensuite :
-  boucles sur gros tableaux dans les gestionnaires, et les
-  `setImmediate` de `tweetRoutes.js` (1419, 1845, 2565) et
-  `messageRoutes.js:1636`.
-- **Pistes déjà repérées pour R4, à vérifier en premier :**
-  `src/routes/tweetRoutes.js:1603` (diffusion des notifications sous
-  `setImmediate`, cf. R3-07 : N `INSERT` séquentiels dans la boucle
-  d'événements) ; les trois autres `setImmediate(async …)` de
-  `tweetRoutes.js` (l. 1419, 1845, 2565) ; `src/routes/messageRoutes.js:1636`
-  (`broadcastNewMessage` sous `setImmediate`). Chercher ensuite :
-  `readFileSync`/`writeFileSync` dans les gestionnaires, traitement d'image
-  (`sharp`, HEIC), `bcrypt` synchrone, `JSON.parse` sur gros volumes, et
-  appels réseau sans délai d'attente (`fetch`/`axios` sans `timeout`).
-- **PISTE POUR S3 (ne pas publier le détail) :** `src/server.js:279`, la
-  fonction `skip` du limiteur de débit global.
+- **Section en cours :** B1 — verrous et concurrence.
+- **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9) — **R1 à R4
+  TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
+  récapitulatif.
+- **Prochain pas :** démarrer B1, aucun constat B1 encore écrit.
+
+- **Pistes déjà repérées pour B1, à vérifier en premier :**
+  - `src/routes/messageRoutes.js:489` (`findExactDirectConversation`) : lecture
+    **non bornée de toute la table `conversations`** exécutée **à l'intérieur**
+    de la transaction ouverte par `POST /api/messages/direct/:userId`
+    (`:596`, `tx`). Forme exacte du précédent connu. Voir R3-02.
+  - `src/models/User.js:648-663` : les hooks `beforeCreate`/`beforeUpdate`
+    hachent le mot de passe (~335 ms mesurés, cf. R4-02) — vérifier s'ils
+    s'exécutent dans une transaction d'inscription.
+  - Chercher : `sequelize.transaction(` suivi d'un `await fetch`/`axios`
+    (appel réseau sous verrou), `lock:`/`FOR UPDATE`, et les transactions qui
+    englobent une boucle.
+  - `src/services/transactionAuthorizationService.js` (1 405 lignes) et
+    `src/economy/` : logique d'économie, donc verrous probables.
+
 - **PISTE POUR B2 :** `similarity/recommendationEngine.js:711` crée un
   `new Float32Array(256)` alors que `DIMS = 768` (`vectorEngine.js:26`) ; le
   commentaire « DIMS = 256 » est périmé. `VectorStore.upsert` (`:311`) refuse
@@ -88,10 +55,16 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   journaux (le symptôme « un millier de fausses erreurs » décrit dans la
   consigne) **et** ces tweets ne sont jamais vectorisés — bug fonctionnel
   silencieux. À rédiger en B2.
-- **Piste pour S2 (ne pas publier le détail) :** `src/models/Tweet.js:498`,
+- **PISTE POUR B2 :** `src/services/verificationService.js:385` écrit un fichier
+  `temp/verification-prompt-<horodatage>.txt` à chaque vérification, jamais
+  supprimé.
+- **PISTE POUR S3 (ne pas publier le détail) :** `src/server.js:279`, la
+  fonction `skip` du limiteur de débit global.
+- **PISTE POUR S2 (ne pas publier le détail) :** `src/models/Tweet.js:498`,
   valeur par défaut de la colonne `metadata`, croisée avec l'absence de liste
   blanche de sortie dans le fil (`src/routes/tweetRoutes.js:568`).
-- **Reste :** R4 (en cours), B1, B2, S1, S2, S3.
+
+- **Reste :** B1 (en cours), B2, S1, S2, S3.
 
 ## Règles de la routine
 
