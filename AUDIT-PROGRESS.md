@@ -28,11 +28,11 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
 - **Section en cours :** R3 — pagination et taille des réponses.
-- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 7 constats écrits
+- **Couvert :** R1 (10 constats), R2 (12 constats), R3 : 8 constats écrits
   (R3-01 `recommendationRoutes.js:264`, R3-02 `messageRoutes.js:489`,
   R3-03 `messageRoutes.js:517`, R3-04 `messageRoutes.js:1844`,
   R3-05 clause `IN` géante 16 sites, R3-06 `adRoutes.js:781`,
-  R3-07 `tweetRoutes.js:1603`).
+  R3-07 `tweetRoutes.js:1603`, R3-08 4 routes de liste non paginées).
 - **Déjà passé en revue pour R3 :** inventaire des 57 `findAll` sans `limit`
   dans `src/routes/` et `src/controllers/` (liste établie par balayage
   automatique — **attention, ce balayage rate les appels dont un `include`
@@ -52,7 +52,11 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   50 par validation — sains ; 1603/1609 = R3-07 ; reste 335 à regarder), puis
   `recommendationRoutes.js` (autres lignes), `moderationController.js`
   (2294-2326), `contestRoutes.js`, `adRoutes.js`, `supportRoutes.js`.
-  Vérifiés SAINS au passage : `walletRoutes.js:15` (borné par le nombre de
+  Vérifiés SAINS au passage : `userStatsRoutes.js`, `notificationRoutes.js`,
+  `insightsRoutes.js`, `paidContentRoutes.js`, `premiumRoutes.js` (aucun
+  `findAll` non borné) ; `moderationController.js:2294/2310/2326` (agrégats
+  `GROUP BY` bornés par la fenêtre de dates) ; `recommendationRoutes.js:676`
+  et `aiRecommendationRoutes.js:61` (bornés par la sortie du moteur) ; `walletRoutes.js:15` (borné par le nombre de
   devises), `contestRoutes.js:358/458` (borné par les gagnants),
   `userRoutes.js:505` et `:790` (attributs explicites, aucune fuite de
   colonne), `User.getPublicProfile()` (liste blanche explicite).
