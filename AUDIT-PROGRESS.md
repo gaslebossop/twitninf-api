@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 3
-  constats, dont 1 CRITIQUE.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 4
+  constats, dont 2 CRITIQUES.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -149,6 +149,71 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   d'extensions acceptées (`.mp4`, `.mov`, `.webm`, `.m4v`) avant l'écriture
   disque plutôt qu'après ; envisager une tâche de purge périodique de
   `TEMP_DIR` par âge, en filet de sécurité.
+  **NE PAS refaire cette recherche.**
+
+- **S3 — CONSTAT CRITIQUE (2/2), déjà écrit, NE PAS REFAIRE :
+  `src/routes/userChallengeRoutes.js:119` `PUT /:challengeId/progress` —
+  progression de défi entièrement forgeable, chaîne complète jusqu'au vol
+  d'une récompense exclusive à stock limité.** Chaîne vérifiée de bout en
+  bout, chaque maillon lu dans le code :
+  1. `userChallengeRoutes.js:119-149` : route accepte `{ event_slug, progress }`
+     du corps de la requête, seul contrôle `if (!event_slug || progress === undefined)`
+     — aucune borne, aucun type imposé. Appelle
+     `UserChallenge.updateChallengeProgress(userId, challengeId, event_slug, progress)`
+     (`userId` = `req.user.id`, donc l'attaque ne porte que sur les propres
+     défis de l'appelant — pas un IDOR sur autrui, mais un vol de récompense
+     par soi-même).
+  2. `src/models/UserChallenge.js:150-157` `updateChallengeProgress` charge
+     le défi (`getUserChallenge`, filtré `user_id: userId` — sain sur ce
+     point) puis appelle `challenge.updateProgress(progress)` **sans aucune
+     dérivation depuis une activité réelle**.
+  3. `UserChallenge.js:88-92` `prototype.updateProgress` :
+     `this.progress = Math.min(newProgress, this.max_progress);
+     this.completed = this.progress >= this.max_progress; return this.save();`
+     — le `Math.min` empêche seulement de dépasser le maximum, **pas** d'y
+     accéder directement en un seul appel avec une valeur absurdement grande
+     (`progress: 999999999`). Un seul appel marque n'importe quel défi
+     `completed: true`.
+  4. `POST /:challengeId/claim` (`userChallengeRoutes.js:157`) →
+     `UserChallenge.claimChallengeReward` (`:159-165`) →
+     `prototype.claimReward` (`UserChallenge.js:94-100`) : ne vérifie que
+     `this.completed && !this.claimed` — la seule condition étant celle
+     forgée à l'étape 3, elle passe, et `claimed = true` est posé.
+  5. `POST /claim-special-reward/:eventSlug`
+     (`userChallengeRoutes.js:406-432`, restreint à
+     `eventSlug === 'kosporbirthday'`) → `UserChallenge.claimSpecialReward`
+     (`UserChallenge.js:172-220`) : vérifie
+     `challenges.every(c => c.completed && c.claimed)` sur **les mêmes
+     lignes forgées aux étapes 3-4**, vérifie l'absence de doublon et le
+     stock restant (ces deux derniers contrôles sont sains), puis appelle
+     `VerificationStyleService.addRoseItemToInventory(userId)` — attribution
+     réelle d'un objet d'inventaire exclusif, à stock limité
+     (`checkRoseItemStock`), à un compte qui n'a satisfait aucune condition
+     réelle. **C'est l'impact concret et vérifié : un objet à stock limité
+     peut être obtenu sans la moindre activité authentique**, en trois appels
+     HTTP scriptables (`PUT progress` × N défis, `POST claim` × N,
+     `POST claim-special-reward`).
+  **Note :** la stat `total_rewards: ... * 5` vue dans `GET /stats/:eventSlug`
+  (`:196`) est purement un affichage calculé à la volée, **pas** un crédit de
+  monnaie réel déclenché par `claimReward` — vérifié qu'aucun appel à un
+  service de monnaie/portefeuille n'existe dans `UserChallenge.js`. L'impact
+  économique direct de CE constat est donc l'objet exclusif, pas un mint de
+  TWC. **Vérifié :** les routes spécifiques voisines
+  (`update-likes-progress/:eventSlug`, `update-tweets-progress/:eventSlug`,
+  `challengeProgressService.js:37+`) ne prennent **aucune valeur du client** —
+  seuls `userId` et `eventSlug` en entrée, la progression est recalculée par
+  une requête SQL sur les vraies données (ex. `COUNT(*) FROM tweet_likes ...
+  WHERE t.user_id = :userId`). **Ces routes-là sont saines.** Le défaut est
+  donc localisé à la seule route générique `PUT /:challengeId/progress`, qui
+  fait doublon avec elles sans en avoir les garde-fous — sa suppression pure
+  et simple est probablement le correctif le plus sûr.
+  Correctif à transmettre : ne jamais accepter `progress` brut du client sur
+  cette route ; soit la retirer complètement au profit des routes
+  spécifiques qui recalculent depuis l'activité réelle
+  (`update-likes-progress`, `update-tweets-progress`, etc. — à vérifier
+  qu'elles le font bien, non encore fait), soit la limiter à une incrémentation
+  serveur bornée par événement réel plutôt qu'une valeur absolue envoyée par
+  le client.
   **NE PAS refaire cette recherche.**
 
 - **S3 — vérifié et SAIN (ne pas réexaminer) :**
