@@ -27,7 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S2 — autorisation et IDOR. **PARTIELLE, 4 constats.**
+- **Section en cours :** S2 — autorisation et IDOR. **PARTIELLE, 5 constats,
+  dont 1 CRITIQUE.**
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9),
   S1 (4) — **R1 à S1 TERMINÉES**. S2 en cours.
 
@@ -83,11 +84,38 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `user_id: req.user.id`, c'est un espace développeur personnel, pas une
   administration globale).
 
-- **S2 — reprendre à :** `moderationController` (routes de modération —
-  vérifier le contrôle de rôle sur chaque action, pas seulement
-  l'authentification) et `newEconomyController` (routes économiques —
-  vérifier qu'un client ne peut pas influencer un montant). Puis les deux
-  pistes héritées :
+- **S2 — CONSTAT CRITIQUE, `moderationController.js:2873` `promoteModerator`
+  (routé par `POST /moderators/:userId/promote`, `moderationRoutes.js:476`,
+  derrière `requirePermission('can_manage_moderators')`).** La fonction
+  accepte n'importe quel `role` de la liste `['moderateur', 'admin',
+  'superadmin', 'classeurdetweets', 'economiegardien']` envoyé dans le corps,
+  **sans jamais comparer au rôle de l'appelant**. Aucun concept de hiérarchie
+  de rôles n'existe ailleurs dans le dépôt (recherché : `hierarchy`,
+  `ROLE_HIERARCHY`, `role_rank` — zéro résultat). `requirePermission` accorde
+  un accès total dès que `moderation_permissions.can_manage_moderators` est
+  vrai (`authMiddleware.js:538-545`) — cette permission est censée servir à
+  gérer des modérateurs, pas à créer des superadmins. Résultat : **quiconque
+  détient `can_manage_moderators` peut se promouvoir, ou promouvoir n'importe
+  qui, `superadmin`**, ce qui accorde immédiatement `can_manage_moderators`,
+  `can_manage_economy`, `can_ban_users`, etc. sans plafond (bloc
+  `Object.assign` à `:2899-2909`). C'est une élévation verticale à partir d'une
+  permission horizontale. Le routeur de modération est par ailleurs bien conçu
+  (permissions nommées précises par action, config réservée au rôle le plus
+  haut) — c'est le seul trou dans un dispositif sinon solide.
+  **Note de code annexe, non un constat de sécurité en soi :** `promoteModerator`
+  est défini deux fois dans la classe (`:2553`, un bouchon « à implémenter », et
+  `:2873`, la vraie implémentation) — en JS, la seconde définition écrase la
+  première silencieusement, donc c'est bien `:2873` qui s'exécute. À signaler
+  au propriétaire comme signe qu'une relecture du fichier s'impose.
+  Correctif à transmettre : exiger explicitement le rôle `superadmin` de
+  l'appelant (ou un rang strictement supérieur au rôle cible) avant d'accorder
+  `role: 'superadmin'` ou `role: 'admin'`, distinct du simple
+  `can_manage_moderators`.
+
+- **S2 — reprendre à :** `newEconomyController` (routes économiques —
+  vérifier qu'un client ne peut pas influencer un montant, et vérifier que
+  les rôles économiques comme `economiegardien` n'ont pas le même défaut de
+  plafond que `promoteModerator` ci-dessus). Puis les deux pistes héritées :
   `src/models/Tweet.js:498` (défaut de la colonne `metadata`) croisé avec
   l'absence de liste blanche de sortie dans le fil (`src/routes/tweetRoutes.js:568`),
   et `src/routes/messageRoutes.js:59` (`requireGroupManagementRights` évalué
