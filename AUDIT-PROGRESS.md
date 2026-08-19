@@ -31,18 +31,13 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9), B1 (8) — **R1 à B1
   TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
   récapitulatif.
-- **Prochain pas :** démarrer B2, aucun constat B2 encore écrit.
-  ⚠️ **Premier geste : `git add -f AUDIT-B2.md`** (voir la règle `.gitignore`
-  plus bas), puis vérifier `git ls-files | grep AUDIT`.
+- **Prochain pas :** B2 démarrée. **1 constat écrit : B2-01** (Float32Array(256)
+  vs DIMS=768 — bruit journaux + tweets média jamais vectorisés). Continuer avec
+  la piste 2 ci-dessous.
 
 - **Pistes déjà repérées pour B2, à écrire en priorité :**
-  1. `src/services/similarity/recommendationEngine.js:711` crée un
-     `new Float32Array(256)` alors que `DIMS = 768` (`vectorEngine.js:26`) ; le
-     commentaire « DIMS = 256 » est périmé. `VectorStore.upsert` (`:311`) refuse
-     donc le vecteur et émet un `console.warn` **par tweet vidéo/média sans
-     texte**, à chaque reconstruction. Double conséquence : bruit massif dans les
-     journaux (le symptôme « un millier de fausses erreurs » de la consigne)
-     **et** ces tweets ne sont jamais vectorisés — bug fonctionnel silencieux.
+  1. ~~`recommendationEngine.js:711` `Float32Array(256)` vs `DIMS = 768`~~ →
+     **écrit, constat B2-01.**
   2. `src/services/verificationService.js:385` écrit
      `temp/verification-prompt-<horodatage>.txt` à chaque vérification, jamais
      supprimé — le disque se remplit.
