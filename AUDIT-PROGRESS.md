@@ -31,7 +31,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9) — **R1 à R4
   TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
   récapitulatif.
-- **Couvert pour B1 :** 7 constats écrits (B1-01, `src/economy/metrics.js:100`
+- **Couvert pour B1 :** 8 constats écrits (B1-01, `src/economy/metrics.js:100`
   `EconomyMetrics.refresh` — verrou de ligne global sur la monnaie, `SUM` de
   toute la table des portefeuilles sous ce verrou, et `purchaseVolume24h`
   (`:81`) qui emprunte une **seconde** connexion hors transaction → risque
@@ -55,7 +55,13 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   sur la même transaction → N connexions hors `tx` simultanées) ;
   B1-07 les **42** méthodes statiques de modèles n'acceptent aucune transaction
   — inventaire complet dans le constat ; seuls 2 sites les appellent depuis une
-  transaction aujourd'hui (`messageRoutes.js:847` et `:1002`)).
+  transaction aujourd'hui (`messageRoutes.js:847` et `:1002`) ;
+  B1-08 `economy/ledger.js` — **ordre de verrouillage incohérent** entre
+  `spendToTreasury` (`:241`→`:247`, utilisateur puis trésorerie) et
+  `rewardFromTreasury` (`:304`→`:316`, trésorerie puis utilisateur), plus
+  `transferP2P` (`:406`/`:411`) et la conversion (`:699`/`:705`) qui suivent
+  l'ordre des arguments → 3 interblocages possibles. **Mesure à faire côté
+  production : `SELECT deadlocks FROM pg_stat_database`.**).
 - **Reprendre à :** inventaire des 76 `sequelize.transaction(` de `src/`.
   Déjà vérifié SAIN : `newEconomyService.js:371` `submitMiningProof` (verrou
   sur la ligne du round, pas sur `users` — bonne granularité) ;
