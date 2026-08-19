@@ -888,3 +888,125 @@ Si `pg_stat_database.deadlocks` est non nul, c'est très probablement ici.
 non reproductibles en test, et dont la fréquence augmente avec l'activité.
 
 ---
+
+## Vérifié et trouvé SAIN
+
+Ce qui a été regardé dans cette section et **n'appelle aucun correctif** — avec,
+à chaque fois, la raison, parce que plusieurs de ces exemples sont les modèles à
+copier pour corriger les constats ci-dessus.
+
+**Aucun appel réseau sous verrou.** Balayage automatisé de tout `src/`, sur les
+deux formes de transaction, à la recherche de `fetch`/`axios` entre l'ouverture
+et le `COMMIT` : **zéro résultat**. Le motif le plus redouté de cette section
+n'existe pas dans ce dépôt.
+
+**Aucun appel de modèle sans `transaction:` dans un bloc transactionnel.**
+Balayage sur les deux formes : **zéro résultat**. Là où le code écrit
+directement une requête à l'intérieur d'une transaction, il lui passe toujours
+la transaction. Les fuites viennent uniquement des fonctions intermédiaires
+(B1-03, B1-04, B1-06, B1-07).
+
+**`usernameMarketService.js:374-379` — l'ordre de verrouillage déterministe.**
+Les deux comptes sont triés par identifiant avant d'être verrouillés, et le
+choix de `NO KEY UPDATE` plutôt que `FOR UPDATE` est justifié par un commentaire
+qui décrit l'incident exact qu'il évite. **C'est la référence pour corriger
+B1-08.**
+
+**`gAuthService.js:317-319` — même discipline.** `NO_KEY_UPDATE` explicitement
+choisi, avec la raison : « un appel au grand livre suit dans cette même
+transaction, et `FOR UPDATE` se bloquerait sur son insert de vérification de clé
+étrangère sur une autre connexion ».
+
+**`economy/ledger.js:155`, `:228`, `:395`, `:687` — l'autorisation avant le
+verrou.** `transactionAuthorizationService.authorize()` est systématiquement
+appelé **avant** le premier `lockWallet`. Aucun verrou n'est donc tenu pendant
+l'autorisation. L'exemption `INTERNAL_CONVERSION_EXEMPTION` (`:684`) est
+elle-même documentée comme servant à ne pas « redemander une autorisation qui se
+bloquerait sur nos propres verrous ». La discipline est là ; c'est le service
+d'autorisation lui-même qui ne la suit pas (B1-02).
+
+**`newEconomyService.js:371-415` (`submitMiningProof`) — la bonne granularité.**
+`FOR UPDATE` sur la ligne du round de minage, c'est-à-dire sur l'objet réellement
+disputé. Le `findByPk(userId, …)` de la ligne 401 est délibérément **sans**
+`lock`. C'est le contre-exemple exact du précédent connu.
+
+**`contestService.js:278-282` — le verrou optimiste.**
+`UPDATE contests SET status='drawing' WHERE id=… AND status='open'` puis test du
+nombre de lignes touchées : deux exécutions concurrentes du cron ne peuvent pas
+tirer le même concours deux fois, sans aucun verrou explicite. Élégant et
+correct.
+
+**`communityModerationService.js` — ordre de verrouillage cohérent.** Les trois
+chemins de verdict (`executeSanction` `:339`/`:367`, `applyViolationMinimum`
+`:453`, `applyCompliantVerdict` `:490`/`:513`) verrouillent toujours
+**`Tweet` puis `User`**, jamais l'inverse. Les chemins de vote (`:644`, `:1348`,
+`:1480`, `:1490`) verrouillent toujours **l'item puis l'assignation**. Et
+`hasReportedTweet(userId, item.tweet_id, tx)` (`:1504`) reçoit bien la
+transaction. Aucun interblocage possible entre ces chemins.
+
+**Les notifications sont envoyées hors transaction.** `notifySanction`
+(`communityModerationService.js:~575`) est une fonction distincte, appelée après
+coup ; `Notification.createNotification` n'est appelé depuis **aucun** bloc
+transactionnel (vérifié par le balayage de B1-07). C'est important : cette
+fonction déclenche un envoi push sans délai d'attente (constat R4-01), et le
+faire sous verrou aurait été le pire cas de cette section.
+
+**Les émissions Socket.io sont après `COMMIT`.** Vérifié dans
+`messageRoutes.js` (`POST /direct/:userId`, `POST /groups`) : aucun effet de
+bord externe n'est déclenché avant la validation de la transaction.
+
+**`policiercongo/messagingManager.js:30-65`** — boucle avec `await` dans une
+transaction, mais toutes les requêtes reçoivent `tx` et le `where` imbriqué
+borne le résultat. C'est aussi **la version correcte de R3-02**.
+
+---
+
+## Récapitulatif
+
+| # | Objet | Effet | Correctif |
+|---|---|---|---|
+| B1-02 | anti-fraude hors transaction | interblocage du pool (10 conn., 60 s), **incident déjà survenu** | propager `dbTransaction` |
+| B1-08 | ordre de verrouillage incohérent | 3 interblocages, opérations d'argent qui échouent au hasard | verrouiller dans un ordre trié |
+| B1-05 | tirage de concours | trésorerie verrouillée pendant une transaction non bornée | écriture en lot, sortir ce qui peut l'être |
+| B1-01 | `EconomyMetrics.refresh` | verrou global + `SUM` de toute la table sous ce verrou | compteur incrémental, propager la transaction |
+| B1-03 | `POST /messages/direct/:userId` | 3 connexions par requête, 4 requêtes vident le pool | appeler les contrôles **avant** la transaction |
+| B1-06 | boucles non bornées | N requêtes hors `tx`, plafond fixé par le client | plafonner + une seule requête groupée |
+| B1-04 | gardes de groupe | 4 connexions de plus ; contrôle d'accès hors instantané | paramètre `transaction` |
+| B1-07 | 42 méthodes statiques de modèles | aucune ne sait participer à une transaction | paramètre optionnel, rétrocompatible |
+
+**Les trois premiers gestes, par rentabilité :**
+
+1. **B1-01, point 1 + B1-02, point 1** — propager la transaction à
+   `purchaseVolume24h` et à `_claimAuthorization`. Quelques lignes, et les deux
+   chemins connus vers l'interblocage de pool disparaissent. En attendant,
+   `DB_POOL_MAX=25` et `DB_POOL_ACQUIRE=8000` (deux variables d'environnement)
+   éloignent le seuil et raccourcissent la panne quand elle survient.
+2. **B1-08** — trier les verrous de portefeuille. Une fonction `lockWallets`
+   d'une quinzaine de lignes, puis la substituer dans les six méthodes du grand
+   livre. **Avant de commencer, relever `SELECT deadlocks FROM pg_stat_database` :**
+   la mesure dit tout de suite si le problème est déjà réel, et sert de
+   vérification après correction.
+3. **B1-05** — remplacer la boucle de `save()` du tirage de concours par deux
+   `UPDATE` groupés. La durée du verrou sur la trésorerie cesse de dépendre du
+   nombre de participants.
+
+**Deux causes racines, pas huit défauts :**
+
+- **« Une fonction appelée depuis une transaction ne reçoit pas cette
+  transaction. »** B1-01, B1-02, B1-03, B1-04, B1-06 et B1-07 en découlent
+  tous. La conséquence est toujours la même : une connexion de plus empruntée à
+  un pool de 10, et une lecture faite dans un autre instantané. La règle à poser
+  est simple — *toute fonction susceptible d'être appelée depuis une transaction
+  accepte et propage `transaction`* — et elle est déjà respectée partout où le
+  code écrit ses requêtes directement.
+- **« Le verrou est plus large, ou plus long, que ce qu'il protège. »** B1-01
+  (point b), B1-05 et B1-08. La bonne pratique existe déjà dans le dépôt
+  (`submitMiningProof`, `usernameMarketService`) : elle n'a simplement pas été
+  généralisée au grand livre.
+
+**Recoupements.** B1-03 recoupe R3-02 (la transaction est longue *parce que*
+`findExactDirectConversation` scanne toute une table — corriger R3-02 raccourcit
+B1-03) ; B1-01 point b recoupe R2 (agrégat non indexé) ; B1-04 ouvre une piste
+S2 (contrôle d'accès de groupe évalué hors transaction) ; B1-02 ouvre une piste
+S3 (fenêtre de 15 secondes pendant laquelle une autorisation existe pour une
+opération annulée — rejeu d'opération créditrice).

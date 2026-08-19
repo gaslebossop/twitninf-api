@@ -16,8 +16,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 | R2 | Rapidité | Index et requêtes lentes | **TERMINÉE** | `AUDIT-R2.md` |
 | R3 | Rapidité | Pagination et taille des réponses | **TERMINÉE** | `AUDIT-R3.md` |
 | R4 | Rapidité | Travail bloquant (boucle d'événements) | **TERMINÉE** | `AUDIT-R4.md` |
-| B1 | Robustesse | Verrous et concurrence | **EN COURS** | `AUDIT-B1.md` |
-| B2 | Robustesse | Erreurs et journaux | À FAIRE | `AUDIT-B2.md` |
+| B1 | Robustesse | Verrous et concurrence | **TERMINÉE** | `AUDIT-B1.md` |
+| B2 | Robustesse | Erreurs et journaux | **EN COURS** | `AUDIT-B2.md` |
 | S1 | Sécurité | Secrets dans l'historique git | À FAIRE | `AUDIT-S1.md` |
 | S2 | Sécurité | Autorisation et IDOR | À FAIRE | `AUDIT-S2.md` |
 | S3 | Sécurité | Injection, validation, abus | À FAIRE | `AUDIT-S3.md` |
@@ -27,112 +27,57 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** B1 — verrous et concurrence.
-- **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9) — **R1 à R4
+- **Section en cours :** B2 — erreurs et journaux.
+- **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9), B1 (8) — **R1 à B1
   TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et son
   récapitulatif.
-- **Couvert pour B1 :** 8 constats écrits (B1-01, `src/economy/metrics.js:100`
-  `EconomyMetrics.refresh` — verrou de ligne global sur la monnaie, `SUM` de
-  toute la table des portefeuilles sous ce verrou, et `purchaseVolume24h`
-  (`:81`) qui emprunte une **seconde** connexion hors transaction → risque
-  d'interblocage sur le pool ; 20 appelants recensés ;
-  B1-02 `transactionAuthorizationService.js:318` `_claimAuthorization` +
-  `:409` `_recordReplayMismatch` écrivent hors de la transaction de l'appelant,
-  avec `DB_POOL_MAX=10` et `acquire=60000` — incident déjà survenu, documenté
-  dans `usernameMarketService.js:358-372` ;
-  B1-03 `messageRoutes.js:597` `POST /messages/direct/:userId` — `:624` et
-  `:658` appellent des contrôles d'accès qui font jusqu'à 6 requêtes **hors**
-  de `tx`, dont 2 en `Promise.all` → pic de 3 connexions par requête, 4 requêtes
-  simultanées suffisent à vider un pool de 10 ;
-  B1-04 `messageRoutes.js:958/1219/1353/1388` — `requireMembership` (`:53`) et
-  `requireGroupManagementRights` (`:59`) n'acceptent pas de transaction ; le
-  second est un **contrôle d'accès lu hors transaction**, à reprendre en S2 ;
-  B1-05 `contestService.js:274` `drawContest` — transaction non bornée (1 UPDATE
-  par participation) qui tient un `FOR UPDATE` sur le portefeuille de la
-  trésorerie, ligne partagée par toute l'économie ;
-  B1-06 `messageRoutes.js:845` (une requête hors `tx` par participant, sans
-  plafond client) et `economyAdminController.js:87` (`Promise.all` de `refresh`
-  sur la même transaction → N connexions hors `tx` simultanées) ;
-  B1-07 les **42** méthodes statiques de modèles n'acceptent aucune transaction
-  — inventaire complet dans le constat ; seuls 2 sites les appellent depuis une
-  transaction aujourd'hui (`messageRoutes.js:847` et `:1002`) ;
-  B1-08 `economy/ledger.js` — **ordre de verrouillage incohérent** entre
-  `spendToTreasury` (`:241`→`:247`, utilisateur puis trésorerie) et
-  `rewardFromTreasury` (`:304`→`:316`, trésorerie puis utilisateur), plus
-  `transferP2P` (`:406`/`:411`) et la conversion (`:699`/`:705`) qui suivent
-  l'ordre des arguments → 3 interblocages possibles. **Mesure à faire côté
-  production : `SELECT deadlocks FROM pg_stat_database`.**).
-- **Reprendre à :** inventaire des 76 `sequelize.transaction(` de `src/`.
-  Déjà vérifié SAIN : `newEconomyService.js:371` `submitMiningProof` (verrou
-  sur la ligne du round, pas sur `users` — bonne granularité) ;
-  `usernameMarketService.js:374` `buyListing` (verrous pris dans un **ordre
-  déterministe par id**, `NO KEY UPDATE` justifié en commentaire — exemplaire) ;
-  `economy/ledger.js:155/395/687` (`authorize` appelé **avant** `lockWallet`,
-  donc aucun verrou tenu pendant l'autorisation ; exemption
-  `INTERNAL_CONVERSION_EXEMPTION` documentée à `:684`).
-  À regarder ensuite, dans l'ordre : `communityModerationService.js`
-  (7 `FOR UPDATE`), `casinoService.js:242`, `paidContentService.js`,
-  `gAuthService.js:317`,
-  `policiercongo/policiercongov3/platformTools.js:705`,
-  `customTweetGenerationService.js:96`, `BotDetectionService.js:254`,
-  `tweetEditService.js:114`, `virtualCurrencyController.js:562`.
-  **Vérifié SAIN :** aucun appel réseau (`fetch`/`axios`) trouvé à l'intérieur
-  d'une transaction — balayage automatisé des deux formes (`transaction(async`
-  et `const tx = await sequelize.transaction()`), aucun résultat. Les émissions
-  Socket.io de `messageRoutes.js` sont bien **après** `commit`.
-  **Balayage exhaustif FAIT** (les deux formes de transaction, tout `src/`) :
-  0 appel de modèle sans `transaction:` dans un bloc transactionnel ;
-  6 appels de fonctions touchant la base sans recevoir `tx`, **tous dans
-  `messageRoutes.js`** — couverts par B1-03 (`:624`, `:658`) et B1-04 (`:958`,
-  `:1219`, `:1353`, `:1388`). Réserve : le balayage ne suit pas les appels
-  indirects ni ceux traversant un module (B1-01 et B1-02 sont de cette forme et
-  ont été trouvés à la lecture).
-  **Reste à faire pour clore B1 :** (i) boucles dans transactions — balayage
-  FAIT, 6 sites : `contestService.js:319` = B1-05 ; **restent à examiner**
-  `economyAdminController.js:81` (boucle `burnFraudulent` + `Promise.all` de
-  `EconomyMetrics.refresh` **sur la même transaction**, cf. B1-01c amplifié),
-  = B1-06 ; `messagingManager.js:46` et `InstructionManager.js:55/73` vérifiés
-  SAINS ;
-  **Lacune du balayage B1-04 comblée par B1-07** (méthodes statiques de
-  modèles : 42 recensées, 2 sites d'appel sous transaction).
-  (ii) `communityModerationService.js` (7 `FOR UPDATE`), `casinoService.js:208`,
-  `paidContentService.js`, `gAuthService.js:317`,
+- **Prochain pas :** démarrer B2, aucun constat B2 encore écrit.
+  ⚠️ **Premier geste : `git add -f AUDIT-B2.md`** (voir la règle `.gitignore`
+  plus bas), puis vérifier `git ls-files | grep AUDIT`.
 
-- **Pistes déjà repérées pour B1, à vérifier en premier :**
-  - `src/routes/messageRoutes.js:489` (`findExactDirectConversation`) : lecture
-    **non bornée de toute la table `conversations`** exécutée **à l'intérieur**
-    de la transaction ouverte par `POST /api/messages/direct/:userId`
-    (`:596`, `tx`). Forme exacte du précédent connu. Voir R3-02.
-  - `src/models/User.js:648-663` : les hooks `beforeCreate`/`beforeUpdate`
-    hachent le mot de passe (~335 ms mesurés, cf. R4-02) — vérifier s'ils
-    s'exécutent dans une transaction d'inscription.
-  - Chercher : `sequelize.transaction(` suivi d'un `await fetch`/`axios`
-    (appel réseau sous verrou), `lock:`/`FOR UPDATE`, et les transactions qui
-    englobent une boucle.
-  - `src/services/transactionAuthorizationService.js` (1 405 lignes) et
-    `src/economy/` : logique d'économie, donc verrous probables.
+- **Pistes déjà repérées pour B2, à écrire en priorité :**
+  1. `src/services/similarity/recommendationEngine.js:711` crée un
+     `new Float32Array(256)` alors que `DIMS = 768` (`vectorEngine.js:26`) ; le
+     commentaire « DIMS = 256 » est périmé. `VectorStore.upsert` (`:311`) refuse
+     donc le vecteur et émet un `console.warn` **par tweet vidéo/média sans
+     texte**, à chaque reconstruction. Double conséquence : bruit massif dans les
+     journaux (le symptôme « un millier de fausses erreurs » de la consigne)
+     **et** ces tweets ne sont jamais vectorisés — bug fonctionnel silencieux.
+  2. `src/services/verificationService.js:385` écrit
+     `temp/verification-prompt-<horodatage>.txt` à chaque vérification, jamais
+     supprimé — le disque se remplit.
+  3. Les `catch` des appels réseau de R4-01 : un appel sans délai d'attente
+     n'échoue jamais, donc son `catch` ne journalise jamais rien.
+  4. `src/services/similarity/vectorEngine.js:394` `save()` n'est pas atomique
+     (pas de `.tmp` + `rename`) : un redémarrage pendant l'écriture laisse un
+     `.vdb` tronqué que `load()` (`:437`) relira.
+  5. `console.log`/`console.error` bruts dans `similarity/` et `economy/`
+     (au lieu de `logger`), à recenser.
+  - Chercher ensuite : `catch {}` vides, `catch` qui répondent 200,
+     données personnelles dans les journaux (croiser avec `metadata.ip_address`,
+     cf. la piste S2 ci-dessous), et le volume de `logger.info` sur les chemins
+     chauds.
 
-- **PISTE POUR B2 :** `similarity/recommendationEngine.js:711` crée un
-  `new Float32Array(256)` alors que `DIMS = 768` (`vectorEngine.js:26`) ; le
-  commentaire « DIMS = 256 » est périmé. `VectorStore.upsert` (`:311`) refuse
-  donc le vecteur et émet un `console.warn` **par tweet vidéo/média sans
-  texte**, à chaque reconstruction. Double conséquence : bruit massif dans les
-  journaux (le symptôme « un millier de fausses erreurs » décrit dans la
-  consigne) **et** ces tweets ne sont jamais vectorisés — bug fonctionnel
-  silencieux. À rédiger en B2.
-- **PISTE POUR B2 :** `src/services/verificationService.js:385` écrit un fichier
-  `temp/verification-prompt-<horodatage>.txt` à chaque vérification, jamais
-  supprimé.
-- **PISTE POUR S3 (ne pas publier le détail) :** `src/server.js:279`, la
-  fonction `skip` du limiteur de débit global.
 - **PISTE POUR S2 (ne pas publier le détail) :** `src/models/Tweet.js:498`,
   valeur par défaut de la colonne `metadata`, croisée avec l'absence de liste
-  blanche de sortie dans le fil (`src/routes/tweetRoutes.js:568`).
+  blanche de sortie dans le fil (`src/routes/tweetRoutes.js:568`). Voir aussi
+  `src/routes/messageRoutes.js:59` (`requireGroupManagementRights`, contrôle
+  d'accès évalué hors transaction — constat B1-04).
+- **PISTE POUR S3 (ne pas publier le détail) :** `src/server.js:279`, la
+  fonction `skip` du limiteur de débit global. Et la fenêtre de 15 secondes de
+  `transaction_risk_authorizations` (constat B1-02) : une autorisation validée
+  survit à l'annulation de la transaction qui l'a demandée.
 
-- **Reste :** B1 (en cours), B2, S1, S2, S3.
+- **Reste :** B2 (en cours), S1, S2, S3.
 
 ## Règles de la routine
 
+- ⚠️ **`.gitignore` ligne 30 contient `*.md`.** Un nouveau fichier
+  `AUDIT-<CODE>.md` n'est **pas** suivi par `git add -A` : il faut
+  `git add -f AUDIT-<CODE>.md` **la première fois**. Une passe a écrit R3, R4 et
+  B1 entièrement sans que rien ne parte au dépôt, et ne s'en est aperçue qu'à la
+  fin. **Après le premier commit d'une section, vérifier :**
+  `git ls-files | grep AUDIT` doit lister le nouveau fichier.
 - Traiter la **première section À FAIRE / EN COURS**, et elle seule.
 - **Un commit et un push par constat** — pas par section. On écrit le constat
   dans `AUDIT-<CODE>.md`, on met à jour « REPRENDRE À » ci-dessus, on pousse,
