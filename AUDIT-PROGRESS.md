@@ -18,8 +18,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 | R4 | Rapidité | Travail bloquant (boucle d'événements) | **TERMINÉE** | `AUDIT-R4.md` |
 | B1 | Robustesse | Verrous et concurrence | **TERMINÉE** | `AUDIT-B1.md` |
 | B2 | Robustesse | Erreurs et journaux | **TERMINÉE** | `AUDIT-B2.md` |
-| S1 | Sécurité | Secrets dans l'historique git | **EN COURS** | `AUDIT-S1.md` |
-| S2 | Sécurité | Autorisation et IDOR | À FAIRE | `AUDIT-S2.md` |
+| S1 | Sécurité | Secrets dans l'historique git | **TERMINÉE** | `AUDIT-S1.md` |
+| S2 | Sécurité | Autorisation et IDOR | **EN COURS** | `AUDIT-S2.md` |
 | S3 | Sécurité | Injection, validation, abus | À FAIRE | `AUDIT-S3.md` |
 
 ## REPRENDRE À
@@ -27,41 +27,44 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S1 — secrets dans l'historique git.
-- **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9), B1 (8), **B2 (9)** —
-  **R1 à B2 TERMINÉES**, chacune avec sa section « vérifié et trouvé sain » et
-  son récapitulatif.
+- **Section en cours :** S2 — autorisation et IDOR.
+- **Couvert :** R1 (10 constats), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9),
+  **S1 (4 constats + 1 pour information)** — **R1 à S1 TERMINÉES**.
 
-- **B2 est TERMINÉE.** 9 constats, récapitulatif et ordre d'application écrits.
-  Ne rien y reprendre. Le plus grave, **B2-02**, est une exposition publique de
-  données personnelles **en cours** (fichiers `temp/` suivis par git) : le
-  propriétaire a été notifié pendant la passe. À reprendre sous l'angle
-  « historique git » en S1.
+- **S1 est TERMINÉE.** Balayage complet des 205 commits, toutes références.
+  4 constats de secrets compromis (3 critiques), 12 valeurs d'identifiants à
+  révoquer, **dont 2 constats encore lisibles sur des branches distantes
+  publiées** — exposition EN COURS, pas seulement historique. Le propriétaire a
+  été notifié avec le détail et la liste de révocation. `AUDIT-S1.md` ne
+  contient que décompte et gravité (règle dépôt public). **Ne pas refaire ce
+  balayage.**
 
-- **Prochain pas : démarrer S1.** Aucun constat S1 encore écrit.
-  ⚠️ **Premier geste : `git add -f AUDIT-S1.md`** (voir la règle `.gitignore`
-  plus bas), puis vérifier `git ls-files | grep AUDIT`.
-  ⚠️ **RAPPEL DÉPÔT PUBLIC — S1 est une section `S*` :** dans `AUDIT-S1.md`,
-  écrire **uniquement le décompte et la gravité**. Jamais le secret, jamais le
-  chemin exact, jamais la méthode. Tout le détail va dans le MESSAGE FINAL.
+- **Prochain pas : démarrer S2** (autorisation et IDOR). Aucun constat écrit.
+  ⚠️ **Premier geste : `git add -f AUDIT-S2.md`**, puis vérifier
+  `git ls-files | grep AUDIT`.
+  ⚠️ **RAPPEL DÉPÔT PUBLIC — S2 est une section `S*` :** décompte et gravité
+  seulement dans le fichier poussé. Le détail va dans le MESSAGE FINAL.
 
-- **Pistes déjà repérées pour S1 :**
-  1. **Le plus sûr d'aboutir :** les 13 fichiers `temp/verification-prompt-*.txt`
-     suivis par git (constat B2-02). Ce ne sont pas des secrets techniques mais
-     des données personnelles d'utilisateurs réels, publiées. Établir en S1
-     depuis quel commit ils sont présents (`git log --diff-filter=A -- temp/`)
-     et confirmer qu'ils sont dans l'historique complet.
-  2. Balayer l'historique complet : `git log -p --all`, puis
-     `git log -S` ciblé sur les motifs habituels (`SECRET`, `API_KEY`,
-     `PASSWORD`, `TOKEN`, `PRIVATE KEY`, `sk-`, `AKIA`, `.env`).
-  3. Cibler les fichiers de configuration : `src/config/config.js` contient une
-     configuration SMTP (`smtp.gmail.com`, vu en B2-07) — vérifier si un mot de
-     passe d'application y a figuré à un moment.
-  4. `internalSecret()` (`src/services/ctrTracker.js`) et `config.jwt.secret`
-     (`src/services/authService.js:450`) : vérifier si une valeur par défaut en
-     dur a existé dans l'historique.
+- **Pistes déjà repérées pour S2 :**
+  1. `src/models/Tweet.js:498`, valeur par défaut de la colonne `metadata`,
+     croisée avec l'absence de liste blanche de sortie dans le fil
+     (`src/routes/tweetRoutes.js:568`).
+  2. `src/routes/messageRoutes.js:59` (`requireGroupManagementRights`) :
+     contrôle d'accès évalué hors transaction — voir constat B1-04.
+  3. Méthode conseillée : parcours route par route des fichiers de
+     `src/routes/`, en vérifiant pour chacune (a) la présence d'un middleware
+     d'authentification, (b) le contrôle d'appartenance quand un identifiant
+     vient du client, (c) le contrôle de rôle sur les routes d'administration,
+     de modération et d'économie. Commencer par les routes d'administration et
+     d'économie : `economyAdminController`, `shadowbanAdminRoutes`,
+     `developerAdminRoutes`, `infrastructureAdminRoutes`, `moderationController`.
 
-- **Reste :** S1 (en cours), S2, S3.
+- **PISTE POUR S3 (ne pas publier le détail) :** `src/server.js:279`, la
+  fonction `skip` du limiteur de débit global. Et la fenêtre de 15 secondes de
+  `transaction_risk_authorizations` (constat B1-02) : une autorisation validée
+  survit à l'annulation de la transaction qui l'a demandée.
+
+- **Reste :** S2 (en cours), S3.
 
 ## Règles de la routine
 
