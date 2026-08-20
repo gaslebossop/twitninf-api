@@ -651,14 +651,31 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `interval` avec un plafond de débit calculé, et exige aussi une phrase de
   confirmation. **Aucun constat.**
 
-- **Reste :** S3 (en cours, partielle). Prochain pas : reprendre la liste
-  des 156 candidats bruts pour les fichiers non encore ouverts, par ordre
-  décroissant de candidats (au-delà des fichiers déjà couverts :
-  `messageRoutes.js`, `advancedAdRoutes.js`, `featureFlagRoutes.js`,
-  `userChallengeRoutes.js`, `storyRoutes.js`, `eventPassRoutes.js`,
-  `infrastructureAdminRoutes.js`). Fichiers restants à identifier avec le
-  même script de balayage (`router\.(post|put|patch)` sans validateur dans
-  les 10 lignes suivantes) — non encore refait depuis la liste initiale.
+- **S3 — balayage brut RE-GÉNÉRÉ (script Python identique, fichiers déjà
+  couverts exclus) : liste à jour des candidats restants, par ordre
+  décroissant.** `adRoutes.js` (11 — argent, déjà partiellement survolé :
+  `total_budget` non typé, jugé auto-neutralisé, à re-regarder pour les 10
+  autres candidats), `authRoutes.js` (9 — critique), `events.js` (8),
+  `userRoutes.js` (6), `progressiveRecommendationRoutes.js` (6),
+  `functionalEventRoutes.js` (5), `creatorIntelligenceRoutes.js` (5),
+  `economyAdminRoutes.js` (4 — argent, 1/4 déjà couvert : `PUT
+  /wallets/balance`), `neuralRankRoutes.js` (4), `supportRoutes.js` (4),
+  `tweetRoutes.js` (3), `nfMapRoutes.js` (3), `featureProposalRoutes.js` (3),
+  `policierCongoAdminRoutes.js` (3), `contestRoutes.js` (3),
+  `premiumRoutes.js` (2 — argent), `monetizationProgramRoutes.js` (2 —
+  argent), `gAuthRoutes.js` (2 — auth), `monetizationRoutes.js` (2 —
+  argent), `aiRecommendationRoutes.js` (2), `tweetMonetizationRoutes.js`
+  (2 — argent), `userSimilarityRoutes.js` (2, déjà noté en S2 comme
+  n'utilisant pas `authenticateToken` importé — à re-vérifier sous l'angle
+  validation), puis 12 fichiers à 1 candidat chacun dont `walletRoutes.js`,
+  `paymentRoutes.js`, `inventoryRoutes.js` (argent/objets),
+  `developerAdminRoutes.js`, `shadowbanAdminRoutes.js` (admin).
+  **Prochain pas concret :** prioriser `adRoutes.js`, `authRoutes.js`,
+  `economyAdminRoutes.js` (candidats restants), `paymentRoutes.js`,
+  `walletRoutes.js`, `premiumRoutes.js`, `monetizationRoutes.js`,
+  `tweetMonetizationRoutes.js`, `inventoryRoutes.js` avant le reste (argent
+  et authentification en premier, conformément à la priorité de la
+  section).
 
 ## Règles de la routine
 
