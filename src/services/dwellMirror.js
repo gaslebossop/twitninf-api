@@ -35,7 +35,13 @@
  * ces routes.
  */
 
-const behaviorCollector = require('./behaviorDataCollector');
+// Le module exporte la CLASSE, pas une instance — meme forme que dans
+// `routes/behaviorRoutes.js`. L'importer comme un singleton donnait un
+// `recordUserAction is not a function` avale par le `catch` du miroir : les
+// durees arrivaient bien, et repartaient a la poubelle sans que rien ne
+// distingue ce cas d'un appel jamais parti.
+const BehaviorDataCollector = require('./behaviorDataCollector');
+const behaviorCollector = new BehaviorDataCollector();
 const logger = require('../utils/logger');
 
 /**

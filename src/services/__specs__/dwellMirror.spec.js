@@ -12,10 +12,23 @@
  * joint : les changer d'un côté sans l'autre remet le bug d'origine.
  */
 
-jest.mock('../behaviorDataCollector', () => ({ recordUserAction: jest.fn() }));
+/**
+ * Le mock reproduit la forme REELLE du module : une classe a instancier, pas
+ * un singleton. Un mock plus permissif avait deja masque le bug — le miroir
+ * appelait `recordUserAction` sur l'export brut, ce qui levait
+ * « is not a function » en production pendant que la suite restait verte.
+ * Un mock doit mentir sur le comportement, jamais sur la forme.
+ */
+const mockRecordUserAction = jest.fn();
+jest.mock('../behaviorDataCollector', () => (
+  class BehaviorDataCollectorMock {
+    recordUserAction(...args) {
+      return mockRecordUserAction(...args);
+    }
+  }
+));
 jest.mock('../../utils/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 
-const behaviorCollector = require('../behaviorDataCollector');
 const { mirrorDwell, DWELL_CAP_MS } = require('../dwellMirror');
 
 const USER = '11111111-1111-1111-1111-111111111111';
@@ -23,7 +36,7 @@ const TWEET = '22222222-2222-2222-2222-222222222222';
 
 beforeEach(() => {
   jest.clearAllMocks();
-  behaviorCollector.recordUserAction.mockResolvedValue({});
+  mockRecordUserAction.mockResolvedValue({});
 });
 
 describe('mirrorDwell', () => {
@@ -36,10 +49,10 @@ describe('mirrorDwell', () => {
     });
 
     expect(written).toBe(true);
-    expect(behaviorCollector.recordUserAction).toHaveBeenCalledTimes(1);
+    expect(mockRecordUserAction).toHaveBeenCalledTimes(1);
 
     const [userId, actionType, targetId, targetType, context] =
-      behaviorCollector.recordUserAction.mock.calls[0];
+      mockRecordUserAction.mock.calls[0];
 
     expect(userId).toBe(USER);
     expect(actionType).toBe('time_spent');
@@ -53,18 +66,18 @@ describe('mirrorDwell', () => {
     for (const action of ['like', 'retweet', 'share', 'skip', 'report']) {
       expect(await mirrorDwell({ userId: USER, tweetId: TWEET, action, dwellMs: 9000 })).toBe(false);
     }
-    expect(behaviorCollector.recordUserAction).not.toHaveBeenCalled();
+    expect(mockRecordUserAction).not.toHaveBeenCalled();
   });
 
   test('un passage de moins d’une seconde n’est pas une lecture', async () => {
     expect(await mirrorDwell({ userId: USER, tweetId: TWEET, action: 'view', dwellMs: 400 })).toBe(false);
     expect(await mirrorDwell({ userId: USER, tweetId: TWEET, action: 'view', dwellMs: 999 })).toBe(false);
-    expect(behaviorCollector.recordUserAction).not.toHaveBeenCalled();
+    expect(mockRecordUserAction).not.toHaveBeenCalled();
   });
 
   test('plafonne un écran resté allumé toute la nuit', async () => {
     await mirrorDwell({ userId: USER, tweetId: TWEET, action: 'view', dwellMs: 8 * 3600 * 1000 });
-    const [, , , , context] = behaviorCollector.recordUserAction.mock.calls[0];
+    const [, , , , context] = mockRecordUserAction.mock.calls[0];
     expect(context.time_spent_ms).toBe(DWELL_CAP_MS);
   });
 
@@ -72,13 +85,13 @@ describe('mirrorDwell', () => {
     for (const dwellMs of [undefined, null, NaN, Infinity, -3000, 'longtemps']) {
       expect(await mirrorDwell({ userId: USER, tweetId: TWEET, action: 'view', dwellMs })).toBe(false);
     }
-    expect(behaviorCollector.recordUserAction).not.toHaveBeenCalled();
+    expect(mockRecordUserAction).not.toHaveBeenCalled();
   });
 
   test('sans lecteur ou sans cible, rien n’est écrit', async () => {
     expect(await mirrorDwell({ tweetId: TWEET, action: 'view', dwellMs: 4000 })).toBe(false);
     expect(await mirrorDwell({ userId: USER, action: 'view', dwellMs: 4000 })).toBe(false);
-    expect(behaviorCollector.recordUserAction).not.toHaveBeenCalled();
+    expect(mockRecordUserAction).not.toHaveBeenCalled();
   });
 
   test('conserve la nature du contenu, qui rend la durée interprétable', async () => {
@@ -89,7 +102,7 @@ describe('mirrorDwell', () => {
       dwellMs: 12000,
       context: { media: 'video', contentChars: 180, videoDurationMs: 30000 },
     });
-    const [, , , , context] = behaviorCollector.recordUserAction.mock.calls[0];
+    const [, , , , context] = mockRecordUserAction.mock.calls[0];
     expect(context.media).toBe('video');
     expect(context.contentChars).toBe(180);
     expect(context.videoDurationMs).toBe(30000);
@@ -97,7 +110,7 @@ describe('mirrorDwell', () => {
   });
 
   test('une panne d’écriture ne remonte pas : le classement ne doit pas tomber avec', async () => {
-    behaviorCollector.recordUserAction.mockRejectedValue(new Error('base indisponible'));
+    mockRecordUserAction.mockRejectedValue(new Error('base indisponible'));
     await expect(
       mirrorDwell({ userId: USER, tweetId: TWEET, action: 'view', dwellMs: 4000 }),
     ).resolves.toBe(false);
@@ -105,7 +118,7 @@ describe('mirrorDwell', () => {
 
   test('un identifiant numérique est normalisé en chaîne', async () => {
     await mirrorDwell({ userId: USER, tweetId: 4821, action: 'view', dwellMs: 3000 });
-    const [, , targetId] = behaviorCollector.recordUserAction.mock.calls[0];
+    const [, , targetId] = mockRecordUserAction.mock.calls[0];
     expect(targetId).toBe('4821');
   });
 });
