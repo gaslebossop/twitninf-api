@@ -382,6 +382,39 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
      de la robustesse, pas une classe d'abus supplémentaire.
      **NE PAS refaire cette recherche.**
 
+- **S3 — item 1, progrès partiel de cette passe (pas de nouveau constat
+  publiable) :** `adRoutes.js` (`POST /campaigns`, `POST /advertisements`)
+  vérifié — `total_budget`/`budget` ne sont testés que pour leur troncation
+  (`!campaignData.total_budget`), pas pour leur type/signe. Un budget
+  négatif ou non numérique traverse la vérification de solde
+  (`adService.js:154`, comparaison `<` avec un NaN/négatif rend la garde
+  inopérante) ET saute le débit (`:159`, `costTWC > 0` faux) — MAIS
+  vérifié dans `src/models/Advertisement.js:36-49` que `isBudgetExhausted`
+  (`spent >= this.budget`) et `getRemainingBudget`
+  (`Math.max(0, budget - spent)`) rendent une telle publicité
+  **immédiatement épuisée/à budget nul** dès sa création : aucun chemin
+  identifié vers un service gratuit ou un gain, juste une entrée invalide
+  et inutilisable. **Pas un constat à publier** (auto-neutralisé), mais pas
+  formellement classé "sain" non plus faute d'avoir tracé tous les
+  appelants de `isBudgetExhausted`/`getRemainingBudget` — à reprendre
+  seulement si du temps reste après les candidats plus prioritaires.
+  `eventPassRoutes.js` (`POST /verify`, `POST /redeem`) survolé : les deux
+  passent par le middleware `doorAccess` et un `token` opaque vérifié par
+  `eventPassService` — **pas encore tracé jusqu'à la vérification de
+  signature elle-même**, à approfondir avant de classer sain.
+  **Prochain pas concret :** revenir à la liste des 156 candidats bruts
+  (reproductible avec `/tmp/scan.py` type — regex `router\.(post|put|patch)`
+  sans validateur dans les 10 lignes suivantes), non encore triés :
+  `messageRoutes.js` (12, le plus gros lot, pas encore ouvert),
+  `advancedAdRoutes.js` (9 — IDOR déjà noté en S2, angle validation encore
+  à vérifier séparément), `featureFlagRoutes.js` (9, admin — accès déjà
+  probablement gated par rôle à confirmer comme pour economyAdminRoutes),
+  `userChallengeRoutes.js` (9 — la route `/progress` déjà couverte en
+  détail plus haut, les 8 autres candidats du fichier pas encore ouverts),
+  `storyRoutes.js` (7), `eventPassRoutes.js` (6, dont `/verify`/`/redeem`
+  ci-dessus), `infrastructureAdminRoutes.js` (6, admin), puis le reste par
+  ordre décroissant de candidats.
+
 - **Reste :** S3 (en cours, partielle).
 
 ## Règles de la routine
