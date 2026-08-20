@@ -550,7 +550,73 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `update-tweets-progress`, `initialize/:eventSlug`,
   `claim-special-reward/:eventSlug` déjà couverts. **Fichier clos.**
 
-- **Reste :** S3 (en cours, partielle). Prochain pas : `storyRoutes.js` (7),
+- **S3 — CONSTAT ÉLEVÉ (nouveau), déjà écrit, NE PAS REFAIRE :
+  `src/routes/storyRoutes.js:518` `POST /api/stories` — upload vidéo de
+  story écrit le buffer BRUT sur disque, sous une extension non filtrée,
+  dans un répertoire servi publiquement sans transformation.** Vérifié
+  ligne à ligne :
+  1. `fileFilter` du `multer` (`:43-52`) ne teste que le `mimetype` déclaré
+     par le client (`^(image|video)\/`) — entièrement falsifiable, même
+     défaut que pour l'upload vidéo de tweet déjà documenté.
+  2. Branche `isVideo` (`:527-535`) : `extension =
+     path.extname(req.file.originalname).toLowerCase() || '.mp4'` —
+     **aucune liste blanche**, contrairement à la branche image du même
+     fichier (voir point 4). `path.extname` confirmé sans risque de
+     traversée de répertoire (même vérification que pour l'upload vidéo de
+     tweet), mais l'extension elle-même peut être n'importe quoi
+     (`.html`, `.svg`, `.js`...).
+  3. **Différence clé avec l'upload vidéo de tweet (déjà documenté, constat
+     moyen) : ici il n'y a AUCUN retraitement.** `fs.writeFileSync(outputPath,
+     req.file.buffer)` écrit le contenu envoyé par le client **tel quel**,
+     sans passer par `ffmpeg` ni aucun décodeur qui validerait le contenu
+     réel. Le fichier atterrit directement dans `STORIES_DIR`
+     (`src/public/stories`), servi sans traitement par
+     `express.static(path.join(__dirname, './public'), ...)` monté sur
+     `/static` (`server.js:381`) — confirmé par `buildStaticMediaPublicUrl`
+     (`src/utils/publicMediaOrigin.js:35-39`), qui construit l'URL publique
+     comme `{origin}/static/stories/{filename}`. `express.static`
+     (`serve-static`/`send`) déduit le `Content-Type` HTTP de la réponse à
+     partir de l'extension du fichier.
+  4. Par contraste, la branche image du même fichier (`:541-548`) passe le
+     contenu par `sharp()` avant écriture (validation de fait + sortie
+     `.jpg` forcée) — le même garde-fou que celui déjà jugé sain ailleurs
+     dans ce dépôt pour les avatars/bannières/images de tweet. **Ce
+     garde-fou n'existe que pour les images ici, pas pour les vidéos.**
+  **Effet concret, vérifié jusqu'à la config du serveur statique :** un
+  compte authentifié non suspendu peut publier une "story" en déclarant
+  `Content-Type: video/mp4` avec un `originalname` de son choix (ex.
+  `x.html`) et un corps de requête contenant du HTML/JS arbitraire ; le
+  fichier est enregistré tel quel sous `/static/stories/story-<uid>-<ts>-<r>.html`
+  et servi avec `Content-Type: text/html` par le serveur — un cas classique
+  de téléversement de fichier menant à un XSS stocké sur le domaine de la
+  plateforme elle-même, à une URL prévisible et publique, tant que la story
+  n'a pas expiré (purge horaire des stories expirées confirmée à
+  `server.js:1086`, donc fenêtre bornée à la durée de vie d'une story, pas
+  illimitée). **Non vérifié depuis le code serveur seul** : si les clients
+  officiels (web/mobile) ouvrent jamais cette URL brute dans un contexte qui
+  exécute le script (navigation directe, `<iframe>`/`<object>`, ou un
+  navigateur externe suivant un lien partagé) — un `<video>`/`<img>` normal
+  n'exécuterait pas le contenu, donc l'impact réel dépend du rendu côté
+  client, non audité ici. Le défaut serveur (absence totale de
+  validation/retraitement du contenu vidéo avant publication) est, lui,
+  confirmé avec certitude. Correctif à transmettre : appliquer à la branche
+  vidéo le même traitement que la branche image — au minimum une liste
+  blanche d'extensions (`.mp4`, `.mov`, `.webm`, `.m4v`) déterminée par le
+  `mimetype` validé, jamais par le nom de fichier client, et idéalement un
+  passage par `ffprobe`/`ffmpeg` avant écriture dans le répertoire public,
+  comme c'est déjà fait pour les vidéos de tweets.
+  **NE PAS refaire cette recherche.**
+
+- **S3 — `storyRoutes.js` TERMINÉ (7/7 candidats), reste sain hormis le
+  constat ci-dessus.** `POST /highlights`, `PATCH|PUT /highlights/:id`,
+  `POST /highlights/:id/items` : `storyIds`/`coverStoryId` toujours vérifiés
+  par `ownedStories`/`ownedHighlight` (appartenance à `req.user.id`), titre
+  borné à 40 caractères. `POST /:storyId/view` : idempotent via contrainte
+  unique, ne fait qu'incrémenter un compteur. `PUT /:storyId/like` : pas
+  encore relu en détail (probable même motif que `view`, faible risque) —
+  à rouvrir seulement si du temps reste, sinon considérer le fichier clos.
+
+- **Reste :** S3 (en cours, partielle). Prochain pas :
   `eventPassRoutes.js` (6, dont `/verify`/`/redeem` déjà survolés —
   vérification de signature du token encore à tracer),
   `infrastructureAdminRoutes.js` (6, admin), puis le reste des 156
