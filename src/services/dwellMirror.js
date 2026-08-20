@@ -68,6 +68,11 @@ const DWELL_ACTIONS = new Set(['view', 'read', 'impression']);
 async function mirrorDwell({ userId, tweetId, action, dwellMs, context = null, ip = null }) {
   const ms = Number(dwellMs);
 
+  // Trace de mise en service : dit ce que la route a REELLEMENT recu, avant
+  // toute garde. Sans elle, un rejet (mauvais type d'action, duree sous le
+  // seuil, champ absent) est indiscernable d'un appel qui n'est jamais parti.
+  logger.info(`⏱️ dwell recu: action=${action} ms=${dwellMs} tweet=${tweetId || 'AUCUN'}`);
+
   if (!userId || !tweetId) return false;
   if (!DWELL_ACTIONS.has(String(action))) return false;
   if (!Number.isFinite(ms) || ms < DWELL_FLOOR_MS) return false;
@@ -92,6 +97,11 @@ async function mirrorDwell({ userId, tweetId, action, dwellMs, context = null, i
       {},
       ip
     );
+    // Trace explicite : `recordUserAction` logge deja « time_spent », mais sans
+    // dire s'il s'agit d'un ECRAN ou d'un TWEET — or c'est toute la difference,
+    // seul le second alimente le pot. Une ligne par lecture reelle rend la mise
+    // en service verifiable d'un `pm2 logs | grep dwell`.
+    logger.info(`⏱️ dwell ${capped}ms sur le tweet ${tweetId} (lecteur ${userId})`);
     return true;
   } catch (error) {
     // Au mieux : le tracking de recommandation ne doit pas tomber avec.
