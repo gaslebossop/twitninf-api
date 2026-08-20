@@ -715,6 +715,99 @@ async (req, res) => {
 });
 
 /**
+ * GET /api/tweets/bookmarks
+ * Mes favoris — jamais ceux d'un autre utilisateur : contrairement à
+ * l'onglet « J'aime » d'un profil, un favori est privé.
+ *
+ * DOIT rester avant `/:id` ci-dessous : Express matche les routes dans
+ * l'ordre d'enregistrement, et `/:id` n'a pas de validation UUID — cette
+ * route s'y faisait avaler, "bookmarks" traité comme un identifiant de
+ * tweet, échec 500 côté Postgres sur le cast UUID. Même piège que
+ * "subscription-pricing" déjà documenté ailleurs dans le repo, retombé
+ * dedans une seconde fois.
+ */
+router.get('/bookmarks', [
+  authenticateToken,
+  checkUserBanReadOnly,
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
+  query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
+  handleValidationErrors,
+], async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = parseInt(req.query.offset) || 0;
+
+    const rows = await TweetBookmark.findAll({
+      where: { user_id: userId },
+      include: [{
+        model: Tweet,
+        as: 'tweet',
+        required: true,
+        where: { deleted_at: null },
+        include: [{
+          model: User,
+          as: 'author',
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
+        }]
+      }],
+      order: [['created_at', 'DESC']],
+      limit,
+      offset,
+    });
+
+    const totalCount = await TweetBookmark.count({
+      where: { user_id: userId },
+      include: [{ model: Tweet, as: 'tweet', required: true, where: { deleted_at: null } }],
+    });
+
+    const tweets = rows.map((row) => row.tweet).filter(Boolean);
+    const tweetIds = tweets.map((t) => String(t.id));
+    const [likeCounts, retweetCounts, replyCounts, likedIds, retweetedIds] = await Promise.all([
+      TweetLike.countLikesForTweets(tweetIds),
+      TweetRetweet.countRetweetsForTweets(tweetIds),
+      Tweet.countRepliesForTweets(tweetIds),
+      TweetLike.likedTweetIdsForUser(userId, tweetIds),
+      TweetRetweet.retweetedTweetIdsForUser(userId, tweetIds),
+    ]);
+
+    const enrichedTweets = tweets.map((tweet) => {
+      const tid = String(tweet.id);
+      return {
+        ...stripInternalTweetFields(tweet.toJSON()),
+        stats: {
+          likes: likeCounts.get(tid) || 0,
+          retweets: retweetCounts.get(tid) || 0,
+          replies: replyCounts.get(tid) || 0,
+          views: tweet.view_count || 0,
+        },
+        user_interaction: {
+          is_liked: likedIds.has(tid),
+          is_retweeted: retweetedIds.has(tid),
+          is_bookmarked: true,
+        },
+      };
+    });
+
+    // Un tweet mis en favori peut avoir basculé en contenu payant depuis —
+    // même masquage que le fil et la recherche.
+    if (!(await paidContentService.maskTweetsOrFail(enrichedTweets, userId, res))) return;
+
+    res.json({
+      success: true,
+      message: 'Favoris récupérés avec succès',
+      data: {
+        tweets: enrichedTweets,
+        pagination: { total: totalCount, limit, offset, hasMore: offset + enrichedTweets.length < totalCount },
+      },
+    });
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des favoris:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
  * GET /api/tweets/:id
  * Récupérer un tweet spécifique par son ID
  * Authentification requise pour renvoyer l'état d'interaction (is_liked, is_retweeted)
@@ -3596,92 +3689,6 @@ router.get('/:id/retweets', [
       });
     }
   });
-
-/**
- * GET /api/tweets/bookmarks
- * Mes favoris — jamais ceux d'un autre utilisateur : contrairement à
- * l'onglet « J'aime » d'un profil, un favori est privé.
- */
-router.get('/bookmarks', [
-  authenticateToken,
-  checkUserBanReadOnly,
-  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
-  query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
-  handleValidationErrors,
-], async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const limit = parseInt(req.query.limit) || 20;
-    const offset = parseInt(req.query.offset) || 0;
-
-    const rows = await TweetBookmark.findAll({
-      where: { user_id: userId },
-      include: [{
-        model: Tweet,
-        as: 'tweet',
-        required: true,
-        where: { deleted_at: null },
-        include: [{
-          model: User,
-          as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
-        }]
-      }],
-      order: [['created_at', 'DESC']],
-      limit,
-      offset,
-    });
-
-    const totalCount = await TweetBookmark.count({
-      where: { user_id: userId },
-      include: [{ model: Tweet, as: 'tweet', required: true, where: { deleted_at: null } }],
-    });
-
-    const tweets = rows.map((row) => row.tweet).filter(Boolean);
-    const tweetIds = tweets.map((t) => String(t.id));
-    const [likeCounts, retweetCounts, replyCounts, likedIds, retweetedIds] = await Promise.all([
-      TweetLike.countLikesForTweets(tweetIds),
-      TweetRetweet.countRetweetsForTweets(tweetIds),
-      Tweet.countRepliesForTweets(tweetIds),
-      TweetLike.likedTweetIdsForUser(userId, tweetIds),
-      TweetRetweet.retweetedTweetIdsForUser(userId, tweetIds),
-    ]);
-
-    const enrichedTweets = tweets.map((tweet) => {
-      const tid = String(tweet.id);
-      return {
-        ...stripInternalTweetFields(tweet.toJSON()),
-        stats: {
-          likes: likeCounts.get(tid) || 0,
-          retweets: retweetCounts.get(tid) || 0,
-          replies: replyCounts.get(tid) || 0,
-          views: tweet.view_count || 0,
-        },
-        user_interaction: {
-          is_liked: likedIds.has(tid),
-          is_retweeted: retweetedIds.has(tid),
-          is_bookmarked: true,
-        },
-      };
-    });
-
-    // Un tweet mis en favori peut avoir basculé en contenu payant depuis —
-    // même masquage que le fil et la recherche.
-    if (!(await paidContentService.maskTweetsOrFail(enrichedTweets, userId, res))) return;
-
-    res.json({
-      success: true,
-      message: 'Favoris récupérés avec succès',
-      data: {
-        tweets: enrichedTweets,
-        pagination: { total: totalCount, limit, offset, hasMore: offset + enrichedTweets.length < totalCount },
-      },
-    });
-  } catch (error) {
-    logger.error('Erreur lors de la récupération des favoris:', error);
-    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
-  }
-});
 
 /**
  * POST /api/tweets/:id/bookmark
