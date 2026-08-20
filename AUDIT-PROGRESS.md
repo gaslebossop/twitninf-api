@@ -677,6 +677,85 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   et authentification en premier, conformément à la priorité de la
   section).
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `walletRoutes.js:123`
+  `POST /transfer`.** Utilise `NewEconomyService.transferCoins` →
+  `EconomyLedger.transferP2P` (`src/economy/ledger.js:382-450`), qui appelle
+  `assertPositive(amount)` (`src/economy/money.js:40-46`) **avant** tout
+  usage du montant : `assertPositive` fait `roundTWC(amount)` puis rejette
+  si `<= 0` — donc un montant `NaN` (ex. corps malformé) est bien rejeté
+  (`roundTWC(NaN)` vaut `0`, `0 <= 0` lève une erreur), contrairement au
+  défaut déjà documenté dans `economyAdminRoutes.js` où `roundTWC(NaN)`
+  n'était PAS revérifié après coup. Verrouillage de portefeuille, solde
+  suffisant vérifié, transfert interdit vers soi-même. Route saine.
+
+- **S3 — CONSTAT CRITIQUE (4/4), déjà écrit, NE PAS REFAIRE, LE PLUS
+  DIRECT DE LA SECTION : `src/routes/paymentRoutes.js:20`
+  `POST /api/payments/apple-pay` — route de paiement explicitement
+  factice, jamais reliée à un vrai fournisseur, qui crédite directement le
+  portefeuille de l'appelant jusqu'à 1000 € par appel, sans limite de
+  débit dédiée.** Le code lui-même documente son propre défaut : le
+  commentaire du fichier dit littéralement "Route pour simuler un paiement
+  Apple Pay" et "Simuler le traitement du paiement Apple Pay" (`:19`,
+  `:49`) — ce n'est pas une supposition, c'est écrit noir sur blanc par
+  l'auteur original.
+  1. Le corps de requête n'est validé que sur sa FORME (`express-validator`,
+     `:20-24`) : `amount` doit être un flottant entre `0.01` et `1000`,
+     `currencyId` un UUID existant et actif, `paymentMethod` une chaîne non
+     vide (jamais vérifiée contre une liste, contrairement à d'autres
+     routes du dépôt) — **aucune de ces règles ne vérifie qu'un paiement a
+     réellement eu lieu.**
+  2. `checkTransaction` (`fraudMiddleware.js`, monté `:17` sur tout le
+     routeur) est le même moteur de score de risque comportemental déjà
+     vérifié pour le constat critique 1/3 (`/purchase`) : il évalue si la
+     transaction est suspecte, **il ne vérifie à aucun moment qu'un
+     paiement a eu lieu.**
+  3. Aucun appel à un SDK ou une API Apple (`PassKit`, App Store Server
+     API, vérification de reçu) nulle part dans le gestionnaire — confirmé
+     par la recherche déjà faite pour le constat 1/3
+     (`grep -rln "stripe|verifyReceipt|apple.*receipt..." src/` → aucun
+     résultat pertinent dans ce fichier non plus) et par la lecture
+     complète du fichier (98 lignes utiles) : une attente artificielle de
+     2 secondes (`:53`, commentaire "Simuler un délai de traitement"), un
+     identifiant de transaction Apple Pay généré côté serveur par
+     `crypto.randomBytes` (`:76`, donc jamais vérifié contre Apple), c'est
+     tout.
+  4. Le crédit est réel et direct : `wallet.update({ balance: newBalance
+     ... })` (`:124-127`) où `newBalance = wallet.balance + ninfiAmount`,
+     `ninfiAmount = amount / currency.currentPrice` — **ce chemin ne passe
+     même pas par `ledger.mintFromPurchase` du constat 1/3, c'est un
+     TROISIÈME code path de crédit direct, distinct des deux autres déjà
+     documentés dans cette section.** Verrouillage de ligne
+     (`lock: dbTransaction.LOCK.UPDATE`, `:63`) présent, donc pas de souci
+     de concurrence sur ce point précis — le défaut est uniquement
+     l'absence de vérification de paiement.
+  5. **Différence clé avec le constat 1/3 (`/purchase`), qui aggrave la
+     sévérité :** `/purchase` résout le prix côté serveur via une liste
+     fermée de forfaits (`PURCHASE_PACKAGES.find(...)`) ; **ici, le client
+     fixe directement `amount` en euros (jusqu'à 1000 €), sans aucune
+     grille de prix côté serveur.** Aucune limite de débit dédiée sur cette
+     route (confirmée par lecture de `server.js` — seule
+     `app.use('/api/payments', paymentRoutes)` à `:518`, aucun limiteur
+     spécifique), donc seul le quota global (1000 requêtes/15 min, lui-même
+     désactivable par l'usurpation first-party déjà documentée en constat
+     moyen) borne le débit : à la limite légale de ce quota seul, un compte
+     peut générer jusqu'à 1 000 000 € de contre-valeur en monnaie de la
+     plateforme par tranche de 15 minutes, sans jamais payer un centime.
+  **C'est, de tous les constats S3, le plus direct à exploiter** : pas de
+  chaîne à plusieurs étapes, pas de forge de champs obscurs — un seul appel
+  HTTP avec un corps JSON valide au sens du validateur suffit.
+  Correctif à transmettre : retirer cette route de la production tant
+  qu'aucune intégration réelle avec Apple (App Store Server API, validation
+  de reçu signé) n'existe, ou la protéger derrière un indicateur
+  d'environnement de test explicite et un compte de démonstration désigné —
+  jamais accessible à un compte de production quelconque.
+  **NE PAS refaire cette recherche.**
+
+- **S3 — `paymentRoutes.js` TERMINÉ (1/1 candidat brut, mais fichier lu en
+  entier vu la gravité).** `POST /apple-pay/check` (`:266`) est un
+  placebo sans effet de bord (répond toujours `isAvailable: true` sans
+  toucher à aucune donnée) — pas un constat à part, seulement un signe
+  supplémentaire que ce fichier entier est une maquette non finalisée.
+
 ## Règles de la routine
 
 - ⚠️ **`.gitignore` ligne 30 contient `*.md`.** Un nouveau fichier
