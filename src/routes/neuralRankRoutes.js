@@ -17,6 +17,8 @@ const logger = require('../utils/logger');
 const { spaceOutReplies } = require('../utils/feedShape');
 const rustClient = require('../services/rustRecommenderClient');
 const { mirrorDwell } = require('../services/dwellMirror');
+const { coalesceAuthorId } = require('../services/interactionAuthor');
+const featureFlagService = require('../services/featureFlagService');
 const paidContentService = require('../services/paidContentService');
 const adService = require('../services/adService');
 const { withFeedCache } = require('../services/feedCache');
@@ -528,11 +530,21 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
   // et « Pour toi » assument de resservir un tweet manqué.
   const excludeSeen = exclude_seen === 'true' || exclude_seen === '1';
 
-  // Les expériences ne sont activées que pour le client Windows : deux clients
-  // différents ne doivent donc PAS partager une réponse cachée, sinon
-  // l'affectation aux expériences fuit de l'un à l'autre. D'où sa présence dans
-  // la clé.
-  const enableExperiments = req.headers['x-twitninf-client'] === 'windows-electron';
+  // Deux clients qui n'ont pas les mêmes expériences ne doivent PAS partager
+  // une réponse cachée, sinon l'affectation fuit de l'un à l'autre. D'où la
+  // présence de ce drapeau dans la clé de cache.
+  //
+  // Windows était seul dans la population de test, ce qui condamnait chaque
+  // expérience à converger sur une poignée de lecteurs — le mobile est le gros
+  // du trafic. Il y entre désormais, mais derrière `fil.abtest` : un test A/B
+  // remplace le texte du tweet par une variante, donc ça s'ouvre par paliers,
+  // pas d'un coup sur tout le parc.
+  //
+  // Le drapeau est évalué sur `user_id` : un même lecteur reste du même côté
+  // de la barrière d'une session à l'autre, sans quoi il verrait le tweet
+  // changer de formulation à chaque rafraîchissement.
+  const enableExperiments = req.headers['x-twitninf-client'] === 'windows-electron'
+    || await featureFlagService.isEnabled('fil.abtest', { user_id: userId });
 
   try {
     let refusedByPaidContent = false;
@@ -691,6 +703,12 @@ router.post('/track', authenticateToken, async (req, res) => {
       ip: req.ip,
     }).catch(() => {});
 
+    // Auteur resolu en base quand le client ne le joint pas : sans lui, le
+    // filtrage collaboratif, le boost temps reel et le bandit d'exploration ne
+    // se declenchent jamais (voir `services/interactionAuthor`). Le repli
+    // profite au parc deja installe, qui ne l'envoie sur aucun geste.
+    const resolvedAuthorId = await coalesceAuthorId(authorId, tweetId);
+
     const result = await rustClient.trackInteraction(
       userId,
       tweetId,
@@ -700,7 +718,7 @@ router.post('/track', authenticateToken, async (req, res) => {
         ? { experiment_id: experimentId, variant_id: variantId }
         : null,
       dwellContext,
-      UUID_RE.test(String(authorId || '')) ? String(authorId) : null,
+      resolvedAuthorId,
     );
 
     return res.json({ success: true, data: result });
