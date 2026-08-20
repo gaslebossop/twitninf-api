@@ -90,6 +90,29 @@ de mégaoctets, et rien dans le dépôt ne le purge ensuite.
   un fichier de sortie entièrement reconstruit sous un nom choisi par le
   serveur. C'est une validation de fait du contenu réel, et une protection
   efficace contre un contenu actif déguisé en image.
+- **Réutilisation d'une autorisation anti-fraude pour une opération
+  différente :** l'empreinte qui lie chaque autorisation à l'opération
+  autorisée inclut le type d'opération, le montant, la devise et les
+  parties concernées, pas seulement l'utilisateur — une autorisation
+  obtenue pour une opération ne peut donc pas être consommée pour une
+  opération différente, même par le même utilisateur. Vérifié à la fois
+  côté génération de l'empreinte et côté consommation (comparaison stricte
+  avant de marquer l'autorisation utilisée).
+- **Mot de passe oublié — abus par répétition :** chaque nouvelle demande
+  écrase la précédente en base avant toute vérification, donc aucune
+  accumulation de jetons valides n'est possible ; de plus, l'envoi de
+  l'e-mail contenant le lien n'est à ce stade pas implémenté (fonctionnalité
+  incomplète, déjà documentée en B2), ce qui borne encore l'impact d'un
+  éventuel abus de débit sur cette route précise.
+- **Rejeu d'une opération créditrice sur échange/virement internes :**
+  aucune clé d'idempotence n'existe sur ces deux routes, donc une requête
+  network-retry pourrait exécuter l'opération deux fois — mais dans les deux
+  cas l'opération déplace des fonds qui appartiennent déjà à l'appelant
+  (échange entre ses propres portefeuilles, ou virement d'un solde
+  qu'il doit posséder), sans mécanisme permettant d'en tirer un gain net ;
+  ce n'est pas un vecteur d'enrichissement, seulement un désagrément
+  fonctionnel potentiel pour l'utilisateur qui réessaierait après un
+  timeout.
 
 ## Suite
 

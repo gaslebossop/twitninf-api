@@ -317,15 +317,35 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
      les routes qui touchent de l'argent ou des données sensibles
      (`adRoutes.js`, `economyAdminRoutes.js`, `eventPassRoutes.js`,
      `featureFlagRoutes.js` ont le plus de candidats bruts).
-  2. Limitation de débit sur mot de passe oublié — **déjà partiellement
-     couvert par B2-07** (la route ne fonctionne pas du tout, donc la
-     question du débit y est seconde) ; vérifier si un compte peut être
-     harcelé de jetons de réinitialisation malgré tout (chaque appel écrase
-     le précédent, donc l'impact est probablement faible — à confirmer).
-  3. Rejeu d'opération créditrice — au-delà du constat déjà écrit sur
-     `/purchase`, vérifier `/exchange` et `/transfer` (`newEconomyRoutes.js:102`,
-     `:107`) pour une éventuelle absence d'idempotence (un même appel
-     rejoué deux fois, ex. par un retry client, double-crédite-t-il ?).
+  2. **VÉRIFIÉ, SAIN — NE PAS REFAIRE.** Limitation de débit sur mot de passe
+     oublié (`authController.forgotPassword` → `authService.forgotPassword`,
+     `src/services/authService.js:436-468`) : `authLimiter` (`server.js:301`)
+     n'est monté que sur `/api/auth/login` et `/api/auth/register`
+     (`server.js:311-312`), PAS sur `/forgot-password` — confirmé par
+     `grep` sur `server.js`, seul le middleware global (1000/15min) couvre
+     cette route. Mais impact vérifié faible : chaque appel écrase
+     `reset_password_token`/`reset_password_expires` en base AVANT toute
+     vérification (`:454-457`), donc aucune accumulation de jetons valides ;
+     et `resetPassword` (`:482-484`) compare strictement
+     `user.reset_password_token !== token`, donc un jeton écrasé devient
+     inutilisable même s'il reste cryptographiquement valide (JWT non expiré)
+     — la révocation logique fonctionne. De plus l'envoi d'e-mail est un
+     `// TODO` jamais implémenté (`:459`, cf. B2-07) : à ce jour, appeler
+     cette route en boucle ne délivre même pas de jeton exploitable à qui que
+     ce soit d'autre que l'attaquant lui-même. Rien à corriger sur ce point
+     précis tant que B2-07 n'est pas résolu ; à réévaluer l'ajout d'un
+     `authLimiter` dédié le jour où l'envoi d'e-mail sera implémenté.
+  3. **VÉRIFIÉ, SAIN — NE PAS REFAIRE.** Rejeu d'opération créditrice sur
+     `/exchange` et `/transfer` (`newEconomyRoutes.js:97`, `:107` →
+     `newEconomyController.js:300` `exchangeCurrency`, `:522` `transferCoins`) :
+     validation de présence/type confirmée (`express-validator` sur les deux
+     routes, faux positif du balayage brut). Aucune clé d'idempotence, donc
+     un retry réseau peut exécuter l'opération deux fois — mais dans les
+     deux cas les fonds déplacés appartiennent déjà à l'appelant (échange
+     entre ses propres portefeuilles NF/EUR, virement depuis son propre
+     solde verrouillé) : aucun chemin identifié pour en tirer un gain net,
+     contrairement à `/purchase` qui, lui, mint depuis rien. Pas un vecteur
+     d'enrichissement — désagrément fonctionnel possible seulement.
      **Piste déjà écartée pour `/campaigns/:id/fund` et `/advertisements/:id/fund`**
      (`adRoutes.js:650`, `:713`) : vérifié que `debitTWC` délègue à
      `NewEconomyService.spendCoins` → `EconomyLedger.spendToTreasury`, qui
@@ -333,14 +353,34 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
      `mintFromPurchase` (déjà vérifié sain sur ce point précis en B1) — la
      vérification de solde dans la route elle-même est redondante mais
      inoffensive, l'enforcement réel est dans le ledger verrouillé.
-  4. La fenêtre de 15 secondes de `transaction_risk_authorizations`
-     (constat B1-02) : une autorisation validée survit à l'annulation de la
-     transaction qui l'a demandée — vérifier si elle est réutilisable pour
-     une opération différente de celle qui l'a obtenue.
+  4. **VÉRIFIÉ, SAIN — NE PAS REFAIRE.** Réutilisation d'une autorisation
+     `transaction_risk_authorizations` validée pour une opération différente
+     de celle qui l'a obtenue (constat B1-02, fenêtre de survie à
+     l'annulation) : `_requestHash` (`transactionAuthorizationService.js:310-316`)
+     hache `{...operation, deviceFingerprint, paymentFingerprint}`, et
+     `operation` (construit par `_normalizeOperation`, utilisé dans
+     `authorize()` à `:872`) inclut `transactionKind`, `direction`, `amount`,
+     `amountEur`, `currencyId`, `counterpartyUserId`, `merchantId` — pas
+     seulement `userId`. `consume()` (`:1150-1178`) exige
+     `AND request_hash = :requestHash` dans son `UPDATE ... WHERE`, donc une
+     autorisation ne peut être consommée que par la requête exacte qui l'a
+     produite (même montant, même devise, mêmes parties). Reste vrai que
+     l'autorisation survit à l'annulation de la transaction qui l'a demandée
+     (défaut de robustesse déjà noté en B1-02), mais elle n'est PAS
+     réutilisable pour une opération différente — le risque se limite donc à
+     rejouer la MÊME opération, ce qui rejoint le point 3 ci-dessus (pas de
+     gain net identifié pour les routes qui passent par ce mécanisme).
   5. `src/routes/messageRoutes.js:59` (`requireGroupManagementRights` évalué
      hors transaction — constat B1-04, déjà documenté comme défaut de
-     concurrence ; vérifier ici s'il ouvre aussi une fenêtre d'abus côté
-     validation/autorisation plutôt que seulement de robustesse).
+     concurrence) : vérifié — la fenêtre ouvre uniquement sur la gestion de
+     groupes de messagerie (changement de rôle membre, bannissement), sans
+     donnée économique ni sensible en jeu ; exploiter la fenêtre exigerait
+     qu'un admin de groupe soit rétrogradé au moment exact où il exécute une
+     action de gestion, un cas marginal et sans gain pour l'attaquant
+     au-delà de ce que la faille de concurrence déjà documentée en B1
+     couvre. Pas de constat S3 distinct à ajouter ici — c'est bien seulement
+     de la robustesse, pas une classe d'abus supplémentaire.
+     **NE PAS refaire cette recherche.**
 
 - **Reste :** S3 (en cours, partielle).
 
