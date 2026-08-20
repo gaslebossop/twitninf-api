@@ -1778,6 +1778,34 @@ async function ensureTweetsExploreCounters() {
 }
 
 /**
+ * Vues publicitaires : une impression sur un tweet promu (`target_type =
+ * 'tweet'`) incrémente aussi `view_count` (stats/algo), mais cette part est
+ * gardée à part dans `ad_view_count` pour que `tweetMonetizationService` ne
+ * paie pas une vue déjà payée au CPM par l'annonceur (voir
+ * `computeEffectiveViews` dans `utils/exploreViewsHelpers.js`).
+ */
+async function ensureTweetsAdViewCount() {
+  try {
+    const [tables] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'tweets'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (!tables || !tables.exists) return;
+
+    await sequelize.query(`
+      ALTER TABLE tweets
+        ADD COLUMN IF NOT EXISTS ad_view_count INTEGER NOT NULL DEFAULT 0;
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureTweetsAdViewCount:', e.message);
+    throw e;
+  }
+}
+
+/**
  * `UserBehaviorData.action_type` gagne `tweet_click` (clic sur une carte du
  * mur Explorer). Comme pour `open_tweet`/`algo_check_answer` : ajouter la
  * valeur dans l'ENUM JS du modèle ne suffit pas, `sync({ alter: false })` ne
@@ -1841,6 +1869,7 @@ async function syncDatabase() {
     await ensureScheduledTweetsTimeZoneColumn();
     await ensureAdvertisementsTargetColumns();
     await ensureTweetsExploreCounters();
+    await ensureTweetsAdViewCount();
     await ensureBehaviorDataTweetClickAction();
 
     // ÉTAPE 2: Synchroniser les modèles (créer/modifier les tables)

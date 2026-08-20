@@ -677,6 +677,14 @@ async function runMigrations() {
         ADD COLUMN IF NOT EXISTS explore_click_count INTEGER NOT NULL DEFAULT 0;
     `);
 
+    // Vues publicitaires : une impression sur un tweet promu incrémente aussi
+    // view_count (stats/algo), mais cette part est gardée à part pour que la
+    // monétisation ne paie pas une vue déjà payée au CPM par l'annonceur.
+    await sequelize.query(`
+      ALTER TABLE tweets
+        ADD COLUMN IF NOT EXISTS ad_view_count INTEGER NOT NULL DEFAULT 0;
+    `);
+
     await createOptimizedIndexes();
 
     // Créer les vues optimisées

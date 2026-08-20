@@ -396,6 +396,27 @@ class AdService {
         context: context
       });
 
+      // Une pub qui promeut un tweet (pas un compte) fait aussi remonter
+      // cette vue dans view_count : stats du compte, profil et classement
+      // algo la voient comme n'importe quelle autre vue. ad_view_count la
+      // garde à part pour que la monétisation ne la paie pas une seconde
+      // fois — voir `computeEffectiveViews` dans exploreViewsHelpers.js.
+      if (advertisement.target_type === 'tweet' && advertisement.tweet_id) {
+        try {
+          const { sequelize } = require('../database/index');
+          await Tweet.update(
+            {
+              view_count: sequelize.literal('view_count + 1'),
+              ad_view_count: sequelize.literal('ad_view_count + 1'),
+            },
+            { where: { id: advertisement.tweet_id } }
+          );
+        } catch (viewError) {
+          logger.error('❌ Erreur mise à jour view_count publicitaire:', viewError.message);
+          // Ne pas faire échouer l'impression si cette mise à jour échoue.
+        }
+      }
+
       // Débiter le coût de l'impression
       try {
         await this.debitTWC(

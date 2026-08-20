@@ -30,4 +30,23 @@ describe('exploreViewsHelpers — computeEffectiveViews', () => {
     const views = computeEffectiveViews({});
     expect(views).toBe(0);
   });
+
+  test('vue publicitaire seule : ne rapporte rien, contrairement à un clic Explorer', () => {
+    // 50 vues totales dont 20 via une pub (impressions payées au CPM par
+    // l'annonceur) : (50 - 20) = 30, aucun bonus contrairement aux clics Explorer.
+    const views = computeEffectiveViews({ rawViews: 50, adViews: 20 });
+    expect(views).toBe(30);
+  });
+
+  test('mélange pub + Explorer : les deux parts se soustraient, les clics Explorer restent bonifiés', () => {
+    // 100 vues totales : 20 via pub, 30 via Explorer (5 clics) :
+    // (100 - 30 - 20) + 5*2 = 60
+    const views = computeEffectiveViews({ rawViews: 100, exploreViews: 30, exploreClicks: 5, adViews: 20 });
+    expect(views).toBe(60);
+  });
+
+  test('compteurs pub incohérents (ad_view_count > view_count) : jamais négatif', () => {
+    const views = computeEffectiveViews({ rawViews: 5, adViews: 12 });
+    expect(views).toBe(0);
+  });
 });

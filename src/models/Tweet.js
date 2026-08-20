@@ -462,6 +462,14 @@ const tweetSchema = {
     defaultValue: 0
   },
 
+  // Vues publicitaires (impressions payées au CPM par l'annonceur), gardées
+  // à part de view_count pour que la monétisation ne les paie pas deux fois
+  // — voir exploreViewsHelpers.js et adService.recordImpression.
+  ad_view_count: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+
   // Indique si le tweet a déjà été monétisé
   monetized: {
     type: DataTypes.BOOLEAN,

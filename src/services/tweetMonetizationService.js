@@ -142,6 +142,7 @@ class TweetMonetizationService {
         rawViews: tweet.view_count || 0,
         exploreViews: tweet.explore_view_count || 0,
         exploreClicks: tweet.explore_click_count || 0,
+        adViews: tweet.ad_view_count || 0,
       });
       const [likesCount, retweetsCount, repliesCount] = await Promise.all([
         sequelize.query(`SELECT COUNT(*) as count FROM tweet_likes WHERE tweet_id = :id`, { replacements: { id: tweet.id }, type: sequelize.QueryTypes.SELECT }),
@@ -368,6 +369,7 @@ class TweetMonetizationService {
             rawViews: tweet.view_count || 0,
             exploreViews: tweet.explore_view_count || 0,
             exploreClicks: tweet.explore_click_count || 0,
+            adViews: tweet.ad_view_count || 0,
           });
 
           // Interactions réelles depuis la DB
@@ -439,6 +441,7 @@ class TweetMonetizationService {
           rawViews: tweet.view_count || 0,
           exploreViews: tweet.explore_view_count || 0,
           exploreClicks: tweet.explore_click_count || 0,
+          adViews: tweet.ad_view_count || 0,
         });
         const [likesC, retweetsC, repliesC] = await Promise.all([
           sequelize.query(`SELECT COUNT(*) as count FROM tweet_likes WHERE tweet_id = :id`, { replacements: { id: tweet.id }, type: sequelize.QueryTypes.SELECT }),
