@@ -756,6 +756,27 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   toucher à aucune donnée) — pas un constat à part, seulement un signe
   supplémentaire que ce fichier entier est une maquette non finalisée.
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `economyAdminRoutes.js` TERMINÉ
+  (4/4, dont les 3 candidats restants après `updateWalletBalance` déjà
+  documenté élevé).** `fraudBurn` (`economyAdminController.js:65-102`)
+  valide chaque item avec `Number(item.amount) > 0` — `NaN > 0` vaut
+  `false`, donc bien rejeté (contrairement au défaut déjà documenté sur
+  `updateWalletBalance`, qui ne revérifiait pas après coup). `manualTransfer`
+  (`:303-360`) : le contrôleur lui-même a la même garde faible que
+  `updateWalletBalance` (`transferAmount <= 0` laisse passer un `NaN`),
+  **MAIS** ses deux branches délèguent respectivement à
+  `EconomyLedger.adminCredit` (`ledger.js:560-586`) et `spendToTreasury`
+  (`ledger.js:211+`), qui appellent toutes deux `assertPositive(amount)`
+  AVANT tout usage — `assertPositive` fait `roundTWC` puis rejette
+  strictement `<= 0`, donc un montant invalide y échoue proprement (erreur
+  levée, 500 avec message, capturé par le `catch`), **sans jamais atteindre
+  l'écriture en base.** Ceci confirme, par contraste, que le défaut déjà
+  documenté sur `adminAdjustBalance` (`PUT /wallets/balance`) est une
+  anomalie isolée : c'est la seule fonction du ledger examinée jusqu'ici
+  qui n'appelle pas `assertPositive` avant d'écrire un solde. `toggleWalletLock`
+  (`:362-390`) : pas de montant, `userId` non trouvé → 404 propre. **Fichier
+  clos, aucun nouveau constat.**
+
 ## Règles de la routine
 
 - ⚠️ **`.gitignore` ligne 30 contient `*.md`.** Un nouveau fichier
