@@ -330,8 +330,19 @@ TweetRetweet.belongsTo(User, {
   as: 'user'
 });
 
-TweetRetweet.belongsTo(Tweet, { 
-  foreignKey: 'tweet_id', 
+TweetRetweet.belongsTo(Tweet, {
+  foreignKey: 'tweet_id',
+  as: 'tweet'
+});
+
+// Associations TweetBookmark
+TweetBookmark.belongsTo(User, {
+  foreignKey: 'user_id',
+  as: 'user'
+});
+
+TweetBookmark.belongsTo(Tweet, {
+  foreignKey: 'tweet_id',
   as: 'tweet'
 });
 

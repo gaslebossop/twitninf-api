@@ -58,6 +58,22 @@ class UserFollow extends Model {
     return !!row;
   }
 
+  // Qui a bloqué qui, entre deux comptes précis — pour un écran de profil qui
+  // doit savoir QUOI afficher (« vous avez bloqué ce compte » avec un bouton
+  // débloquer, vs juste « ce compte vous a bloqué »), pas seulement SI un
+  // blocage existe. Priorité à `by_me` : si les deux se sont bloqués (deux
+  // lignes distinctes, `block()` ne détruit jamais un blocage adverse déjà
+  // posé), c'est celui qui vous concerne qui doit s'afficher.
+  static async getBlockDirection(userId, otherId) {
+    const [mine, theirs] = await Promise.all([
+      this.findOne({ where: { follower_id: userId, following_id: otherId, status: 'blocked' } }),
+      this.findOne({ where: { follower_id: otherId, following_id: userId, status: 'blocked' } }),
+    ]);
+    if (mine) return 'by_me';
+    if (theirs) return 'by_them';
+    return null;
+  }
+
   // Identifiants de tous les comptes liés à `userId` par un blocage, dans
   // n'importe quel sens — pour exclure ces auteurs d'un vivier (Rust) ou de
   // résultats de recherche.

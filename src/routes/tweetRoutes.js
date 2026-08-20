@@ -6,7 +6,7 @@ const multer = require('multer');
 const axios = require('axios');
 
 // Import des modèles et services
-const { Tweet, TweetLike, TweetRetweet, TweetBookmark, User, Notification } = require('../models');
+const { Tweet, TweetLike, TweetRetweet, TweetBookmark, User, UserFollow, Notification } = require('../models');
 const { Op } = require('sequelize');
 const { sequelize } = require('../database');
 const { feedCacheRoute } = require('../services/feedCache');
@@ -33,6 +33,30 @@ const ContentQualityService = require('../services/contentQualityService');
 const logger = require('../utils/logger');
 const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
 const { maybeRenewSuperHearts, isSuperHeartEligible } = require('../utils/superHeartHelpers');
+
+/**
+ * Efface l'identité et le contenu d'un tweet dont l'auteur est bloqué (dans
+ * un sens ou l'autre) par le lecteur — pour `GET /api/tweets/:id`, seule
+ * route qui sert un tweet précis sans passer par un vivier déjà filtré (fil
+ * Rust, recherche). Mute en place, ne retire rien de la réponse : le tweet
+ * reste affichable comme placeholder (nécessaire pour le parent d'une
+ * réponse, par exemple), juste vidé de tout ce qui identifie son auteur.
+ */
+function deidentifyIfBlocked(tweetLike, blockedAuthorIds) {
+  const authorId = tweetLike?.author?.id ? String(tweetLike.author.id) : null;
+  if (!authorId || !blockedAuthorIds.has(authorId)) return;
+  tweetLike.content = '';
+  tweetLike.media_urls = [];
+  tweetLike.author = {
+    id: authorId,
+    username: 'utilisateur_introuvable',
+    full_name: 'Utilisateur introuvable',
+    avatar: null,
+    verified: false,
+    verification_style: null,
+    premium: false,
+  };
+}
 
 /**
  * Réception des images de tweet. En mémoire puis recompressées : le fichier
@@ -804,6 +828,22 @@ router.get('/:id', [
     // Enrichir avec statistiques et état d'interaction pour l'utilisateur courant
     const userId = req.user?.id;
     let enrichedTweet = stripInternalTweetFields(tweet.toJSON());
+
+    // Un blocage (dans un sens ou l'autre) doit rendre un auteur invisible
+    // MÊME rencontré par la bande — le parent d'une réponse recommandée, ou
+    // une réponse dans le fil de cette page. Une exclusion à la source (fil
+    // Rust, recherche) ne couvre pas cette route : elle sert un tweet par
+    // son id, sans notion de « vivier ».
+    if (userId) {
+      const blockedIds = new Set(await UserFollow.getBlockedIds(userId));
+      if (blockedIds.size) {
+        deidentifyIfBlocked(enrichedTweet, blockedIds);
+        if (enrichedTweet.parentTweet) deidentifyIfBlocked(enrichedTweet.parentTweet, blockedIds);
+        if (Array.isArray(enrichedTweet.replies)) {
+          enrichedTweet.replies.forEach((reply) => deidentifyIfBlocked(reply, blockedIds));
+        }
+      }
+    }
 
     // Sur un retweet pur, l'engagement appartient au tweet d'origine.
     const statsId = engagementTargetId(enrichedTweet);
@@ -3556,6 +3596,92 @@ router.get('/:id/retweets', [
       });
     }
   });
+
+/**
+ * GET /api/tweets/bookmarks
+ * Mes favoris — jamais ceux d'un autre utilisateur : contrairement à
+ * l'onglet « J'aime » d'un profil, un favori est privé.
+ */
+router.get('/bookmarks', [
+  authenticateToken,
+  checkUserBanReadOnly,
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
+  query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
+  handleValidationErrors,
+], async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = parseInt(req.query.offset) || 0;
+
+    const rows = await TweetBookmark.findAll({
+      where: { user_id: userId },
+      include: [{
+        model: Tweet,
+        as: 'tweet',
+        required: true,
+        where: { deleted_at: null },
+        include: [{
+          model: User,
+          as: 'author',
+          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
+        }]
+      }],
+      order: [['created_at', 'DESC']],
+      limit,
+      offset,
+    });
+
+    const totalCount = await TweetBookmark.count({
+      where: { user_id: userId },
+      include: [{ model: Tweet, as: 'tweet', required: true, where: { deleted_at: null } }],
+    });
+
+    const tweets = rows.map((row) => row.tweet).filter(Boolean);
+    const tweetIds = tweets.map((t) => String(t.id));
+    const [likeCounts, retweetCounts, replyCounts, likedIds, retweetedIds] = await Promise.all([
+      TweetLike.countLikesForTweets(tweetIds),
+      TweetRetweet.countRetweetsForTweets(tweetIds),
+      Tweet.countRepliesForTweets(tweetIds),
+      TweetLike.likedTweetIdsForUser(userId, tweetIds),
+      TweetRetweet.retweetedTweetIdsForUser(userId, tweetIds),
+    ]);
+
+    const enrichedTweets = tweets.map((tweet) => {
+      const tid = String(tweet.id);
+      return {
+        ...stripInternalTweetFields(tweet.toJSON()),
+        stats: {
+          likes: likeCounts.get(tid) || 0,
+          retweets: retweetCounts.get(tid) || 0,
+          replies: replyCounts.get(tid) || 0,
+          views: tweet.view_count || 0,
+        },
+        user_interaction: {
+          is_liked: likedIds.has(tid),
+          is_retweeted: retweetedIds.has(tid),
+          is_bookmarked: true,
+        },
+      };
+    });
+
+    // Un tweet mis en favori peut avoir basculé en contenu payant depuis —
+    // même masquage que le fil et la recherche.
+    if (!(await paidContentService.maskTweetsOrFail(enrichedTweets, userId, res))) return;
+
+    res.json({
+      success: true,
+      message: 'Favoris récupérés avec succès',
+      data: {
+        tweets: enrichedTweets,
+        pagination: { total: totalCount, limit, offset, hasMore: offset + enrichedTweets.length < totalCount },
+      },
+    });
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des favoris:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
 
 /**
  * POST /api/tweets/:id/bookmark

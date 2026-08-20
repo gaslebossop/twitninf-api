@@ -22,6 +22,26 @@ const {
 } = require('../services/tweetTranslationService');
 const logger = require('../utils/logger');
 const ctrTracker = require('../services/ctrTracker');
+
+// Un profil bloqué (dans un sens ou l'autre) ne rend pas d'erreur : il rend
+// un état distinct, que l'app affiche explicitement (« vous avez bloqué ce
+// compte » avec un bouton débloquer, ou « ce compte vous a bloqué ») plutôt
+// que le 404 générique utilisé quand le compte est vraiment introuvable.
+async function blockedStateBetween(viewerId, targetId) {
+  return UserFollow.getBlockDirection(viewerId, targetId);
+}
+
+// Identité minimale d'un profil bloqué : jamais la bio, la bannière ni les
+// stats — un compte qui vous a bloqué n'a pas à laisser voir plus que son
+// existence.
+function minimalBlockedUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    full_name: user.full_name,
+    avatar: user.avatar,
+  };
+}
 const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 // Même valeur que `follow_onboarding_minimum` renvoyé dans le profil : l'écran
 // d'inscription et la validation serveur doivent exiger le même nombre.
@@ -565,14 +585,19 @@ router.get('/profile/authenticated/:username', [
       });
     }
 
-    // Un profil bloqué (dans un sens ou l'autre) répond 404, pas 403 : révéler
-    // qu'un blocage existe serait déjà une information de plus que celui qui
-    // bloque n'a pas choisi de donner.
-    if (currentUserId && user.id !== currentUserId && await UserFollow.isBlocked(currentUserId, user.id)) {
-      return res.status(404).json({
-        success: false,
-        message: 'Profil introuvable'
-      });
+    // Un profil bloqué (dans un sens ou l'autre) rend un état explicite, pas
+    // un 404 : l'app doit pouvoir afficher « vous avez bloqué ce compte »
+    // (avec un bouton débloquer) plutôt qu'un « compte introuvable » qui
+    // laisse croire à un compte supprimé.
+    if (currentUserId && user.id !== currentUserId) {
+      const blocked = await blockedStateBetween(currentUserId, user.id);
+      if (blocked) {
+        return res.json({
+          success: true,
+          message: 'Profil utilisateur (auth) récupéré avec succès',
+          data: { user: minimalBlockedUser(user), isFollowing: false, followStatus: null, blocked }
+        });
+      }
     }
 
     // 📊 Track profile view pour l'algorithme Rust
@@ -789,6 +814,50 @@ router.delete('/followers/:followerId', [
 });
 
 /**
+ * GET /api/users/blocked
+ * Comptes que JE bloque — pour l'écran « débloquer ». Doit rester AVANT
+ * `/:id`, sinon Express traite "blocked" comme un identifiant utilisateur
+ * (échoue sur la validation UUID de cette route-là, mais silencieusement).
+ */
+router.get('/blocked', [
+  authenticateToken,
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
+  query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
+  handleValidationErrors,
+], async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = parseInt(req.query.offset) || 0;
+
+    const rows = await UserFollow.findAll({
+      where: { follower_id: userId, status: 'blocked' },
+      include: [{
+        model: User,
+        as: 'following',
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'profile_customization']
+      }],
+      order: [['updated_at', 'DESC']],
+      limit,
+      offset,
+    });
+    const totalCount = await UserFollow.count({ where: { follower_id: userId, status: 'blocked' } });
+
+    res.json({
+      success: true,
+      message: 'Comptes bloqués récupérés avec succès',
+      data: {
+        users: rows.map((row) => row.following).filter(Boolean),
+        pagination: { total: totalCount, limit, offset, hasMore: offset + rows.length < totalCount },
+      },
+    });
+  } catch (error) {
+    logger.error('Erreur lors de la récupération des comptes bloqués:', error);
+    res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
  * GET /api/users/:id
  * Obtenir le profil public d'un utilisateur par son ID
  */
@@ -819,6 +888,20 @@ router.get('/:id', [
         success: false,
         message: 'Profil introuvable'
       });
+    }
+
+    // Blocage dans un sens ou l'autre : un profil normal ne doit pas se
+    // rendre, dans aucun des deux sens — voir la même logique sur
+    // `/profile/authenticated/:username`.
+    if (req.user?.id && req.user.id !== user.id) {
+      const blocked = await blockedStateBetween(req.user.id, user.id);
+      if (blocked) {
+        return res.json({
+          success: true,
+          message: 'Profil utilisateur récupéré avec succès',
+          data: { user: minimalBlockedUser(user), blocked }
+        });
+      }
     }
 
     // Visite enregistrée sans être attendue, comme sur la route nominative.
@@ -936,6 +1019,21 @@ router.get('/:id/tweets', [
 
     // Utilisateur authentifié via middleware
     const currentUserId = req.user.id;
+
+    // Blocage dans un sens ou l'autre : mêmes tweets vides que sur un
+    // compte privé fermé, mais avant même le contrôle de confidentialité —
+    // un blocage doit fermer strictement plus qu'un compte simplement privé.
+    if (String(currentUserId) !== String(id) && await blockedStateBetween(currentUserId, id)) {
+      return res.json({
+        success: true,
+        message: 'Tweets de l\'utilisateur récupérés avec succès',
+        data: {
+          user,
+          tweets: [],
+          pagination: { total: 0, limit: parseInt(limit), offset: parseInt(offset), hasMore: false }
+        }
+      });
+    }
 
     // Compte privé : personne d'autre que le propriétaire ou un abonné
     // accepté (`active`) ne voit les tweets. Le client déduit l'état
