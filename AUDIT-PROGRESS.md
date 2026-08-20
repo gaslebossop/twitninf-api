@@ -535,11 +535,24 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   définitions d'événement, jamais depuis le corps de la requête).
   **NE PAS refaire cette recherche.**
 
-- **Reste :** S3 (en cours, partielle). Prochain pas : terminer
-  `userChallengeRoutes.js` (routes non encore ouvertes :
-  `POST /complete-birthday-wish/:eventSlug` déjà noté ci-dessus comme
-  non vérifié — à formaliser en constat séparé ou fusionné au 3/3 ci-dessus,
-  pas encore décidé), puis `storyRoutes.js` (7), `eventPassRoutes.js` (6),
+- **S3 — `userChallengeRoutes.js` TERMINÉ (9/9 candidats).**
+  `POST /complete-birthday-wish/:eventSlug` (`:309`) — vérifié :
+  `ChallengeProgressService.completeBirthdayWishChallenge` (:295-332) marque
+  le défi `wish_birthday` `progress=1/max_progress=1` **inconditionnellement**,
+  sans aucune vérification qu'un souhait a réellement été posté nulle part
+  dans le code. C'est un contributeur au constat critique 3/3 ci-dessus (un
+  des trois défis nécessaires à `allCompleted`), pas un constat distinct —
+  fusionné dans le correctif transmis (le vrai problème est en aval,
+  `unlockRoseStyle`/`checkAndUnlockRoseStyle`, pas cette route précise qui
+  reste discutable mais mineure isolément). `POST /` et
+  `PUT /:challengeId/progress` déjà couverts (constats 3/3 et 2/2).
+  `POST /:challengeId/claim`, `update-progress`, `update-likes-progress`,
+  `update-tweets-progress`, `initialize/:eventSlug`,
+  `claim-special-reward/:eventSlug` déjà couverts. **Fichier clos.**
+
+- **Reste :** S3 (en cours, partielle). Prochain pas : `storyRoutes.js` (7),
+  `eventPassRoutes.js` (6, dont `/verify`/`/redeem` déjà survolés —
+  vérification de signature du token encore à tracer),
   `infrastructureAdminRoutes.js` (6, admin), puis le reste des 156
   candidats par ordre décroissant.
 
