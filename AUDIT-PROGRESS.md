@@ -432,9 +432,26 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   correct via clé composite). Aucune route de ce fichier n'accepte de
   valeur brute non bornée sur un champ sensible. **Aucun constat.**
 
+- **S3 — VÉRIFIÉ, SAIN (angle validation) — NE PAS REFAIRE.
+  `advancedAdRoutes.js` (9 candidats bruts).** Toutes les routes d'écriture
+  relues : `track-interaction`, `export-data`, `predict-performance`,
+  `ab-test/create` (délègue à `adABTestingService.createABTest`, qui
+  déstructure des champs nommés et appelle `validateTestConfig` — pas de
+  mass-assignment), `ab-test/:id/assign-user`, `.../record-interaction`,
+  `.../finalize`, `analytics/alert-thresholds/:id`, `cleanup-cache`. Aucune
+  n'a de défaut de type/validation exploitable trouvé ; leur vrai problème
+  (appartenance de la ressource jamais vérifiée) est déjà couvert en S2.
+  **Point mineur relevé, non publié en constat séparé :**
+  `POST /cleanup-cache` (`:544`) n'exige qu'un compte authentifié
+  (`authenticateToken`, aucun contrôle de rôle) pour vider les caches
+  partagés de cinq services publicitaires à la fois — pas de fuite de
+  données ni de gain économique identifié, juste une dégradation de
+  performance partagée déclenchable par n'importe quel utilisateur ; à
+  signaler seulement si le temps le permet après les candidats plus
+  prioritaires.
+
 - **S3 — reprendre à :** prochain fichier de la liste des 156 candidats
-  bruts, non encore ouvert : `advancedAdRoutes.js` (9 — angle validation
-  seulement, l'IDOR y est déjà noté en S2), puis `featureFlagRoutes.js` (9,
+  bruts, non encore ouvert : `featureFlagRoutes.js` (9,
   admin), `userChallengeRoutes.js` (8 restants hors `/progress` déjà
   traité), `storyRoutes.js` (7), `eventPassRoutes.js` (6, dont
   `/verify`/`/redeem` déjà survolés — vérification de signature du token
