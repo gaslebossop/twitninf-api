@@ -201,6 +201,11 @@ async function computePeriodBreakdown(p, { settings: injected } = {}) {
       eligible: !!person.eligible,
       lockedReason: person.lockedReason || null,
       qualifiedViews: s.qualifiedViews,
+      // Vues ayant servi de base au taux d'attention : égal à `qualifiedViews`
+      // dès que la période entière est instrumentée, plus petit sur la période
+      // de transition. Exposé pour que l'écran puisse expliquer une moyenne
+      // calculée sur une partie seulement des vues.
+      measurableViews: s.measurableViews,
       rawViews: s.rawViews,
       distinctViewers: s.distinctViewers,
       hasRealDwell: s.hasRealDwell,
@@ -323,6 +328,7 @@ async function closePeriod({ periodKey = null, now = new Date() } = {}) {
               attentionFactor: row.attentionFactor,
               hasRealDwell: row.hasRealDwell,
               distinctViewers: row.distinctViewers,
+              measurableViews: row.measurableViews,
               rawViews: row.rawViews,
               bonuses: row.bonuses.earned,
               cohortSize: breakdown.cohort.size,
@@ -485,6 +491,7 @@ async function getDashboard(userId, { now = new Date() } = {}) {
             share: mine.share,
             quality: mine.quality,
             qualifiedViews: mine.qualifiedViews,
+            measurableViews: mine.measurableViews,
             rawViews: mine.rawViews,
             distinctViewers: mine.distinctViewers,
             hasRealDwell: mine.hasRealDwell,

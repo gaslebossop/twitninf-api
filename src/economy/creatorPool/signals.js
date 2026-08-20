@@ -37,6 +37,54 @@ const TRUST_LOOKBACK_DAYS = 90;
 const AD_SOURCES = ['ad', 'ads', 'sponsored', 'promoted', 'advertisement'];
 
 /**
+ * ── Pourquoi le taux d'attention a son propre dénominateur ──────────────────
+ *
+ * `attentionRate` divise le temps de lecture mesuré par un nombre de vues.
+ * Toute vue mise à ce dénominateur SANS avoir pu produire de temps de lecture
+ * écrase la moyenne d'autant. Or l'émission de `time_spent` dépend du CLIENT
+ * qui regarde : le fil ne l'a instrumenté que très récemment, le lecteur
+ * plein écran d'Explorer bien avant, et une version d'app plus ancienne
+ * n'émet toujours rien du tout.
+ *
+ * Relevé en prod le 2026-08-20, sur les tweets d'un même créateur : 1,29 s/vue
+ * en divisant par toutes les vues de la semaine, contre 6,15 s/vue en ne
+ * divisant que par les vues réellement mesurables — un facteur 4,8 de
+ * sous-estimation, subi par tout le monde.
+ *
+ * Une simple date de bascule ne suffit pas : il n'y en a jamais eu. Les
+ * relevés quotidiens montrent des semaines de couverture partielle (quelques
+ * dizaines d'événements pour des centaines de vues) avant la généralisation.
+ * Le critère retenu est donc par COUPLE (spectateur, jour) : si un
+ * spectateur a émis au moins un temps de lecture ce jour-là, son client
+ * instrumente, et toutes ses vues du jour comptent au dénominateur ; sinon
+ * son client n'instrumente pas, et aucune n'y entre.
+ *
+ * Deux propriétés voulues :
+ *   * un survol RÉEL continue de compter — le spectateur instrumenté qui
+ *     passe vite fait bien baisser la moyenne, c'est le signal recherché ;
+ *   * la correction s'efface d'elle-même : quand tout le parc instrumente,
+ *     `measurableViews == qualifiedViews` et le calcul redevient l'ancien.
+ *
+ * ⚠ Ne corrige QUE ce dénominateur. Le volume (`qualifiedViews`, seul facteur
+ * de volume du poids) continue de compter TOUTES les vues : un créateur ne
+ * doit pas être payé moins parce qu'une partie de son public utilise une
+ * vieille version de l'app.
+ */
+
+/** Sous-requête : les couples (spectateur, jour) dont le client mesure le temps de lecture. */
+const INSTRUMENTED_VIEWER_DAYS = `
+  SELECT ubd.user_id AS viewer_id,
+         (ubd.timestamp AT TIME ZONE 'UTC')::date AS day
+  FROM user_behavior_data ubd
+  WHERE ubd.action_type = 'time_spent'
+    AND ubd.target_type = 'tweet'
+    AND ubd.timestamp >= :start AND ubd.timestamp < :end
+    AND ubd.is_data_test IS NOT TRUE
+    AND ubd.user_id IS NOT NULL
+  GROUP BY 1, 2
+`;
+
+/**
  * Confiance accordée aux interactions d'un compte, dans `[0, 1]`.
  *
  * Portage direct de `computeTrustWeights` (`scout/trust.go`). Un compte sans
@@ -133,16 +181,24 @@ async function loadTrustWeights(start, end) {
 async function loadAudienceRows(start, end) {
   return sequelize.query(
     `
+    WITH instrumented AS (${INSTRUMENTED_VIEWER_DAYS})
     SELECT t.user_id                                        AS creator_id,
            ubd.user_id                                      AS viewer_id,
            (ubd.timestamp AT TIME ZONE 'UTC')::date         AS day,
            SUM(CASE WHEN ubd.action_type = 'tweet_view'  THEN 1 ELSE 0 END) AS views,
            SUM(CASE WHEN ubd.action_type = 'tweet_click' THEN 1 ELSE 0 END) AS clicks,
+           -- Ce spectateur mesurait-il le temps de lecture ce jour-là ? Le
+           -- prédicat ne dépend que de (spectateur, jour), donc il est
+           -- constant sur tout le groupe — voir le pavé en tête de fichier.
+           BOOL_OR(ins.viewer_id IS NOT NULL)               AS viewer_instrumented,
            SUM(CASE WHEN ubd.action_type = 'time_spent'
                     THEN LEAST(COALESCE((ubd.context_data->>'time_spent_ms')::bigint, 0), :dwellCap)
                     ELSE 0 END)                             AS dwell_ms
     FROM user_behavior_data ubd
     JOIN tweets t ON t.id::text = ubd.target_id
+    LEFT JOIN instrumented ins
+           ON ins.viewer_id = ubd.user_id
+          AND ins.day = (ubd.timestamp AT TIME ZONE 'UTC')::date
     WHERE ubd.timestamp >= :start AND ubd.timestamp < :end
       AND ubd.is_data_test IS NOT TRUE
       AND ubd.target_type = 'tweet'
@@ -302,6 +358,8 @@ async function collectPeriodSignals({ start, end }) {
       byCreator.set(key, {
         creatorId: key,
         qualifiedViews: 0,
+        /** Vues qualifiées de la fenêtre instrumentée — dénominateur du taux d'attention. */
+        measurableViews: 0,
         rawViews: 0,
         dwellMs: 0,
         dwellRows: 0,
@@ -328,7 +386,11 @@ async function collectPeriodSignals({ start, end }) {
 
     // Un clic depuis Explorer vaut deux vues passives — même arbitrage que
     // `computeEffectiveViews`, qui reste la référence pour les vues brutes.
-    c.qualifiedViews += w * (views + 2 * clicks);
+    const qualified = w * (views + 2 * clicks);
+    c.qualifiedViews += qualified;
+    // Le client de ce spectateur mesurait-il le temps ce jour-là ? Sinon ses
+    // vues n'entrent pas au dénominateur du taux d'attention.
+    if (row.viewer_instrumented) c.measurableViews += qualified;
     c.rawViews += views + clicks;
     c.dwellMs += w * dwell;
     if (dwell > 0) c.dwellRows += 1;
@@ -371,12 +433,15 @@ async function collectPeriodSignals({ start, end }) {
     out.push({
       creatorId: c.creatorId,
       qualifiedViews: c.qualifiedViews,
+      measurableViews: c.measurableViews,
       rawViews: c.rawViews,
       distinctViewers,
       dwellMs: c.dwellMs,
       hasRealDwell: c.dwellRows > 0,
-      // Attention : millisecondes moyennes par vue qualifiée.
-      attentionRate: c.qualifiedViews > 0 ? c.dwellMs / c.qualifiedViews : 0,
+      // Attention : millisecondes moyennes par vue qualifiée, rapportées aux
+      // seules vues MESURABLES — pas à toutes les vues de la période. Voir le
+      // pavé « pourquoi le taux d'attention a son propre dénominateur ».
+      attentionRate: c.measurableViews > 0 ? c.dwellMs / c.measurableViews : 0,
       // Rétention : abonnements gagnés + spectateurs revenus un autre jour,
       // rapportés aux spectateurs distincts.
       retentionRate: distinctViewers > 0 ? (c.followsGained + returning) / distinctViewers : 0,
