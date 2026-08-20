@@ -458,7 +458,90 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   encore à tracer), `infrastructureAdminRoutes.js` (6, admin), puis le
   reste par ordre décroissant.
 
-- **Reste :** S3 (en cours, partielle).
+- **S3 — CONSTAT CRITIQUE (3/3), déjà écrit, NE PAS REFAIRE : contournement
+  total (stock ET `claimed`) de l'item exclusif "Badge Verifie Rose" via un
+  chemin d'attribution automatique parallèle à `claim-special-reward`, plus
+  une réécriture de seuil qui rend les défis triviaux à forger.** Chaîne
+  vérifiée ligne à ligne, deux défauts qui se combinent :
+  1. **`POST /api/user-challenges/` (`userChallengeRoutes.js:81`)** —
+     authentification simple requise, aucune autre garde. Accepte
+     `challenge_id`, `event_slug`, `max_progress` bruts du corps et appelle
+     `UserChallenge.createOrUpdateChallenge` (`src/models/UserChallenge.js:126-148`) :
+     `findOrCreate` sur `{user_id, challenge_id, event_slug}`, et si la ligne
+     existe déjà, **écrase `max_progress` par la valeur du client** sans
+     aucune borne (pas de minimum, `0` accepté). Donc n'importe quel compte
+     peut, sur ses propres lignes de défi (pas un IDOR sur autrui), ramener
+     le seuil réel de n'importe quel défi de n'importe quel événement à `0`.
+  2. **`POST /api/user-challenges/update-progress/:eventSlug`
+     (`userChallengeRoutes.js:228`)**, authentification simple requise, →
+     `ChallengeProgressService.updateAllChallengesProgress`
+     (`src/services/challengeProgressService.js:159-183`) : recalcule la
+     progression réelle (`COUNT(*)` sur tweets/likes — ce point précis est
+     sain, déjà vérifié) puis, **dans tous les cas, y compris si `progress
+     >= max_progress` est vrai uniquement parce que `max_progress` a été
+     mis à `0` à l'étape 1**, appelle
+     `this.checkAndUnlockRoseStyle(userId, eventSlug)` (`:171`, défini
+     `:189-211`).
+  3. `checkAndUnlockRoseStyle` charge **tous** les `UserChallenge` de
+     l'utilisateur pour l'`eventSlug` fourni (fourni par le client dans
+     l'URL — pas restreint à `'kosporbirthday'` à ce niveau) et, si
+     `challenges.every(c => c.completed)`, appelle directement
+     `VerificationStyleService.unlockRoseStyle(userId)`
+     (`src/services/verificationStyleService.js:140-165`) — **sans passer
+     par `claim-special-reward`, sans vérifier `claimed`, et surtout SANS
+     APPELER `checkRoseItemStock()` À AUCUN MOMENT DE CETTE CHAÎNE.**
+  4. `unlockRoseStyle` exige seulement `user.verified === true` (gate réel,
+     mais indépendant du système de défis) puis `canUseRoseStyle` (`:100-133`)
+     qui retourne `true` dès que `challenges.every(c => c.completed)` sur
+     `event_slug: 'kosporbirthday'` codé en dur ici (donc l'`eventSlug`
+     arbitraire de l'étape 3 ne sert à rien pour ce garde-fou précis — il
+     faut que les lignes forgées portent bien `event_slug: 'kosporbirthday'`) ;
+     **le commentaire du code à cet endroit dit explicitement "NE PAS
+     ajouter l'item ici - il sera ajouté uniquement lors du claim de la
+     récompense finale"** — c'est l'intention documentée par l'auteur
+     lui-même. Pourtant, juste après ce commentaire, `unlockRoseStyle`
+     (appelé automatiquement, pas par un claim explicite) fait exactement
+     l'inverse : `:157` `await this.addRoseItemToInventory(userId)`, qui
+     (`:170-184`) appelle `InventoryService.addItemToUser` — vérifié
+     (`src/services/inventoryService.js:12-40`) qu'**aucune vérification de
+     stock n'existe à ce niveau non plus**, juste un `INSERT ... ON
+     CONFLICT` qui incrémente la quantité.
+  **Effet concret, vérifié de bout en bout :** un compte "verified"
+  quelconque peut obtenir l'item exclusif à stock plafonné à 100
+  (`checkRoseItemStock`, `MAX_STOCK = 100`) **sans jamais passer par le
+  contrôle de stock**, en trois appels HTTP scriptables sur ses 3 lignes de
+  défi `kosporbirthday` (`POST /` ×3 avec `max_progress: 0`, puis
+  `POST /update-progress/kosporbirthday` une fois) — et ceci fonctionne même
+  sans la forge de `max_progress` : un utilisateur ayant complété les seuils
+  réels (5 tweets, 5 likes, plus l'appel libre `complete-birthday-wish` déjà
+  documenté comme non vérifié) obtient AUSSI l'item automatiquement à la
+  prochaine mise à jour de progression, sans jamais appeler
+  `claim-special-reward` ni être compté dans son contrôle de stock — donc le
+  plafond de 100 objets peut être dépassé par la simple accumulation
+  d'utilisateurs légitimes, pas seulement par un abus délibéré.
+  **C'est le constat le plus sévère de la section S3** : il ne contourne pas
+  seulement la vérification d'activité (comme le constat critique 2/2 déjà
+  documenté), il élimine aussi le plafond de stock lui-même, sur un item
+  dont le code montre par son propre commentaire que ce plafond était censé
+  être respecté.
+  Correctif à transmettre : supprimer l'appel à `addRoseItemToInventory`
+  dans `unlockRoseStyle` (le rendre cohérent avec son propre commentaire —
+  ne changer que `verification_style` en affichage si l'item est déjà
+  possédé, jamais l'attribuer) ; faire passer toute attribution de l'item
+  par le chemin unique `claim-special-reward` qui, lui, vérifie le stock et
+  l'absence de doublon ; et corriger `POST /api/user-challenges/` pour ne
+  jamais permettre au client de fixer `max_progress` sur un défi déjà
+  initialisé (recalculer ce seuil côté serveur depuis une table de
+  définitions d'événement, jamais depuis le corps de la requête).
+  **NE PAS refaire cette recherche.**
+
+- **Reste :** S3 (en cours, partielle). Prochain pas : terminer
+  `userChallengeRoutes.js` (routes non encore ouvertes :
+  `POST /complete-birthday-wish/:eventSlug` déjà noté ci-dessus comme
+  non vérifié — à formaliser en constat séparé ou fusionné au 3/3 ci-dessus,
+  pas encore décidé), puis `storyRoutes.js` (7), `eventPassRoutes.js` (6),
+  `infrastructureAdminRoutes.js` (6, admin), puis le reste des 156
+  candidats par ordre décroissant.
 
 ## Règles de la routine
 
