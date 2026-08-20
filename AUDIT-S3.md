@@ -24,9 +24,9 @@ un client peut-il influencer un montant ou rejouer une opération créditrice.
 |---|---|---|
 | **Critique** | **3** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie ; l'état serveur qui conditionne l'attribution d'une récompense exclusive à stock limité peut être forgé entièrement côté client ; un second chemin d'attribution de cette même récompense contourne à la fois le contrôle de stock et le contrôle anti-doublon, y compris pour des comptes n'ayant rien forgé |
 | **Moyenne** | **2** | Un mécanisme de confiance destiné au trafic applicatif légitime repose sur des informations entièrement fournies par le client, sans attache cryptographique — il conditionne l'exemption de plusieurs limites de débit, y compris sur l'opération créditrice ci-dessus ; un chemin d'échec d'upload laisse un fichier volumineux sur disque indéfiniment, sans purge |
-| **Élevée** | **1** | Une route d'administration économique accepte un montant sans valider qu'il est bien numérique : une requête malformée (champ omis, faute de frappe, valeur non numérique) n'est pas rejetée, elle remet silencieusement à zéro le solde de la cible et déplace la totalité vers la trésorerie, sans message d'erreur |
+| **Élevée** | **2** | Une route d'administration économique accepte un montant sans valider qu'il est bien numérique : une requête malformée (champ omis, faute de frappe, valeur non numérique) n'est pas rejetée, elle remet silencieusement à zéro le solde de la cible et déplace la totalité vers la trésorerie, sans message d'erreur ; un type de média uploadé n'est, contrairement aux autres types du même dépôt, ni filtré par son contenu réel ni retraité avant d'être publié tel quel sur une URL publique, avec une extension de fichier laissée au choix du client |
 
-**À ce stade : 6 constats, dont 3 critiques et 1 élevé.** Les deux constats
+**À ce stade : 7 constats, dont 3 critiques et 2 élevés.** Les deux constats
 moyens touchent le premier constat critique : le second lève la limite de
 débit qui aurait pu, à défaut d'autre chose, borner son ampleur. Le
 troisième constat critique aggrave le second : même si la forge de
