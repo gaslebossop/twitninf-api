@@ -24,10 +24,11 @@ un client peut-il influencer un montant ou rejouer une opération créditrice.
 |---|---|---|
 | **Critique** | **2** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie ; l'état serveur qui conditionne l'attribution d'une récompense exclusive à stock limité peut être forgé entièrement côté client |
 | **Moyenne** | **2** | Un mécanisme de confiance destiné au trafic applicatif légitime repose sur des informations entièrement fournies par le client, sans attache cryptographique — il conditionne l'exemption de plusieurs limites de débit, y compris sur l'opération créditrice ci-dessus ; un chemin d'échec d'upload laisse un fichier volumineux sur disque indéfiniment, sans purge |
+| **Élevée** | **1** | Une route d'administration économique accepte un montant sans valider qu'il est bien numérique : une requête malformée (champ omis, faute de frappe, valeur non numérique) n'est pas rejetée, elle remet silencieusement à zéro le solde de la cible et déplace la totalité vers la trésorerie, sans message d'erreur |
 
-**À ce stade : 4 constats, dont 2 critiques.** Les deux constats moyens
-touchent le premier constat critique : le second lève la limite de débit qui
-aurait pu, à défaut d'autre chose, borner son ampleur.
+**À ce stade : 5 constats, dont 2 critiques et 1 élevé.** Les deux constats
+moyens touchent le premier constat critique : le second lève la limite de
+débit qui aurait pu, à défaut d'autre chose, borner son ampleur.
 
 ## Constat critique — détail (décompte uniquement ici, méthode complète transmise au propriétaire)
 

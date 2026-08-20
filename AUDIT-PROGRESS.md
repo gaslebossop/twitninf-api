@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 4
-  constats, dont 2 CRITIQUES.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 5
+  constats, dont 2 CRITIQUES et 1 ÉLEVÉ.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -253,6 +253,51 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
      validation de fait du contenu, et son export force le format de sortie
      (toujours `.jpeg(...)`), ce qui élimine tout contenu actif qu'un format
      image détourné (SVG avec script, par exemple) pourrait porter. Sain.
+
+- **S3 — CONSTAT ÉLEVÉ (validation absente), déjà écrit, NE PAS REFAIRE :
+  `src/routes/economyAdminRoutes.js:33` `PUT /wallets/balance` →
+  `economyAdminController.js:276` `updateWalletBalance` →
+  `src/economy/ledger.js:598` `adminAdjustBalance`.** Route admin, protégée
+  par `authenticateToken` + `requireEconomyRole` (rôles `moderateur`,
+  `economiegardien`, `admin`, `superadmin` — donc pas ouverte à n'importe
+  qui, mais accessible à un rôle relativement répandu, `moderateur`).
+  Le contrôleur (`:276-301`) lit `{ userId, amount, reason }` du corps
+  **sans aucune validation de présence ni de type** et passe `amount`
+  directement comme `delta` à `adminAdjustBalance`. Chaîne vérifiée :
+  `adminAdjustBalance` (`ledger.js:598-606`) calcule
+  `target = roundTWC(current + Number(delta))`. Si `amount` est absent du
+  corps (`undefined`), ou une chaîne non numérique (faute de frappe, ex.
+  `"10O"`), ou un objet/tableau à plus d'un élément, `Number(delta)` vaut
+  `NaN`. **Vérifié dans `src/economy/money.js:3-7`** : `roundTWC` fait
+  `if (!Number.isFinite(n)) return 0` — donc `target` ne devient PAS `NaN`
+  en base, il devient silencieusement **0**, sans lever d'erreur nulle part
+  dans la chaîne. Le reste de `adminSetBalance` (`ledger.js:608+`) traite
+  alors ce `target: 0` comme une cible légitime : `diff = 0 - current`
+  (négatif dès que `current > 0`), branche débit (`:629-654`) — vérifié
+  `current < debit` est `current < current`, donc `false`, la garde ne
+  bloque pas — et exécute `wallet.update({ balance: 0 })` **plus**
+  `treasuryWallet.update({ balance: +current })` : le solde de
+  l'utilisateur ciblé est mis à zéro et l'intégralité est transférée à la
+  trésorerie, **sans validation, sans confirmation, sans distinction entre
+  une faute de frappe et une action volontaire**. Effet concret : un
+  opérateur `moderateur` qui oublie le champ `amount`, ou l'envoie mal
+  typé, dans un appel à cette route efface silencieusement le solde TWC
+  (monnaie à valeur réelle) du compte ciblé — pas de message d'erreur, pas
+  de rollback à déclencher manuellement, juste un `success: true` avec
+  `newBalance: 0`. Testé le raisonnement uniquement par lecture de code
+  (pas d'exécution contre une base réelle dans cet audit), mais chaque
+  étape de la chaîne est vérifiée ligne à ligne, y compris le comportement
+  de `roundTWC` sur `NaN`. Second défaut associé, non testé jusqu'au bout :
+  `userId` n'est pas non plus validé — si absent, `lockWallet` (`:105`)
+  appelle `findOrCreateWallet(undefined, currencyId, ...)`, dont le
+  comportement exact (erreur Sequelize/contrainte NOT NULL vs. création
+  d'une ligne avec `userId: null`) n'a pas été vérifié plus loin — à
+  creuser si utile, mais le défaut sur `amount` est déjà suffisant et
+  confirmé. Correctif à transmettre : valider `userId` (entier positif,
+  existant) et `amount` (nombre fini, non-nul) en entrée de route avant
+  tout appel au ledger ; lever 400 sur échec plutôt que de laisser
+  `Number()`/`roundTWC` absorber silencieusement une valeur invalide en 0.
+  **NE PAS refaire cette recherche.**
 
 - **S3 — reprendre à :** le reste du périmètre n'a **pas encore été couvert** :
   1. Validation absente sur les routes d'écriture — un balayage automatisé
