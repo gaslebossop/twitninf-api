@@ -9,6 +9,7 @@ const communityModeration = require('../services/communityModerationService');
 const rustClient = require('../services/rustRecommenderClient');
 const { strikePolicyForCategory } = require('../config/strikePolicies');
 const { REPORT_CATEGORIES, categoriesFor } = require('../config/reportCategories');
+const ContentQualityService = require('../services/contentQualityService');
 
 class ModerationController {
   // ===== GESTION DES SIGNALEMENTS =====
@@ -1772,6 +1773,26 @@ class ModerationController {
           content: tweet.content,
           reason
         });
+      }
+
+      // Le fait est inscrit au registre qualité de l'auteur AVANT la
+      // suppression : ensuite, `tweet.user_id` n'est plus lisible sans passer
+      // par la ligne effacée. Une suppression isolée ne coûte rien de plus
+      // qu'un avis ; c'est la récidive sous 14 jours qui réduit la portée.
+      //
+      // Note : la clôture d'un signalement retenu passe, elle, par
+      // `issueStrike` (plus haut dans ce fichier) et pas par ici — un fait
+      // déjà instruit par un modérateur n'a pas à être compté deux fois.
+      try {
+        await ContentQualityService.record({
+          userId: tweet.user_id,
+          tweetId,
+          kind: ContentQualityService.KIND.MODERATOR_DELETE,
+          reason,
+          metadata: { moderator_id: moderatorId },
+        });
+      } catch (qualityError) {
+        logger.warn(`[contentQuality] suppression ${tweetId} non enregistrée: ${qualityError.message}`);
       }
 
       // Supprimer le tweet

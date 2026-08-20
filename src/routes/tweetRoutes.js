@@ -29,6 +29,7 @@ const { upload, videoService } = require('../services/videoService');
 const { requireFlag } = require('../middleware/featureFlagMiddleware');
 const tweetImageService = require('../services/tweetImageService');
 const tweetAudioService = require('../services/tweetAudioService');
+const ContentQualityService = require('../services/contentQualityService');
 const logger = require('../utils/logger');
 const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
 const { maybeRenewSuperHearts, isSuperHeartEligible } = require('../utils/superHeartHelpers');
@@ -1647,6 +1648,24 @@ router.post('/', [
               logger.info(`📢 Notification créée pour tweet non éligible ${tweet.id}`);
             } catch (notifError) {
               logger.error(`❌ Erreur lors de la création de la notification pour tweet non éligible ${tweet.id}:`, notifError);
+            }
+
+            // Inscription au registre qualité du compte. Jusqu'ici, un tweet
+            // écarté des recommandations n'avait AUCUNE conséquence : on
+            // pouvait en accumuler indéfiniment. Le premier cas ne coûte
+            // toujours rien de plus que la notification ci-dessus ; c'est la
+            // récidive sous 14 jours qui réduit temporairement la portée.
+            // Voir `services/contentQualityService.js`.
+            try {
+              await ContentQualityService.record({
+                userId,
+                tweetId: tweet.id,
+                kind: ContentQualityService.KIND.NOT_ELIGIBLE,
+                reason: processResult.gemini_result?.reason || null,
+                metadata: { score: processResult.gemini_result?.score ?? null },
+              });
+            } catch (qualityError) {
+              logger.warn(`[contentQuality] non-éligibilité ${tweet.id} non enregistrée: ${qualityError.message}`);
             }
 
           } else if (processResult.moderation_status === 'approved') {

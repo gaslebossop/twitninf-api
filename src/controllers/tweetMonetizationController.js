@@ -1,281 +1,90 @@
 /**
- * Contrôleur pour la monétisation des tweets
+ * Ancienne surface de monétisation, réduite à ce qui a survécu au passage au
+ * pot hebdomadaire (`/api/creator-pool`).
+ *
+ * Elle reste montée parce que des clients déjà installés l'appellent. Deux
+ * règles ont guidé ce qui reste :
+ *
+ *   - **Ce qui mentait a été retiré, pas adapté.** `rpm-rates`,
+ *     `eligibility/:tweetId` et `reward/:tweetId` annonçaient un prix par
+ *     tweet qui n'existe plus : un tweet ne vaut rien tout seul, sa part
+ *     dépend du vivier de la semaine. Les servir avec des chiffres inventés
+ *     serait pire que de renvoyer une erreur explicite.
+ *   - **Ce qui reste vrai continue de répondre** : l'aperçu des gains et
+ *     l'encaissement, désormais adossés aux parts figées.
  */
 
 const TweetMonetizationService = require('../services/tweetMonetizationService');
-const { Op } = require('sequelize');
 const logger = require('../utils/logger');
 
+/** Réponse unique pour les routes dont le concept n'existe plus. */
+function gone(res, replacement) {
+  return res.status(410).json({
+    success: false,
+    message: 'Cette route a été retirée : la monétisation ne se calcule plus tweet par tweet.',
+    replacement,
+  });
+}
+
 class TweetMonetizationController {
-  /**
-   * Obtenir les taux RPM actuels
-   */
   static async getRPMRates(req, res) {
-    try {
-      res.json({
-        success: true,
-        data: {
-          rates: TweetMonetizationService.REWARD_RATES,
-          eligibilityCriteria: TweetMonetizationService.ELIGIBILITY_CRITERIA,
-          description: {
-            views: `${TweetMonetizationService.REWARD_RATES.VIEWS} TWC par vue`,
-            likes: `${TweetMonetizationService.REWARD_RATES.LIKES} TWC par like`,
-            comments: `${TweetMonetizationService.REWARD_RATES.COMMENTS} TWC par commentaire`,
-            retweets: `${TweetMonetizationService.REWARD_RATES.RETWEETS} TWC par retweet`
-          }
-        }
-      });
-    } catch (error) {
-      logger.error('Erreur lors de la récupération des taux RPM:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Erreur lors de la récupération des taux RPM',
-        error: error.message
-      });
-    }
+    return gone(res, 'GET /api/creator-pool/dashboard');
   }
 
-  /**
-   * Vérifier l'éligibilité d'un tweet avec le nouveau système RPM
-   */
   static async checkEligibility(req, res) {
-    try {
-      const { tweetId } = req.params;
-
-      if (!tweetId) {
-        return res.status(400).json({
-          success: false,
-          message: 'ID du tweet requis'
-        });
-      }
-
-      const eligibility = await TweetMonetizationService.calculateTweetEligibility(tweetId);
-
-      res.json({
-        success: true,
-        data: {
-          ...eligibility,
-          rpmRates: TweetMonetizationService.RPM_RATES,
-          eligibilityCriteria: TweetMonetizationService.ELIGIBILITY_CRITERIA
-        }
-      });
-
-    } catch (error) {
-      logger.error('Erreur lors de la vérification de l\'éligibilité:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Erreur lors de la vérification de l\'éligibilité',
-        error: error.message
-      });
-    }
+    return gone(res, 'GET /api/creator-pool/dashboard');
   }
 
-  /**
-   * Calculer la récompense d'un tweet
-   */
   static async calculateReward(req, res) {
-    try {
-      const { tweetId } = req.params;
-
-      if (!tweetId) {
-        return res.status(400).json({
-          success: false,
-          message: 'ID du tweet requis'
-        });
-      }
-
-      const rewardData = await TweetMonetizationService.calculateTweetReward(tweetId);
-
-      res.json({
-        success: true,
-        data: rewardData
-      });
-
-    } catch (error) {
-      logger.error('Erreur lors du calcul de la récompense:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Erreur lors du calcul de la récompense',
-        error: error.message
-      });
-    }
+    return gone(res, 'GET /api/creator-pool/dashboard');
   }
 
-  /**
-   * Distribuer une récompense
-   */
+  static async getUserEligibleTweets(req, res) {
+    return gone(res, 'GET /api/creator-pool/dashboard');
+  }
+
   static async distributeReward(req, res) {
-    try {
-      const { tweetId } = req.params;
-      const { userId } = req.body;
-
-      if (!tweetId || !userId) {
-        return res.status(400).json({
-          success: false,
-          message: 'ID du tweet et ID utilisateur requis'
-        });
-      }
-
-      const result = await TweetMonetizationService.distributeReward(tweetId, userId);
-
-      res.json({
-        success: result.success,
-        data: result
-      });
-
-    } catch (error) {
-      logger.error('Erreur lors de la distribution de la récompense:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Erreur lors de la distribution de la récompense',
-        error: error.message
-      });
-    }
+    return gone(res, 'POST /api/creator-pool/claim');
   }
 
-  /**
-   * Prévisualiser les gains sans les distribuer
-   */
+  /** Gains figés en attente + projection de la semaine en cours. */
   static async previewEarnings(req, res) {
     try {
-      const userId = req.user.id;
-      const result = await TweetMonetizationService.previewEarnings(userId);
-
-      res.json({
-        success: true,
-        data: result
-      });
-
+      const data = await TweetMonetizationService.previewEarnings(req.user.id);
+      res.json({ success: true, data });
     } catch (error) {
-      logger.error('Erreur lors de la prévisualisation des gains:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Erreur lors de la prévisualisation des gains',
-        error: error.message
-      });
+      logger.error('Erreur aperçu des gains:', error);
+      res.status(500).json({ success: false, message: 'Impossible de charger tes gains' });
     }
   }
 
-  /**
-   * Traiter tous les tweets éligibles
-   */
+  /** Encaisse toutes les parts qui attendent. */
   static async processEligibleTweets(req, res) {
     try {
-      const userId = req.user.id; // Récupérer l'ID de l'utilisateur authentifié
-      const result = await TweetMonetizationService.processEligibleTweets(userId);
-
+      const result = await TweetMonetizationService.collectEarnings(req.user.id);
+      if (result.locked) {
+        return res.status(403).json({ success: false, message: result.reason });
+      }
       res.json({
         success: true,
-        data: result
+        message: result.periodsCollected > 0
+          ? `${result.totalCollected.toFixed(2)} encaissés`
+          : 'Aucune part à encaisser pour le moment',
+        data: result,
       });
-
     } catch (error) {
-      logger.error('Erreur lors du traitement des tweets éligibles:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Erreur lors du traitement des tweets éligibles',
-        error: error.message
-      });
+      logger.error('Erreur encaissement:', error);
+      res.status(500).json({ success: false, message: 'Encaissement impossible' });
     }
   }
 
-  /**
-   * Obtenir les statistiques de monétisation
-   */
   static async getStats(req, res) {
     try {
       const stats = await TweetMonetizationService.getMonetizationStats();
-
-      res.json({
-        success: true,
-        data: stats
-      });
-
+      res.json({ success: true, data: stats });
     } catch (error) {
-      logger.error('Erreur lors de la récupération des statistiques:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Erreur lors de la récupération des statistiques',
-        error: error.message
-      });
-    }
-  }
-
-  /**
-   * Obtenir les tweets éligibles d'un utilisateur
-   */
-  static async getUserEligibleTweets(req, res) {
-    try {
-      const { userId } = req.params;
-      const { page = 1, limit = 20 } = req.query;
-
-      if (!userId) {
-        return res.status(400).json({
-          success: false,
-          message: 'ID utilisateur requis'
-        });
-      }
-
-      // Récupérer les tweets de l'utilisateur des 7 derniers jours
-      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      
-      const { Tweet } = require('../models');
-
-      const tweets = await Tweet.findAll({
-        where: {
-          user_id: userId,
-          createdAt: {
-            [Op.gte]: sevenDaysAgo
-          }
-        },
-        order: [['createdAt', 'DESC']],
-        limit: parseInt(limit),
-        offset: (parseInt(page) - 1) * parseInt(limit)
-      });
-
-      // Analyser chaque tweet
-      const analyzedTweets = [];
-      for (const tweet of tweets) {
-        try {
-          const eligibility = await TweetMonetizationService.calculateTweetEligibility(tweet.id);
-          const rewardData = await TweetMonetizationService.calculateTweetReward(tweet.id);
-
-          analyzedTweets.push({
-            id: tweet.id,
-            content: tweet.content,
-            createdAt: tweet.createdAt,
-            likesCount: tweet.likesCount || 0,
-            retweetsCount: tweet.retweetsCount || 0,
-            repliesCount: tweet.repliesCount || 0,
-            eligibility: eligibility,
-            reward: rewardData.reward,
-            multipliers: rewardData.multipliers,
-            factors: rewardData.factors
-          });
-        } catch (error) {
-          logger.error(`Erreur lors de l'analyse du tweet ${tweet.id}:`, error);
-        }
-      }
-
-      res.json({
-        success: true,
-        data: {
-          tweets: analyzedTweets,
-          pagination: {
-            page: parseInt(page),
-            limit: parseInt(limit),
-            total: analyzedTweets.length
-          }
-        }
-      });
-
-    } catch (error) {
-      logger.error('Erreur lors de la récupération des tweets éligibles:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Erreur lors de la récupération des tweets éligibles',
-        error: error.message
-      });
+      logger.error('Erreur statistiques de monétisation:', error);
+      res.status(500).json({ success: false, message: 'Statistiques indisponibles' });
     }
   }
 }

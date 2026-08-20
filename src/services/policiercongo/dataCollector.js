@@ -1365,17 +1365,28 @@ class DataCollector {
         })),
         monetization: {
           totalEarnedHistorical: walletTotals.earned.toFixed(2),
-          pendingRewards: preview.totalRewards.toFixed(2),
-          pendingEligibleTweets: preview.eligibleTweets,
-          topPendingTweets: preview.tweetDetails
-            .sort((a, b) => b.reward - a.reward)
+          // Parts DÉJÀ FIGÉES par les clôtures du lundi, pas une estimation :
+          // ce chiffre ne bouge plus entre deux lectures et vaut exactement ce
+          // qui sera versé.
+          pendingRewards: preview.claimableTotal.toFixed(2),
+          pendingPeriods: preview.claimablePeriods.length,
+          claimablePeriods: preview.claimablePeriods
             .slice(0, 5)
-            .map(d => ({
-              tweetId: d.tweetId,
-              content: d.content,
-              reward: d.reward.toFixed(2),
-              views: d.stats.views
-            }))
+            .map(p => ({
+              periodKey: p.periodKey,
+              amount: p.amount.toFixed(2),
+              rpm: p.rpm.toFixed(2)
+            })),
+          // La semaine en cours, à titre indicatif : elle n'est pas encaissable
+          // tant que le lundi ne l'a pas close.
+          currentWeek: preview.projection
+            ? {
+              periodKey: preview.currentPeriodKey,
+              projectedAmount: preview.projection.amount.toFixed(2),
+              rpm: preview.projection.rpm.toFixed(2),
+              qualifiedViews: Math.round(preview.projection.qualifiedViews)
+            }
+            : null
         },
         recentTransactions: recentTransactions.map(tx => ({
           id: tx.id,

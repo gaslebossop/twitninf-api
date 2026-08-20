@@ -103,7 +103,6 @@ const spotifyRoutes = require('./routes/spotifyRoutes');
 const moderationRoutes = require('./routes/moderationRoutes');
 const recommendationRoutes = require('./routes/recommendationRoutes');
 const behaviorRoutes = require('./routes/behaviorRoutes');
-const monetizationRoutes = require('./routes/monetizationRoutes');
 const trackingRoutes = require('./routes/trackingRoutes');
 const virtualCurrencyRoutes = require('./routes/virtualCurrencyRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
@@ -111,6 +110,7 @@ const newEconomyRoutes = require('./routes/newEconomyRoutes');
 const userCurrencyRoutes = require('./routes/userCurrencyRoutes');
 const casinoRoutes = require('./routes/casinoRoutes');
 const tweetMonetizationRoutes = require('./routes/tweetMonetizationRoutes');
+const creatorPoolRoutes = require('./routes/creatorPoolRoutes');
 const monetizationProgramRoutes = require('./routes/monetizationProgramRoutes');
 const eventRoutes = require('./routes/events');
 const functionalEventRoutes = require('./routes/functionalEventRoutes');
@@ -537,8 +537,6 @@ app.use('/api/recommendations', recommendationRoutes);
 
 app.use('/api/behavior', behaviorRoutes);
 
-app.use('/api/monetization', monetizationRoutes);
-
 app.use('/api/virtual-currency', virtualCurrencyRoutes);
 
 app.use('/api/payments', paymentRoutes);
@@ -549,7 +547,12 @@ app.use('/api/currencies', userCurrencyRoutes);
 
 app.use('/api/casino', casinoRoutes);
 
+// `/api/monetization` (MonetizationMetrics, `simulateEngagement`) a été retiré
+// le 2026-08-20 : c'était un second système de monétisation, jamais relié au
+// premier, dont la seule route non triviale fabriquait des chiffres factices.
+// Le modèle réel est désormais `/api/creator-pool`.
 app.use('/api/tweet-monetization', tweetMonetizationRoutes);
+app.use('/api/creator-pool', creatorPoolRoutes);
 app.use('/api/monetization-program', monetizationProgramRoutes);
 
 app.use('/api/events', eventRoutes);
@@ -998,6 +1001,29 @@ function setupCronJobs() {
       await require('./services/spotlightService').computeYesterdaySpotlight();
     } catch (error) {
       logger.error('[Spotlight] Erreur lors du calcul quotidien:', error);
+    }
+  });
+
+  /**
+   * Pot créateur : clôture de la semaine écoulée, chaque lundi.
+   *
+   * 03:20 UTC et pas minuit : la période se termine à 00:00 UTC pile, et
+   * clôturer dans la même minute laisserait les derniers événements de la
+   * semaine coincés dans les files d'écriture (`realtimeQueueService`,
+   * `behaviorRoutes`). Trois heures de marge coûtent zéro et évitent de
+   * geler un montant amputé de son dimanche soir.
+   *
+   * Le cron ne tourne QUE sur le worker (`setupCronJobs` n'est appelé que là),
+   * mais l'idempotence ne repose pas sur ça : c'est l'index unique
+   * `(user_id, period_key)` qui garantit qu'une clôture rejouée — reprise
+   * manuelle, second worker lancé par erreur — n'écrit pas deux parts.
+   */
+  cron.schedule('20 3 * * 1', async () => {
+    try {
+      const result = await require('./economy/creatorPool').closePeriod();
+      logger.info(`[creatorPool] clôture hebdomadaire: ${JSON.stringify(result)}`);
+    } catch (error) {
+      logger.error('[creatorPool] clôture hebdomadaire impossible:', error.message);
     }
   });
 

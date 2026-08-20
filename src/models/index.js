@@ -21,7 +21,6 @@ const FeedHashtagRuleModule = require('./FeedHashtagRule');
 const ModerationAction = require('./ModerationAction');
 const UserBehaviorData = require('./UserBehaviorData');
 const UserPreferences = require('./UserPreferences');
-const MonetizationMetrics = require('./MonetizationMetrics');
 const VirtualCurrency = require('./VirtualCurrency');
 const UserWallet = require('./UserWallet');
 const Transaction = require('./Transaction');
@@ -115,7 +114,6 @@ UserBehaviorData.initUserBehaviorDataModel(sequelize);
 UserPreferences.initUserPreferencesModel(sequelize);
 
 // Initialiser le modèle de monétisation
-MonetizationMetrics.initMonetizationMetricsModel(sequelize);
 
 // Initialiser les modèles de cryptomonnaie virtuelle
 const VirtualCurrencyModel = VirtualCurrency.initVirtualCurrencyModel(sequelize);
@@ -366,18 +364,6 @@ User.hasMany(UserFollow, {
   foreignKey: 'following_id', 
   as: 'followers',
   onDelete: 'CASCADE'
-});
-
-// Associations MonetizationMetrics
-MonetizationMetrics.belongsTo(Tweet, { 
-  foreignKey: 'tweet_id', 
-  as: 'tweet',
-  onDelete: 'CASCADE'
-});
-
-Tweet.hasOne(MonetizationMetrics, { 
-  foreignKey: 'tweet_id', 
-  as: 'monetizationMetrics'
 });
 
 // Associations pour la modération
@@ -1832,6 +1818,94 @@ async function ensureBehaviorDataTweetClickAction() {
   }
 }
 
+/**
+ * Pot créateur hebdomadaire : réglages, parts figées, registre qualité.
+ *
+ * Ces trois tables sont créées ici et non par `sequelize.sync()` : `sync`
+ * tourne en `alter: false` et ne fabrique jamais un index unique sur une
+ * table déjà présente. Or c'est précisément l'index unique
+ * `(user_id, period_key)` qui garantit qu'une clôture rejouée n'écrit pas
+ * deux parts pour la même semaine — le protéger côté application seulement
+ * reviendrait à faire confiance à l'ordonnancement de deux workers.
+ *
+ * `gen_random_uuid()` vient de pgcrypto, intégré au coeur depuis
+ * PostgreSQL 13 (la prod tourne en 17).
+ */
+async function ensureCreatorPoolTables() {
+  try {
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS monetization_settings (
+        key        TEXT PRIMARY KEY,
+        value      JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS creator_payouts (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        period_key       TEXT NOT NULL,
+        period_start     TIMESTAMPTZ NOT NULL,
+        period_end       TIMESTAMPTZ NOT NULL,
+        currency_id      UUID,
+        amount           NUMERIC(20, 8) NOT NULL DEFAULT 0,
+        qualified_views  NUMERIC(20, 4) NOT NULL DEFAULT 0,
+        quality          NUMERIC(10, 6) NOT NULL DEFAULT 0,
+        rpm              NUMERIC(20, 8) NOT NULL DEFAULT 0,
+        bonus_multiplier NUMERIC(10, 4) NOT NULL DEFAULT 1,
+        breakdown        JSONB,
+        status           TEXT NOT NULL DEFAULT 'claimable',
+        transaction_id   UUID,
+        claimed_at       TIMESTAMPTZ,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    // La barrière anti-double-versement. Sans elle, tout le modèle du
+    // « montant gelé » ne tient plus.
+    await sequelize.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS creator_payouts_user_period_uidx
+        ON creator_payouts (user_id, period_key);
+    `);
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS creator_payouts_status_idx ON creator_payouts (status);
+    `);
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS creator_payouts_period_idx ON creator_payouts (period_key);
+    `);
+
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS content_quality_events (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        tweet_id    UUID,
+        kind        TEXT NOT NULL,
+        reason      TEXT,
+        metadata    JSONB,
+        occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    // Un même tweet ne compte qu'une fois par nature d'événement : une
+    // décision de modération rejouée, ou un `not_eligible` réécrit par une
+    // reprise de file, ne doit pas fabriquer une fausse récidive.
+    await sequelize.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS content_quality_events_tweet_kind_uidx
+        ON content_quality_events (tweet_id, kind)
+        WHERE tweet_id IS NOT NULL;
+    `);
+    await sequelize.query(`
+      CREATE INDEX IF NOT EXISTS content_quality_events_user_time_idx
+        ON content_quality_events (user_id, occurred_at DESC);
+    `);
+  } catch (e) {
+    logger.error('[schema] ensureCreatorPoolTables:', e.message);
+    throw e;
+  }
+}
+
 // Fonction pour synchroniser la base de données
 async function syncDatabase() {
   try {
@@ -1871,6 +1945,7 @@ async function syncDatabase() {
     await ensureTweetsExploreCounters();
     await ensureTweetsAdViewCount();
     await ensureBehaviorDataTweetClickAction();
+    await ensureCreatorPoolTables();
 
     // ÉTAPE 2: Synchroniser les modèles (créer/modifier les tables)
     logger.info('Synchronisation des modèles...');
@@ -2137,7 +2212,6 @@ module.exports = {
   ModerationAction: ModerationActionModel,
   UserBehaviorData,
   UserPreferences,
-  MonetizationMetrics,
   VirtualCurrency: VirtualCurrencyModel,
   UserWallet: UserWalletModel,
   Transaction: TransactionModel,

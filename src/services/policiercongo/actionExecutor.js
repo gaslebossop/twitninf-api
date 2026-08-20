@@ -1307,7 +1307,13 @@ class ActionExecutor {
       // donc on les traite et crédite réellement au lieu de simplement journaliser
       // une "demande" fantôme qui ne débouchait jamais sur rien.
       const TweetMonetizationService = require('../tweetMonetizationService');
-      const result = await TweetMonetizationService.processEligibleTweets(POLICE_ACCOUNT_ID);
+      // Depuis le passage au pot hebdomadaire, « collecter » ne calcule plus
+      // rien : ça encaisse les parts déjà figées par les clôtures du lundi.
+      const collected = await TweetMonetizationService.collectEarnings(POLICE_ACCOUNT_ID);
+      const result = {
+        totalRewards: collected.totalCollected,
+        processedCount: collected.periodsCollected,
+      };
 
       if (result.totalRewards <= 0) {
         return {
