@@ -632,9 +632,33 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `requireAdminRole`, et délèguent la validation de leur payload au
   service. **Aucun constat.**
 
-- **Reste :** S3 (en cours, partielle). Prochain pas :
-  `infrastructureAdminRoutes.js` (6, admin), puis le reste des 156
-  candidats par ordre décroissant.
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `infrastructureAdminRoutes.js`
+  (6/6 candidats).** Toutes les routes derrière un middleware de niveau
+  routeur (`:69`, `requireInfrastructureAdminRole`) qui **revérifie le rôle
+  en base à chaque requête** (pas seulement le rôle signé dans le JWT), avec
+  un repli explicite et journalisé sur le rôle JWT uniquement si la base est
+  injoignable — compromis documenté et raisonnable (le cockpit doit pouvoir
+  redémarrer PostgreSQL après un arrêt manuel). Les routes qui `spawn` des
+  processus systèmes (`nodes/:id/:action`, `databases/:id/:action`,
+  `replicas/:id/:action`) valident `id`/`action` par liste blanche stricte
+  avant construction de la commande (`validateSystemAction`,
+  `:445-466` : `node` limité à `['A','B']`, `action` à
+  `['start','stop','restart','failback']`, combinaison `failback`
+  restreinte en plus), exigent une phrase de confirmation tapée
+  correspondant exactement à l'action, et utilisent `spawn` avec des
+  arguments en tableau (jamais une chaîne shell) — aucune injection de
+  commande possible. `load-tests` (`:533`) borne `users`/`duration`/
+  `interval` avec un plafond de débit calculé, et exige aussi une phrase de
+  confirmation. **Aucun constat.**
+
+- **Reste :** S3 (en cours, partielle). Prochain pas : reprendre la liste
+  des 156 candidats bruts pour les fichiers non encore ouverts, par ordre
+  décroissant de candidats (au-delà des fichiers déjà couverts :
+  `messageRoutes.js`, `advancedAdRoutes.js`, `featureFlagRoutes.js`,
+  `userChallengeRoutes.js`, `storyRoutes.js`, `eventPassRoutes.js`,
+  `infrastructureAdminRoutes.js`). Fichiers restants à identifier avec le
+  même script de balayage (`router\.(post|put|patch)` sans validateur dans
+  les 10 lignes suivantes) — non encore refait depuis la liste initiale.
 
 ## Règles de la routine
 
