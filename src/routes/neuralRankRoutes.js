@@ -670,6 +670,27 @@ router.post('/track', authenticateToken, async (req, res) => {
         }
       : null;
 
+    // Le meme temps de lecture, ecrit aussi dans `user_behavior_data` : le pot
+    // createur le cherche la, et nulle part ailleurs. Sans ce miroir, aucun
+    // createur n'a jamais de temps de lecture reel et le signal Attention
+    // tourne en permanence sur une estimation decotee. Voir `dwellMirror.js`.
+    //
+    // AVANT l'appel au recommandeur, et deliberement : place apres, un Rust
+    // indisponible ou en timeout faisait sauter l'execution dans le `catch` et
+    // n'ecrivait rien. La paie des createurs ne doit pas dependre de la
+    // disponibilite du moteur de classement.
+    //
+    // Non attendu : cette route sert d'abord le classement, une ecriture lente
+    // ou en echec ne doit ni la ralentir ni la faire tomber.
+    mirrorDwell({
+      userId,
+      tweetId,
+      action: mappedType,
+      dwellMs,
+      context: dwellContext,
+      ip: req.ip,
+    }).catch(() => {});
+
     const result = await rustClient.trackInteraction(
       userId,
       tweetId,
@@ -681,22 +702,6 @@ router.post('/track', authenticateToken, async (req, res) => {
       dwellContext,
       UUID_RE.test(String(authorId || '')) ? String(authorId) : null,
     );
-
-    // Le meme temps de lecture, ecrit aussi dans `user_behavior_data` : le pot
-    // createur le cherche la, et nulle part ailleurs. Sans ce miroir, aucun
-    // createur n'a jamais de temps de lecture reel et le signal Attention
-    // tourne en permanence sur une estimation decotee. Voir `dwellMirror.js`.
-    //
-    // Volontairement non attendu : cette route sert d'abord le classement, et
-    // une ecriture lente ou en echec ne doit ni la ralentir ni la faire tomber.
-    mirrorDwell({
-      userId,
-      tweetId,
-      action: mappedType,
-      dwellMs,
-      context: dwellContext,
-      ip: req.ip,
-    }).catch(() => {});
 
     return res.json({ success: true, data: result });
   } catch (err) {

@@ -109,3 +109,41 @@ describe('mirrorDwell', () => {
     expect(targetId).toBe('4821');
   });
 });
+
+/**
+ * Garde-fou d'ordre, pas de comportement.
+ *
+ * Le miroir a d'abord ete pose APRES `rustClient.trackInteraction`, dans le
+ * meme `try` : un recommandeur indisponible ou en timeout faisait sauter
+ * l'execution dans le `catch`, et aucun temps de lecture n'etait ecrit. Le bug
+ * est invisible tant que le Rust repond — il ne se manifeste que par des
+ * montants plus bas, sans erreur nulle part.
+ *
+ * D'ou ce test sur la source : la paie des createurs ne doit pas dependre de
+ * la disponibilite du moteur de classement.
+ */
+describe('placement dans les routes', () => {
+  const { readFileSync } = require('node:fs');
+  const path = require('node:path');
+
+  test('le miroir s’exécute avant l’appel au recommandeur Rust', () => {
+    const source = readFileSync(
+      path.join(__dirname, '..', '..', 'routes', 'neuralRankRoutes.js'),
+      'utf8',
+    );
+    const mirror = source.indexOf('mirrorDwell({');
+    const rust = source.indexOf('await rustClient.trackInteraction(');
+
+    expect(mirror).toBeGreaterThan(-1);
+    expect(rust).toBeGreaterThan(-1);
+    expect(mirror).toBeLessThan(rust);
+  });
+
+  test('la route de tracking générique miroite aussi le dwell', () => {
+    const source = readFileSync(
+      path.join(__dirname, '..', '..', 'routes', 'trackingRoutes.js'),
+      'utf8',
+    );
+    expect(source).toContain('mirrorDwell({');
+  });
+});
