@@ -1386,7 +1386,7 @@ router.post('/', [
       final_tweet_type = 'reply';
 
       // 📊 Track comment pour l'algorithme Rust
-      ctrTracker.trackComment(userId, parent_tweet_id).catch(err => {
+      ctrTracker.trackComment(userId, parent_tweet_id, null, String(parentTweet.user_id)).catch(err => {
         logger.warn(`CTR tracking error: ${err.message}`);
       });
 
@@ -2270,7 +2270,7 @@ router.post('/:id/like', [
       await existingLike.destroy();
 
       // 📊 Track unlike pour l'algorithme Rust
-      ctrTracker.trackUnlike(userId, id).catch(err => {
+      ctrTracker.trackUnlike(userId, id, String(tweet.user_id)).catch(err => {
         logger.warn(`CTR tracking error: ${err.message}`);
       });
 
@@ -2303,7 +2303,7 @@ router.post('/:id/like', [
       });
 
       // 📊 Enregistrer l'action pour le CTR tracking (algorithme Rust)
-      ctrTracker.trackTweetLike(userId, id).catch(err => {
+      ctrTracker.trackTweetLike(userId, id, String(tweet.user_id)).catch(err => {
         logger.warn(`CTR tracking error: ${err.message}`);
       });
 
@@ -2491,7 +2491,7 @@ router.post('/:id/super-like', [
     // recommandation) : uniquement à la création d'un like, jamais à la
     // promotion d'un like déjà notifié — même règle que la route `like`.
     if (outcome.created) {
-      ctrTracker.trackTweetLike(userId, id).catch(err => {
+      ctrTracker.trackTweetLike(userId, id, String(tweet.user_id)).catch(err => {
         logger.warn(`CTR tracking error: ${err.message}`);
       });
 
@@ -2591,7 +2591,7 @@ router.post('/:id/retweet', [
       });
 
       // 📊 Track unretweet pour l'algorithme Rust
-      ctrTracker.trackUnretweet(userId, id).catch(err => {
+      ctrTracker.trackUnretweet(userId, id, String(tweet.user_id)).catch(err => {
         logger.warn(`CTR tracking error: ${err.message}`);
       });
 
@@ -2641,7 +2641,7 @@ router.post('/:id/retweet', [
       });
 
       // 📊 Enregistrer l'action pour le CTR tracking (algorithme Rust)
-      ctrTracker.trackTweetRetweet(userId, id).catch(err => {
+      ctrTracker.trackTweetRetweet(userId, id, String(tweet.user_id)).catch(err => {
         logger.warn(`CTR tracking error: ${err.message}`);
       });
 
@@ -3572,7 +3572,7 @@ router.post('/:id/bookmark', [
     const userId = req.user.id;
 
     // Comme le like, un favori posé sur un retweet vise l'original.
-    const { tweet: requested, targetId: id } =
+    const { tweet: requested, targetTweet, targetId: id } =
       await resolveEngagementTarget(Tweet, req.params.id);
     if (!requested) {
       return res.status(404).json({
@@ -3586,7 +3586,7 @@ router.post('/:id/bookmark', [
     const bookmarked = await TweetBookmark.toggle(userId, id);
 
     // 📊 Track bookmark pour l'algorithme Rust
-    ctrTracker.trackBookmark(userId, id).catch(err => {
+    ctrTracker.trackBookmark(userId, id, String(targetTweet.user_id)).catch(err => {
       logger.warn(`CTR tracking error: ${err.message}`);
     });
 
@@ -3620,7 +3620,7 @@ router.post('/:id/share', [
 
     // Partager un retweet doit produire le lien du tweet d'origine, pas celui
     // d'une ligne de retweet qui n'affiche rien par elle-même.
-    const { tweet: requested, targetId: id } =
+    const { tweet: requested, targetTweet, targetId: id } =
       await resolveEngagementTarget(Tweet, req.params.id);
     if (!requested) {
       return res.status(404).json({
@@ -3630,7 +3630,7 @@ router.post('/:id/share', [
     }
 
     // 📊 Track share pour l'algorithme Rust
-    ctrTracker.trackShare(userId, id).catch(err => {
+    ctrTracker.trackShare(userId, id, String(targetTweet.user_id)).catch(err => {
       logger.warn(`CTR tracking error: ${err.message}`);
     });
 

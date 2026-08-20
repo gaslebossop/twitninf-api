@@ -29,8 +29,14 @@ const internalSecret = () => process.env.INTERNAL_SECRET || 'changeme-internal-s
  * @param {string} tweetId - UUID du tweet
  * @param {string} interactionType - Type d'interaction (from InteractionType enum)
  * @param {number} dwellMs - Temps passé sur le tweet en ms (optionnel)
+ * @param {string} authorId - Auteur à créditer (retweet pur -> auteur d'origine).
+ *   Sans lui, `record_like_cooccurrence`, `record_author_feedback` et
+ *   `record_arm_reward` (Rust, handlers/tracking.rs) ne se déclenchent jamais
+ *   — voir `services/interactionAuthor.js`. Ce module appelle `/track`
+ *   directement (pas `/api/track`), donc le repli serveur posé là-bas ne le
+ *   couvre pas : chaque appelant doit passer l'auteur qu'il a déjà en main.
  */
-async function trackInteraction(userId, tweetId, interactionType, dwellMs = null) {
+async function trackInteraction(userId, tweetId, interactionType, dwellMs = null, authorId = null) {
   if (!userId || !tweetId || !interactionType) {
     logger.warn('⚠️ [ctrTracker] userId, tweetId ou interactionType manquant');
     return;
@@ -42,6 +48,10 @@ async function trackInteraction(userId, tweetId, interactionType, dwellMs = null
       tweet_id: tweetId,
       interaction_type: interactionType,
     };
+
+    if (authorId) {
+      payload.author_id = authorId;
+    }
 
     // Ajouter dwell_ms si fourni et valide
     if (dwellMs && typeof dwellMs === 'number' && dwellMs > 0) {
@@ -85,36 +95,36 @@ async function trackView(userId, tweetId, dwellMs = null) {
 /**
  * Envoie un événement quand un user like un tweet (1.0 point)
  */
-async function trackLike(userId, tweetId) {
-  return trackInteraction(userId, tweetId, 'like');
+async function trackLike(userId, tweetId, authorId = null) {
+  return trackInteraction(userId, tweetId, 'like', null, authorId);
 }
 
 /**
  * Envoie un événement quand un user retweet un tweet (5.0 points)
  */
-async function trackRetweet(userId, tweetId) {
-  return trackInteraction(userId, tweetId, 'retweet');
+async function trackRetweet(userId, tweetId, authorId = null) {
+  return trackInteraction(userId, tweetId, 'retweet', null, authorId);
 }
 
 /**
  * Envoie un événement quand un user commente/répond à un tweet (3.5 points)
  */
-async function trackComment(userId, tweetId, dwellMs = null) {
-  return trackInteraction(userId, tweetId, 'comment', dwellMs);
+async function trackComment(userId, tweetId, dwellMs = null, authorId = null) {
+  return trackInteraction(userId, tweetId, 'comment', dwellMs, authorId);
 }
 
 /**
  * Envoie un événement quand un user partage un tweet (4.0 points)
  */
-async function trackShare(userId, tweetId) {
-  return trackInteraction(userId, tweetId, 'share');
+async function trackShare(userId, tweetId, authorId = null) {
+  return trackInteraction(userId, tweetId, 'share', null, authorId);
 }
 
 /**
  * Envoie un événement quand un user ajoute un tweet à ses favoris (2.5 points)
  */
-async function trackBookmark(userId, tweetId) {
-  return trackInteraction(userId, tweetId, 'bookmark');
+async function trackBookmark(userId, tweetId, authorId = null) {
+  return trackInteraction(userId, tweetId, 'bookmark', null, authorId);
 }
 
 /**
@@ -131,15 +141,15 @@ async function trackProfileView(userId, profileUserId) {
 /**
  * Envoie un événement quand un user unlike un tweet (-1.0 point)
  */
-async function trackUnlike(userId, tweetId) {
-  return trackInteraction(userId, tweetId, 'unlike');
+async function trackUnlike(userId, tweetId, authorId = null) {
+  return trackInteraction(userId, tweetId, 'unlike', null, authorId);
 }
 
 /**
  * Envoie un événement quand un user un-retweet un tweet (-2.0 points)
  */
-async function trackUnretweet(userId, tweetId) {
-  return trackInteraction(userId, tweetId, 'unretweet');
+async function trackUnretweet(userId, tweetId, authorId = null) {
+  return trackInteraction(userId, tweetId, 'unretweet', null, authorId);
 }
 
 /**
