@@ -616,9 +616,23 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   encore relu en détail (probable même motif que `view`, faible risque) —
   à rouvrir seulement si du temps reste, sinon considérer le fichier clos.
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `eventPassRoutes.js` (6/6
+  candidats), y compris la vérification de signature du token qui restait
+  à tracer.** `doorAccess` (`:118-135`) exige soit un `door_token` HMAC
+  valide (`eventPassService.verifyDoorToken`), soit un rôle modérateur via
+  `authenticateToken`+`requireModeratorRole`. Le token de porte et le code
+  de place sont tous deux signés par `crypto.createHmac('sha256',
+  signingKey())` avec comparaison en temps constant
+  (`crypto.timingSafeEqual`, `:106` et `:276` de `eventPassService.js`) —
+  implémentation cryptographique saine, clé dérivée de
+  `EVENT_PASS_SECRET`/`JWT_SECRET`, jamais codée en dur. `POST /verify` et
+  `POST /redeem` ne font que passer le `token` du corps à ce service, qui
+  fait toute la vérification. Les 4 routes restantes (`/batch`,
+  `/events/:slug/door-link`, `/:id/revoke`, `/:id/restore`) sont toutes
+  `requireAdminRole`, et délèguent la validation de leur payload au
+  service. **Aucun constat.**
+
 - **Reste :** S3 (en cours, partielle). Prochain pas :
-  `eventPassRoutes.js` (6, dont `/verify`/`/redeem` déjà survolés —
-  vérification de signature du token encore à tracer),
   `infrastructureAdminRoutes.js` (6, admin), puis le reste des 156
   candidats par ordre décroissant.
 
