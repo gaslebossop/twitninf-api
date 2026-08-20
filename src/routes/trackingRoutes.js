@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { authenticateToken } = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
+const { mirrorDwell } = require('../services/dwellMirror');
 
 /**
  * POST /track
@@ -60,6 +61,17 @@ router.post('/', [authenticateToken], async (req, res) => {
       logger.warn(`⚠️ Erreur connection au Rust recommender: ${rustError.message}`);
       // Non-blocking: on continue même si Rust n'est pas disponible
     }
+
+    // Le temps de lecture doit aussi atterrir dans `user_behavior_data` :
+    // c'est la seule table que lit le pot créateur pour son signal Attention.
+    // Sans ce miroir, la mesure existe mais reste enfermée côté Rust.
+    mirrorDwell({
+      userId,
+      tweetId: tweet_id,
+      action,
+      dwellMs: dwell_ms,
+      ip: req.ip,
+    }).catch(() => {});
 
     res.json({
       success: true,

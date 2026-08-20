@@ -16,6 +16,7 @@ const { authenticateToken } = require('../middleware/authMiddleware');
 const logger = require('../utils/logger');
 const { spaceOutReplies } = require('../utils/feedShape');
 const rustClient = require('../services/rustRecommenderClient');
+const { mirrorDwell } = require('../services/dwellMirror');
 const paidContentService = require('../services/paidContentService');
 const adService = require('../services/adService');
 const { withFeedCache } = require('../services/feedCache');
@@ -680,6 +681,23 @@ router.post('/track', authenticateToken, async (req, res) => {
       dwellContext,
       UUID_RE.test(String(authorId || '')) ? String(authorId) : null,
     );
+
+    // Le meme temps de lecture, ecrit aussi dans `user_behavior_data` : le pot
+    // createur le cherche la, et nulle part ailleurs. Sans ce miroir, aucun
+    // createur n'a jamais de temps de lecture reel et le signal Attention
+    // tourne en permanence sur une estimation decotee. Voir `dwellMirror.js`.
+    //
+    // Volontairement non attendu : cette route sert d'abord le classement, et
+    // une ecriture lente ou en echec ne doit ni la ralentir ni la faire tomber.
+    mirrorDwell({
+      userId,
+      tweetId,
+      action: mappedType,
+      dwellMs,
+      context: dwellContext,
+      ip: req.ip,
+    }).catch(() => {});
+
     return res.json({ success: true, data: result });
   } catch (err) {
     logger.error(`[NeuralRank] Track error: ${err.message}`);
