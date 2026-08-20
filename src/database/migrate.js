@@ -685,6 +685,22 @@ async function runMigrations() {
         ADD COLUMN IF NOT EXISTS ad_view_count INTEGER NOT NULL DEFAULT 0;
     `);
 
+    // Favoris : la route POST /api/tweets/:id/bookmark ne persistait rien
+    // (Redis promis en commentaire, jamais écrit) — table réelle, même
+    // patron que tweet_likes/tweet_retweets.
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS tweet_bookmarks (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        tweet_id UUID NOT NULL REFERENCES tweets(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (user_id, tweet_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_tweet_bookmarks_tweet ON tweet_bookmarks (tweet_id);
+      CREATE INDEX IF NOT EXISTS idx_tweet_bookmarks_user ON tweet_bookmarks (user_id, created_at DESC);
+    `);
+
     await createOptimizedIndexes();
 
     // Créer les vues optimisées

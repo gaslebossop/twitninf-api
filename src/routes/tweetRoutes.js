@@ -6,7 +6,7 @@ const multer = require('multer');
 const axios = require('axios');
 
 // Import des modèles et services
-const { Tweet, TweetLike, TweetRetweet, User, Notification } = require('../models');
+const { Tweet, TweetLike, TweetRetweet, TweetBookmark, User, Notification } = require('../models');
 const { Op } = require('sequelize');
 const { sequelize } = require('../database');
 const { feedCacheRoute } = require('../services/feedCache');
@@ -3581,15 +3581,9 @@ router.post('/:id/bookmark', [
       });
     }
 
-    // Stocker les bookmarks en Redis pour performance
-    // Clé: user:bookmarks:{userId} = SET de tweet IDs
-    const bookmarkKey = `user:bookmarks:${userId}`;
-
-    // Vérifier si déjà bookmarké
-    const isBookmarked = await new Promise((resolve) => {
-      // Pour simplifier, on utilise une approche SQL
-      resolve(false);
-    });
+    // Vrai bascule persistée — l'ancienne route ne stockait rien et
+    // répondait toujours `bookmarked: true`.
+    const bookmarked = await TweetBookmark.toggle(userId, id);
 
     // 📊 Track bookmark pour l'algorithme Rust
     ctrTracker.trackBookmark(userId, id).catch(err => {
@@ -3598,8 +3592,8 @@ router.post('/:id/bookmark', [
 
     res.json({
       success: true,
-      message: 'Tweet ajouté aux favoris',
-      data: { bookmarked: true, tweet_id: id }
+      message: bookmarked ? 'Tweet ajouté aux favoris' : 'Tweet retiré des favoris',
+      data: { bookmarked, tweet_id: id }
     });
   } catch (error) {
     logger.error('Erreur lors du bookmark:', error);

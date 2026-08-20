@@ -43,6 +43,74 @@ class UserFollow extends Model {
     return !!follow;
   }
 
+  // A bloque-t-il B, ou B bloque-t-il A ? Un blocage est toujours mutuel côté
+  // visibilité même s'il n'est posé que dans un sens en base.
+  static async isBlocked(userId, otherId) {
+    const row = await this.findOne({
+      where: {
+        status: 'blocked',
+        [Op.or]: [
+          { follower_id: userId, following_id: otherId },
+          { follower_id: otherId, following_id: userId }
+        ]
+      }
+    });
+    return !!row;
+  }
+
+  // Identifiants de tous les comptes liés à `userId` par un blocage, dans
+  // n'importe quel sens — pour exclure ces auteurs d'un vivier (Rust) ou de
+  // résultats de recherche.
+  static async getBlockedIds(userId) {
+    const rows = await this.findAll({
+      where: {
+        status: 'blocked',
+        [Op.or]: [{ follower_id: userId }, { following_id: userId }]
+      },
+      attributes: ['follower_id', 'following_id']
+    });
+    const ids = new Set();
+    for (const row of rows) {
+      const other = String(row.follower_id) === String(userId) ? row.following_id : row.follower_id;
+      ids.add(String(other));
+    }
+    return Array.from(ids);
+  }
+
+  // Pose un blocage. Détruit d'abord toute relation existante dans les DEUX
+  // sens (sauf un blocage déjà posé par l'autre, qu'on ne doit pas écraser) —
+  // passer par `destroy` puis `create` plutôt qu'un `update` de statut fait
+  // déclencher `afterDestroy` sur un éventuel follow `active`, qui décrémente
+  // correctement les stats. Un `update` direct active→blocked ne le ferait
+  // pas : `afterUpdate` ne bascule les stats que sur pending→active.
+  static async block(blockerId, blockedId, transaction = null) {
+    await this.destroy({
+      where: { follower_id: blockerId, following_id: blockedId },
+      transaction
+    });
+    await this.destroy({
+      where: {
+        follower_id: blockedId,
+        following_id: blockerId,
+        status: { [Op.ne]: 'blocked' }
+      },
+      transaction
+    });
+    return this.create(
+      { follower_id: blockerId, following_id: blockedId, status: 'blocked' },
+      { transaction }
+    );
+  }
+
+  // Lève le blocage posé par `blockerId` sur `blockedId`. Ne restaure aucun
+  // follow antérieur — débloquer ne veut pas dire se réabonner.
+  static async unblock(blockerId, blockedId, transaction = null) {
+    await this.destroy({
+      where: { follower_id: blockerId, following_id: blockedId, status: 'blocked' },
+      transaction
+    });
+  }
+
   // Méthode statique pour obtenir les utilisateurs suivis par un utilisateur
   static async getFollowing(userId, options = {}) {
     const {

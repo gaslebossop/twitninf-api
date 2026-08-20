@@ -565,6 +565,16 @@ router.get('/profile/authenticated/:username', [
       });
     }
 
+    // Un profil bloqué (dans un sens ou l'autre) répond 404, pas 403 : révéler
+    // qu'un blocage existe serait déjà une information de plus que celui qui
+    // bloque n'a pas choisi de donner.
+    if (currentUserId && user.id !== currentUserId && await UserFollow.isBlocked(currentUserId, user.id)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Profil introuvable'
+      });
+    }
+
     // 📊 Track profile view pour l'algorithme Rust
     if (currentUserId && user.id !== currentUserId) {
       ctrTracker.trackProfileView(currentUserId, user.id).catch(err => {
@@ -1913,26 +1923,14 @@ router.post('/:id/block', [
       });
     }
 
-    // Stocker le block dans Redis pour performance
-    // Clé: user:blocked:{userId} = SET d'user IDs bloqués
-    const blockKey = `user:blocked:${currentUserId}`;
+    // Persiste le blocage (et coupe tout follow existant dans les deux sens,
+    // stats comprises) — voir UserFollow.block.
+    await UserFollow.block(currentUserId, blockedUserId);
 
     // 📊 Track block pour l'algorithme Rust
     ctrTracker.trackBlock(currentUserId, blockedUserId).catch(err => {
       logger.warn(`CTR tracking error: ${err.message}`);
     });
-
-    // Si l'utilisateur était suivi, le retirer du follow
-    const following = await UserFollow.findOne({
-      where: {
-        follower_id: currentUserId,
-        following_id: blockedUserId
-      }
-    });
-
-    if (following) {
-      await following.destroy();
-    }
 
     logger.info(`Utilisateur ${currentUserId} a bloqué ${blockedUserId}`);
 
@@ -1977,8 +1975,7 @@ router.post('/:id/unblock', [
       });
     }
 
-    // Supprimer du blocage depuis Redis
-    const blockKey = `user:blocked:${currentUserId}`;
+    await UserFollow.unblock(currentUserId, unblockedUserId);
 
     logger.info(`Utilisateur ${currentUserId} a débloqué ${unblockedUserId}`);
 

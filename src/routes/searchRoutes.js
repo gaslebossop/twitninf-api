@@ -3,7 +3,7 @@ const { query, validationResult } = require('express-validator');
 const router = express.Router();
 
 // Import des modèles et services
-const { User, Tweet, TweetLike, TweetRetweet, sequelize } = require('../models');
+const { User, Tweet, TweetLike, TweetRetweet, UserFollow, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const { jsonbArrayOverlap } = require('../utils/hashtagFilter');
 const { stripInternalTweetFields } = require('../utils/stripInternalTweetFields');
@@ -149,21 +149,28 @@ router.get('/', optionalAuthenticateToken, [
       total: 0
     };
 
+    const blockedIds = req.user?.id ? await UserFollow.getBlockedIds(req.user.id) : [];
+
     // Recherche d'utilisateurs
     if (type === 'all' || type === 'users') {
       const users = await User.searchUsers(query, Math.ceil(limit / 2));
-      results.users = users;
+      results.users = blockedIds.length
+        ? users.filter((u) => !blockedIds.includes(String(u.id)))
+        : users;
     }
 
     // Recherche de tweets
     if (type === 'all' || type === 'tweets') {
-      const tweets = await Tweet.searchTweets(query, {
+      const rawTweets = await Tweet.searchTweets(query, {
         limit: Math.ceil(limit / 2),
         includeReplies: false,
         includeRetweets: true,
         sortBy: sort === 'popular' ? 'view_count' : 'created_at',
         sortOrder: sort === 'latest' ? 'DESC' : 'DESC'
       });
+      const tweets = blockedIds.length
+        ? rawTweets.filter((t) => !blockedIds.includes(String(t.user_id)))
+        : rawTweets;
 
       // AUDIT R1-05 (2026-08-19) : 5 requêtes + un décodage JWT complet PAR
       // TWEET (jusqu'à 250 requêtes + 50 vérifications HMAC bloquantes pour
@@ -272,7 +279,7 @@ router.get('/', optionalAuthenticateToken, [
  * GET /api/search/users
  * Recherche d'utilisateurs
  */
-router.get('/users', [
+router.get('/users', optionalAuthenticateToken, [
   query('q').trim().isLength({ min: 1, max: 100 }).withMessage('Le terme de recherche doit contenir entre 1 et 100 caractères'),
   query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
   query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
@@ -298,8 +305,10 @@ router.get('/users', [
       whereClause.verified = verified;
     }
 
+    const blockedIds = req.user?.id ? await UserFollow.getBlockedIds(req.user.id) : [];
+
     // Recherche par nom d'utilisateur ou nom complet
-    const users = await User.findAll({
+    const rawUsers = await User.findAll({
       where: {
         ...whereClause,
         [Op.or]: [
@@ -312,6 +321,9 @@ router.get('/users', [
       limit: parseInt(limit),
       offset: parseInt(offset)
     });
+    const users = blockedIds.length
+      ? rawUsers.filter((u) => !blockedIds.includes(String(u.id)))
+      : rawUsers;
 
     // Compter le total
     const totalCount = await User.count({
@@ -411,7 +423,8 @@ router.get('/tweets', optionalAuthenticateToken, [
     // ne se termine jamais), et la requête la plus coûteuse de la route.
     // `limit + 1` donne `hasMore` pour zéro requête supplémentaire.
     const requestedLimit = parseInt(limit);
-    const rawTweets = await Tweet.searchTweets(query, {
+    const blockedIds = req.user?.id ? await UserFollow.getBlockedIds(req.user.id) : [];
+    const fetchedTweets = await Tweet.searchTweets(query, {
       limit: requestedLimit + 1,
       offset: parseInt(offset),
       includeReplies: type === 'replies',
@@ -419,6 +432,9 @@ router.get('/tweets', optionalAuthenticateToken, [
       sortBy: sort === 'popular' ? 'view_count' : 'created_at',
       sortOrder: sort === 'latest' ? 'DESC' : 'DESC'
     });
+    const rawTweets = blockedIds.length
+      ? fetchedTweets.filter((t) => !blockedIds.includes(String(t.user_id)))
+      : fetchedTweets;
     const hasMore = rawTweets.length > requestedLimit;
     const tweets = rawTweets.slice(0, requestedLimit);
 
@@ -537,7 +553,8 @@ router.get('/tweets/authenticated', [
     // `limit + 1` au lieu d'un `COUNT` sur un prédicat qui ne contient pas
     // le terme recherché.
     const requestedLimit = parseInt(limit);
-    const rawTweets = await Tweet.searchTweets(query, {
+    const blockedIds = await UserFollow.getBlockedIds(userId);
+    const fetchedTweets = await Tweet.searchTweets(query, {
       limit: requestedLimit + 1,
       offset: parseInt(offset),
       includeReplies: type === 'replies',
@@ -545,6 +562,9 @@ router.get('/tweets/authenticated', [
       sortBy: sort === 'popular' ? 'view_count' : 'created_at',
       sortOrder: sort === 'latest' ? 'DESC' : 'DESC'
     });
+    const rawTweets = blockedIds.length
+      ? fetchedTweets.filter((t) => !blockedIds.includes(String(t.user_id)))
+      : fetchedTweets;
     const hasMore = rawTweets.length > requestedLimit;
     const tweets = rawTweets.slice(0, requestedLimit);
 

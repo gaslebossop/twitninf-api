@@ -702,6 +702,9 @@ router.post('/direct/:userId', authenticateToken, denySuspended, async (req, res
     // Compte privé : refus SEC, pas une invitation en attente. Une invitation
     // reste un message qui arrive chez la personne — c'est exactement ce
     // qu'elle a fermé en passant son compte en privé.
+    if (await UserFollow.isBlocked(currentUserId, otherUserId)) {
+      return res.status(403).json({ success: false, message: 'Impossible d\'envoyer un message à ce compte' });
+    }
     const privateGate = await canContactPrivateRecipient(currentUserId, otherUserId);
     if (!privateGate.allowed) {
       return res.status(403).json({ success: false, message: privateGate.reason });
@@ -1709,6 +1712,9 @@ async function assertCanSendMessage(conversationId, userId) {
       attributes: ['user_id'],
     });
     if (otherParticipant) {
+      if (await UserFollow.isBlocked(userId, String(otherParticipant.user_id))) {
+        return { ok: false, status: 403, message: 'Impossible d\'envoyer un message à ce compte' };
+      }
       const privateGate = await canContactPrivateRecipient(userId, String(otherParticipant.user_id));
       if (!privateGate.allowed) {
         return { ok: false, status: 403, message: privateGate.reason };

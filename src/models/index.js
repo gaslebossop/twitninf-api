@@ -11,6 +11,7 @@ const User = require('./User');
 const Tweet = require('./Tweet');
 const TweetLike = require('./TweetLike');
 const TweetRetweet = require('./TweetRetweet');
+const TweetBookmark = require('./TweetBookmark');
 const Notification = require('./Notification');
 const UserFollow = require('./UserFollow');
 const Report = require('./Report');
@@ -106,6 +107,7 @@ User.initUserModel(sequelize);
 Tweet.initTweetModel(sequelize);
 TweetLike.initTweetLikeModel(sequelize);
 TweetRetweet.initTweetRetweetModel(sequelize);
+TweetBookmark.initTweetBookmarkModel(sequelize);
 Notification.initNotificationModel(sequelize);
 UserFollow.initUserFollowModel(sequelize);
 
@@ -205,9 +207,15 @@ User.hasMany(TweetLike, {
   onDelete: 'CASCADE'
 });
 
-User.hasMany(TweetRetweet, { 
-  foreignKey: 'user_id', 
+User.hasMany(TweetRetweet, {
+  foreignKey: 'user_id',
   as: 'retweets',
+  onDelete: 'CASCADE'
+});
+
+User.hasMany(TweetBookmark, {
+  foreignKey: 'user_id',
+  as: 'bookmarks',
   onDelete: 'CASCADE'
 });
 
@@ -238,6 +246,12 @@ Tweet.hasMany(TweetLike, {
 Tweet.hasMany(TweetRetweet, {
   foreignKey: 'tweet_id',
   as: 'retweets',
+  onDelete: 'CASCADE'
+});
+
+Tweet.hasMany(TweetBookmark, {
+  foreignKey: 'tweet_id',
+  as: 'bookmarks',
   onDelete: 'CASCADE'
 });
 
@@ -2202,6 +2216,7 @@ module.exports = {
   Tweet,
   TweetLike,
   TweetRetweet,
+  TweetBookmark,
   Notification,
   UserFollow,
   Report: ReportModel,
