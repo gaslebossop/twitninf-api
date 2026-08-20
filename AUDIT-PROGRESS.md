@@ -415,6 +415,32 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   ci-dessus), `infrastructureAdminRoutes.js` (6, admin), puis le reste par
   ordre décroissant de candidats.
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `messageRoutes.js` (12 candidats
+  bruts), angle validation uniquement (l'angle autorisation est couvert
+  ailleurs).** Chaque route d'écriture relue en entier :
+  `POST /direct/:userId` (contenu vidé/trim, borne de longueur pour compte
+  non vérifié, `story_id` vérifié en base avec expiration) ; `POST /groups`
+  (titre requis, `participantIds` filtré et vérifié en base un par un) ;
+  `POST /conversations/:id/participants` (userId cible vérifié en base,
+  liste des bannis consultée) ; `POST .../transfer-ownership` et
+  `POST .../transfer-owner` (deux routes quasi dupliquées mais toutes deux
+  vérifient le membre cible en base avant transfert — redondance de code,
+  pas un défaut de sécurité) ; `POST .../members/:id/role` (`role` restreint
+  à une énumération `['admin','member']`) ; `POST .../members/:id/ban` et
+  `DELETE .../participants/:id` (mode restreint, cible vérifiée) ;
+  `POST /:messageId/reactions` (`emoji` validé par `isSingleEmoji`, upsert
+  correct via clé composite). Aucune route de ce fichier n'accepte de
+  valeur brute non bornée sur un champ sensible. **Aucun constat.**
+
+- **S3 — reprendre à :** prochain fichier de la liste des 156 candidats
+  bruts, non encore ouvert : `advancedAdRoutes.js` (9 — angle validation
+  seulement, l'IDOR y est déjà noté en S2), puis `featureFlagRoutes.js` (9,
+  admin), `userChallengeRoutes.js` (8 restants hors `/progress` déjà
+  traité), `storyRoutes.js` (7), `eventPassRoutes.js` (6, dont
+  `/verify`/`/redeem` déjà survolés — vérification de signature du token
+  encore à tracer), `infrastructureAdminRoutes.js` (6, admin), puis le
+  reste par ordre décroissant.
+
 - **Reste :** S3 (en cours, partielle).
 
 ## Règles de la routine
