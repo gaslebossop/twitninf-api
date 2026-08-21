@@ -1006,20 +1006,31 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `POST /me/banner`, `PUT /me/language`. À couvrir au prochain tour avant
   de considérer `userRoutes.js` clos pour S3.
 
-- **S3 — prochain pas concret :** finir `userRoutes.js` (candidats
-  restants listés juste au-dessus), puis reste de la liste régénérée
-  (`events.js`, `userRoutes.js` — hors la portion déjà vérifiée saine —,
-  `progressiveRecommendationRoutes.js`, `functionalEventRoutes.js`,
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `userRoutes.js` TERMINÉ pour S3
+  (les 6 candidats restants).** `POST /onboarding/follows` : `userIds`
+  validé (`isArray` borné 3–30, `isUUID` par élément), dédupliqué, exclut
+  l'appelant, puis re-filtré en base sur `is_active`/`is_suspended`/
+  `is_private_account` avant toute création — aucun suivi forgé sur un
+  compte non suivable. `POST /:id/follow` et `DELETE /:id/follow` :
+  `param('id').isUUID()`, auto-suivi refusé, existence/état de la cible
+  vérifiés en base, statut `pending` forcé si compte privé (pas de
+  contournement de la confidentialité). `POST /me/avatar` et
+  `POST /me/banner` : même motif déjà jugé sain ailleurs (`sharp()` avant
+  écriture, nom de fichier entièrement généré côté serveur
+  `${userId}-${Date.now()}-${uuid}.jpg`, aucune traversée de chemin
+  possible). `PUT /me/language` : valeur comparée à une liste blanche
+  fermée `READABLE_LANGUAGES`, rejetée sinon. **Aucun constat.**
+
+- **S3 — prochain pas concret :** reste de la liste régénérée
+  (`progressiveRecommendationRoutes.js`, `functionalEventRoutes.js`,
   `creatorIntelligenceRoutes.js`, `neuralRankRoutes.js`, `supportRoutes.js`,
   `tweetRoutes.js`, `nfMapRoutes.js`, `featureProposalRoutes.js`,
   `policierCongoAdminRoutes.js`, `contestRoutes.js`, `gAuthRoutes.js`,
   `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
   validation cette fois —, `developerAdminRoutes.js`,
-  `shadowbanAdminRoutes.js`). Vu le nombre de constats critiques déjà
-  trouvés, prioriser les fichiers touchant l'argent/objets en premier
-  (aucun ne reste dans la liste ci-dessus à première vue — à revérifier au
-  prochain tour avant de piocher dans le reste par ordre de nombre de
-  candidats).
+  `shadowbanAdminRoutes.js`). Aucun de ces fichiers ne touche directement
+  l'argent à première vue (déjà tous couverts) — ordre par nombre de
+  candidats bruts, sauf `gAuthRoutes.js` (authentification) à prioriser.
 
 - **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `events.js` + `eventQuestService.js`
   (8/8 candidats).** Module particulièrement soigné (commentaires défensifs
