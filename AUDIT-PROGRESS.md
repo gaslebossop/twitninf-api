@@ -1462,16 +1462,59 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   facturé.
   **NE PAS refaire cette recherche.**
 
-- **S3 — prochain pas concret :** les 5 fichiers à 1 candidat restants, par
-  ordre alphabétique : `insightsRoutes.js`, `policierCongoChatRoutes.js`,
-  `trackingRoutes.js`, `verificationStyleRoutes.js`,
-  `verifiedBadgeRoutes.js` (`searchRoutes.js` déjà couvert ci-dessus, seul
-  candidat brut du fichier). Une fois ces 5 fichiers couverts, le balayage
-  brut initial des 156 candidats sera intégralement traité — il restera
-  alors à reprendre le seul point laissé ouvert plus haut dans cette
-  section (`adRoutes.js` : routes `GET`/ciblage non revues, probablement
-  faible risque, à confirmer ou classer sain) avant de considérer S3
-  TERMINÉE.
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `insightsRoutes.js` (4/4
+  candidats).** Toutes derrière `requirePremium`, scope `req.user.id`
+  systématique (y compris pour le scan d'usurpation — pas d'outil de
+  reconnaissance sur un tiers), `status`/`id` validés par énumération ou
+  UUID. **Aucun constat.**
+
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `policierCongoChatRoutes.js`
+  (1/1 candidat).** `POST /message` : quota strict de 10 messages/jour
+  **par compte** (`keyGenerator` sur `user.id`, pas sur l'IP — donc non
+  contournable par l'usurpation first-party déjà documentée ailleurs, qui
+  ne joue que sur des limiteurs par IP). Pas de borne de longueur sur
+  `message`, mais le quota journalier borne déjà fortement l'impact — point
+  mineur non retenu comme constat séparé. **Aucun constat.**
+
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `trackingRoutes.js` (1/1
+  candidat).** `POST /` : enum fermée sur `action`, scope `req.user.id`,
+  transmission à un service interne (moteur Rust) non bloquante en cas
+  d'échec. Note technique sans lien avec une entrée client, hors périmètre
+  S3 : `INTERNAL_SECRET` a ici un repli codé en dur
+  (`|| 'changeme-internal-secret'`, `:33`) au lieu du repli `''` utilisé
+  ailleurs dans le dépôt (`rustRecommenderClient.js`, `swipeRecommenderClient.js`,
+  etc.) — un repli non vide risque de masquer une variable d'environnement
+  manquante en production au lieu d'échouer franchement (401 côté moteur
+  Rust). Ce n'est pas exploitable par un client externe (aucune entrée
+  utilisateur n'influence ce choix), donc pas un constat S3 — à signaler
+  seulement pour uniformiser avec le reste du dépôt si l'occasion se
+  présente. **Aucun constat.**
+
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `verificationStyleRoutes.js`
+  (1/1 candidat) et `verifiedBadgeRoutes.js` (1/1 candidat).**
+  `POST /user/:userId/change` et `POST /user/:userId/change-style` :
+  appartenance stricte (`userId !== currentUserId` refusé), style validé
+  par énumération/liste de styles réels, éligibilité revérifiée par style
+  (`canUseGrayStyle`/`canUseGoldStyle` : uniquement possession de l'item en
+  inventaire, aucun défaut trouvé). **Point déjà documenté, pas un nouveau
+  constat :** l'éligibilité au style `'rose'`
+  (`canUseRoseStyle`/`canUseUltraRareStyle`) accepte, en plus de la
+  possession de l'item, la même branche « défis `kosporbirthday` tous
+  complétés » déjà exploitée dans le constat critique 3/3
+  (`userChallengeRoutes.js`, progression de défi forgeable) — ces deux
+  routes de changement de style sont donc un second point d'entrée vers le
+  même contournement déjà documenté et corrigé dans le correctif transmis
+  pour 3/3, pas une faille distincte (elles ne touchent que l'affichage du
+  style, jamais l'inventaire/le stock). **Aucun constat supplémentaire.**
+
+- **S3 — balayage brut des 156 candidats initiaux INTÉGRALEMENT TRAITÉ.**
+  Il reste un seul point ouvert avant de considérer la section terminée :
+  `adRoutes.js`, les routes `GET`/ciblage non encore revues (statistiques,
+  audiences) — notées probablement à faible risque (lecture seule) lors du
+  passage initial sur ce fichier.
+
+- **S3 — prochain pas concret :** revenir sur `adRoutes.js` (routes `GET`
+  restantes, ci-dessus) ; si rien de neuf, S3 peut passer TERMINÉE.
 
 - **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `events.js` + `eventQuestService.js`
   (8/8 candidats).** Module particulièrement soigné (commentaires défensifs
