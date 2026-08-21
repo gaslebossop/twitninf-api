@@ -19,7 +19,7 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 | B1 | Robustesse | Verrous et concurrence | **TERMINÉE** | `AUDIT-B1.md` |
 | B2 | Robustesse | Erreurs et journaux | **TERMINÉE** | `AUDIT-B2.md` |
 | S1 | Sécurité | Secrets dans l'historique git | **TERMINÉE** | `AUDIT-S1.md` |
-| S2 | Sécurité | Autorisation et IDOR | **TERMINÉE** | `AUDIT-S2.md` |
+| S2 | Sécurité | Autorisation et IDOR | **TERMINÉE (+1 constat ajouté après coup)** | `AUDIT-S2.md` |
 | S3 | Sécurité | Injection, validation, abus | **EN COURS** | `AUDIT-S3.md` |
 
 ## REPRENDRE À
@@ -32,7 +32,44 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
-- **S2 est TERMINÉE.** 6 constats, récapitulatif écrit dans `AUDIT-S2.md` et
+- **S2 — CONSTAT CRITIQUE AJOUTÉ APRÈS CLÔTURE, déjà écrit, NE PAS REFAIRE :
+  `userRoutes.js`, quatre routes de modération de compte
+  (`POST /:id/suspend`, `/:id/unsuspend`, `/:id/ban`, `/:id/unban`,
+  toutes autour de `userRoutes.js:1518-1652`).** Trouvé en examinant ce
+  fichier sous l'angle S3 (validation), mais c'est un constat S2 pur
+  (contrôle de rôle absent), ajouté dans `AUDIT-S2.md` plutôt qu'ici pour
+  le décompte public — voir ce fichier pour le décompte. Chaîne vérifiée :
+  la chaîne de middleware de ces quatre routes est
+  `[authenticateToken, checkUserBanStrict, param('id').isUUID(),
+  handleValidationErrors]` — confirmé en lisant `checkUserBanStrict`
+  (`banMiddleware.js:71`) que cette fonction vérifie uniquement que
+  **l'appelant lui-même** n'est pas suspendu/banni, rien sur son rôle.
+  `requireAdmin` n'est **jamais importé** dans `userRoutes.js` (recherche
+  confirmée : `grep -n "requireAdmin" src/routes/userRoutes.js` → aucun
+  résultat), et il n'existe aucun `router.use(...)` de portée globale sur
+  ce fichier qui imposerait un rôle. Le service appelé
+  (`BanService.suspendUser`/`unsuspendUser`/`addBan`/`reduceBan`,
+  `banService.js:18+`) prend bien un paramètre `adminId`, mais **ne le
+  vérifie jamais** — il ne sert qu'à l'enregistrer dans les métadonnées
+  d'audit. `server.js` monte `userRoutes` sans middleware englobant
+  (`app.use('/api/users', userRoutes)`, aucun rôle imposé à ce niveau non
+  plus). **Confirmé par contraste** avec le constat déjà écrit dans
+  `AUDIT-S2.md` (« Routeur de modération... le mieux protégé du dépôt,
+  chaque route sensible porte une permission nommée précise ») : il existe
+  donc, ailleurs dans le dépôt, un routeur de modération distinct qui fait
+  ce contrôle correctement pour les mêmes actions — ces quatre routes-ci
+  sont un second chemin, non gardé, vers les mêmes effets. **Impact : tout
+  compte authentifié et non suspendu peut suspendre, lever la suspension,
+  bannir ou débannir n'importe quel autre compte de la plateforme — y
+  compris un modérateur ou un administrateur — sans aucune vérification de
+  rôle, en un seul appel HTTP par action.** Correctif à transmettre :
+  ajouter le même contrôle de permission nommé que le routeur de
+  modération correct (`can_suspend_users`, `can_ban_users`) à ces quatre
+  routes, ou les supprimer au profit du routeur qui fait déjà ce contrôle
+  correctement. **NE PAS refaire cette recherche.**
+
+- **S2 était TERMINÉE avant l'ajout ci-dessus.** 6 constats initiaux,
+  récapitulatif écrit dans `AUDIT-S2.md` et
   ici. Ne rien y reprendre. Résumé pour mémoire (détail complet plus haut dans
   l'historique de ce fichier / dans les commits de la section S2) :
   3 constats dans `userSimilarityRoutes.js` (`authenticateToken` importé,

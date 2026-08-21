@@ -4,7 +4,14 @@
 > la gravité**. Aucun chemin exact, aucune méthode d'exploitation n'y figure.
 > Le détail est transmis au propriétaire hors dépôt.
 
-## ✅ Section TERMINÉE
+## ⚠️ Section TERMINÉE, ROUVERTE PONCTUELLEMENT — 1 constat ajouté
+
+Un constat supplémentaire a été trouvé après la clôture de cette section,
+en examinant `userRoutes.js` sous l'angle de la section S3 (validation).
+Il s'agit sans ambiguïté d'un constat S2 (contrôle de rôle absent), pas
+S3 : il est donc ajouté ici plutôt que dans `AUDIT-S3.md`. Voir le décompte
+mis à jour ci-dessous et l'entrée dans `AUDIT-PROGRESS.md`. Le reste de la
+section reste acquis tel quel, rien d'autre n'a été réexaminé.
 
 ## Méthode
 
@@ -26,12 +33,18 @@ Deux balayages complémentaires, tous deux menés sur l'intégralité de
 
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
-| **Critique** | **1** | Élévation de privilèges : une permission d'administration limitée permet d'accorder n'importe quel rôle, y compris le plus élevé du système, sans plafond |
+| **Critique** | **2** | Élévation de privilèges : une permission d'administration limitée permet d'accorder n'importe quel rôle, y compris le plus élevé du système, sans plafond ; un ensemble de routes de modération de compte (quatre actions, dont la plus destructrice du dépôt en matière d'intégrité de plateforme) ne porte **aucun contrôle de rôle** — seule l'authentification de base est exigée, alors qu'un routeur distinct du même dépôt fait ce contrôle correctement pour les mêmes actions |
 | **Élevée** | **3** | Absence totale de contrôle d'appartenance sur tout un routeur (IDOR généralisé) ; route d'administration accessible sans authentification, avec effet de déni de service ; fuite de données personnelles d'un utilisateur vers tout autre utilisateur, dans une réponse à fort trafic |
 | Moyenne | 1 | Exposition de données dérivées d'un utilisateur arbitraire, sans authentification |
 | Faible | 1 | Exposition d'informations internes de fonctionnement |
 
-**Au total : 6 constats, dont 1 critique et 3 de gravité élevée.** Trois d'entre eux sont
+**Au total : 7 constats, dont 2 critiques et 3 de gravité élevée.** Le nouveau
+constat critique est, de tous les constats de cette section — et sans doute
+de tout l'audit à ce stade — celui dont l'exploitation demande le moins de
+conditions préalables : **aucun rôle, aucun abonnement, aucune éligibilité
+particulière, juste un compte authentifié et non suspendu**, sur des actions
+qui affectent n'importe quel autre compte de la plateforme, sans plafond ni
+délai. Trois des six constats initiaux sont
 **concentrés sur un seul et même fichier de routes** (constats « userSimilarity »),
 qui n'a manifestement jamais reçu de contrôle d'accès — ce qui rend leur
 correction simple : une seule ligne de middleware les traite d'un coup. Un
