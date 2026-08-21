@@ -1021,16 +1021,26 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   possible). `PUT /me/language` : valeur comparée à une liste blanche
   fermée `READABLE_LANGUAGES`, rejetée sinon. **Aucun constat.**
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `gAuthRoutes.js` (2/2
+  candidats).** `POST /link-token` : authentifié, émet un JWT court
+  portant `userId: req.user.id` uniquement (`gAuthService.issueLinkToken`)
+  — aucune entrée client. `POST /backchannel` : pas d'authentification
+  utilisateur, mais protégé par un secret partagé
+  (`G_AUTH_BACKCHANNEL_SECRET`) comparé en temps constant
+  (`crypto.timingSafeEqual`, longueurs égalisées avant comparaison —
+  implémentation correcte), corps restreint à `{event: 'consent.revoked',
+  sub}` sinon 400. `unlinkBySub` (`gAuthService.js:392`) résout `sub` par
+  recherche en base (`g_auth_sub`), scope correct, aucune action si compte
+  introuvable. **Aucun constat.**
+
 - **S3 — prochain pas concret :** reste de la liste régénérée
   (`progressiveRecommendationRoutes.js`, `functionalEventRoutes.js`,
   `creatorIntelligenceRoutes.js`, `neuralRankRoutes.js`, `supportRoutes.js`,
   `tweetRoutes.js`, `nfMapRoutes.js`, `featureProposalRoutes.js`,
-  `policierCongoAdminRoutes.js`, `contestRoutes.js`, `gAuthRoutes.js`,
+  `policierCongoAdminRoutes.js`, `contestRoutes.js`,
   `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
   validation cette fois —, `developerAdminRoutes.js`,
-  `shadowbanAdminRoutes.js`). Aucun de ces fichiers ne touche directement
-  l'argent à première vue (déjà tous couverts) — ordre par nombre de
-  candidats bruts, sauf `gAuthRoutes.js` (authentification) à prioriser.
+  `shadowbanAdminRoutes.js`). Ordre par nombre de candidats bruts décroissant.
 
 - **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `events.js` + `eventQuestService.js`
   (8/8 candidats).** Module particulièrement soigné (commentaires défensifs
