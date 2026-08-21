@@ -995,7 +995,19 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   auto-approbation possible côté client. Les deux routes `/admin/*` sont
   derrière `requireAdmin`. **Aucun constat.**
 
-- **S3 — prochain pas concret :** reste de la liste régénérée
+- **S3 — `userRoutes.js` — vérifié sain en cours de route (pas le focus de
+  ce tour, mais examiné en profitant d'être déjà dans le fichier pour le
+  constat S2 ci-dessus) : `follow-requests/:followId/accept`,
+  `/reject`, `DELETE /followers/:followerId` — tous scopés
+  `following_id`/`follower_id: req.user.id` ; `POST /:id/block`,
+  `/:id/unblock` — scopés `currentUserId`, auto-blocage explicitement
+  refusé. **Pas encore examinés dans ce fichier :** `onboarding/follows`,
+  `POST /:id/follow`, `DELETE /:id/follow`, `POST /me/avatar`,
+  `POST /me/banner`, `PUT /me/language`. À couvrir au prochain tour avant
+  de considérer `userRoutes.js` clos pour S3.
+
+- **S3 — prochain pas concret :** finir `userRoutes.js` (candidats
+  restants listés juste au-dessus), puis reste de la liste régénérée
   (`events.js`, `userRoutes.js` — hors la portion déjà vérifiée saine —,
   `progressiveRecommendationRoutes.js`, `functionalEventRoutes.js`,
   `creatorIntelligenceRoutes.js`, `neuralRankRoutes.js`, `supportRoutes.js`,
