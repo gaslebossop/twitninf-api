@@ -1245,8 +1245,24 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   bug fonctionnel déjà hors du périmètre sécurité de cette section).
   **Aucun constat supplémentaire.**
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `nfMapRoutes.js` (4/4
+  candidats).** `PUT /me` (`updateSettings`) : `sharing_mode`/`audience`
+  vérifiés contre des énumérations fermées avant toute écriture, requête
+  paramétrée. `POST /position` (`updatePosition`) : **le mode de partage est
+  relu en base, jamais pris dans le corps de requête** (empêche un client de
+  s'auto-attribuer une précision `'precise'` alors qu'il a choisi `'city'`),
+  latitude/longitude validées par bornes (`isValidLatitude`/
+  `isValidLongitude`) avant tout arrondi/écriture. `DELETE /position` :
+  scope `req.user.id`, aucune entrée. `POST /invite/:userId` : lien de
+  suivi actif exigé avant tout envoi de notification (pas d'invitation vers
+  un compte sans relation), anti-spam par notification déjà envoyée dans
+  les 24h. Point mineur relevé, non publié en constat séparé :
+  `:userId` n'est pas validé `isUUID()` au niveau route (contrairement aux
+  autres routes du dépôt) — sans conséquence, la requête paramétrée ne
+  matche simplement rien si la valeur n'est pas un UUID. **Aucun constat.**
+
 - **S3 — prochain pas concret :** reste de la liste régénérée
-  (`nfMapRoutes.js`, `featureProposalRoutes.js`,
+  (`featureProposalRoutes.js`,
   `policierCongoAdminRoutes.js`, `contestRoutes.js`,
   `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
   validation cette fois —, `developerAdminRoutes.js`,
