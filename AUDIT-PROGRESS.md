@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 15
-  constats, dont 8 CRITIQUES, 2 ÉLEVÉS et 5 MOYENS.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 16
+  constats, dont 9 CRITIQUES, 2 ÉLEVÉS et 5 MOYENS.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -1307,10 +1307,66 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   seulement après tirage — mécanisme anti-triche bien conçu. **Aucun
   constat.**
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `aiRecommendationRoutes.js` (2/2
+  candidats).** `POST /feedback` : `action` restreint à une énumération
+  fermée, scope `req.user.id`. `POST /sync` : derrière `requireAdminRole`.
+  **Aucun constat.**
+
+- **S3 — CONSTAT CRITIQUE (9/9), déjà écrit, NE PAS REFAIRE :
+  `src/routes/userSimilarityRoutes.js:59` `POST /api/user-similarity/reload`
+  — route totalement non authentifiée qui déclenche une lecture disque
+  bloquante et un parsing synchrone sur le thread principal, gelant TOUT le
+  serveur le temps de l'opération.** Angle distinct des 3 constats S2 déjà
+  comptés sur ce même fichier (absence de `authenticateToken` — un import
+  jamais branché, IDOR/exposition non authentifiée déjà documentée) :
+  ici c'est la **gravité opérationnelle de cette absence d'authentification
+  précise** qui justifie un constat S3 séparé, pas la simple absence de
+  contrôle d'accès. Chaîne vérifiée :
+  1. `router.post('/reload', async (req, res) => {...})` (`:59`) — **aucun
+     middleware du tout**, ni `authenticateToken` (pourtant importé en tête
+     de fichier, `:3`, et utilisé sur `/sync` juste au-dessus) ni limiteur
+     de débit dédié. Confirmé par re-lecture complète du fichier (83
+     lignes) : c'est la seule route à zéro middleware, y compris
+     `GET /stats` juste après qui, elle, ne fait qu'une lecture mémoire bon
+     marché.
+  2. Elle appelle `userSimilarityService.initialize(true)`
+     (`userSimilarityService.js:50-60`) → `this.store.load()`
+     (`VectorStore.load()`, `src/services/similarity/vectorEngine.js:437-462`).
+  3. **`load()` utilise `fs.readFileSync` (bloquant, `:442`) puis une boucle
+     de parsing binaire synchrone sur `count` vecteurs** (une lecture de
+     longueur + un `Float32Array` de `DIMS` flottants par vecteur, tout en
+     JS synchrone, `:453-462`) — aucun `await`, aucun découpage en tâches,
+     tout s'exécute d'un bloc sur le thread principal Node.js. Pendant toute
+     la durée de cette opération, **aucune autre requête sur tout le
+     serveur ne peut être traitée** (le thread principal est unique en
+     Node.js).
+  4. Seule limite en place : le quota HTTP global (`server.js:279`,
+     1000 requêtes/15 min), lui-même contournable par l'usurpation de
+     statut first-party déjà documentée (constat moyen 1/5) — et de toute
+     façon **sans authentification requise ici**, ce quota s'applique par
+     IP/session anonyme, pas par compte, donc trivialement contournable en
+     changeant de session.
+  **Effet concret :** n'importe qui sur Internet, sans compte, peut appeler
+  cette route en boucle et geler le serveur entier à chaque appel — un déni
+  de service trivial à déclencher, sans même l'obstacle d'une inscription.
+  C'est, de tous les constats de cette section, celui qui demande le moins
+  de prérequis (aucun compte, aucun jeton, aucune connaissance du système
+  économique) pour un impact qui dépasse la portée des autres constats
+  (indisponibilité de la plateforme entière, pas seulement une perte
+  économique ou une fuite de données). Correctif à transmettre : ajouter au
+  minimum `authenticateToken` + `requireAdminRole` (comme `/sync` juste
+  au-dessus, dont c'est visiblement une omission plutôt qu'un choix — le
+  code y importe déjà tout ce qu'il faut) ; remplacer `fs.readFileSync` par
+  une lecture asynchrone et découper le parsing pour ne pas bloquer la
+  boucle d'événements ; ajouter un débit dédié strict.
+  **NE PAS refaire cette recherche.**
+
+- **S3 — `userSimilarityRoutes.js` clos pour S3 (le reste — `/similar/:userId`,
+  `GET /stats` — relève de l'angle autorisation déjà comptabilisé en S2, pas
+  d'angle validation/abus distinct au-delà du constat 9/9 ci-dessus).**
+
 - **S3 — prochain pas concret :** reste de la liste régénérée
-  (`aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
-  validation cette fois —, `developerAdminRoutes.js`,
-  `shadowbanAdminRoutes.js`). Ordre par nombre de candidats bruts décroissant.
+  (`developerAdminRoutes.js`, `shadowbanAdminRoutes.js`).
 
 - **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `events.js` + `eventQuestService.js`
   (8/8 candidats).** Module particulièrement soigné (commentaires défensifs

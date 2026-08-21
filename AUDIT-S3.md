@@ -22,11 +22,15 @@ un client peut-il influencer un montant ou rejouer une opération créditrice.
 
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
-| **Critique** | **8** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie ; un second chemin de paiement, explicitement documenté comme factice dans son propre code, crédite directement le portefeuille jusqu'à un plafond élevé par appel, sans aucune vérification de paiement ni grille de prix serveur ; l'état serveur qui conditionne l'attribution d'une récompense exclusive à stock limité peut être forgé entièrement côté client ; un chemin d'attribution de cette même récompense contourne à la fois le contrôle de stock et le contrôle anti-doublon, y compris pour des comptes n'ayant rien forgé ; deux routes de mise à jour d'un module publicitaire appliquent au modèle en base l'intégralité du corps de requête envoyé par le client sans restreindre les champs acceptés, ce qui permet d'écrire directement des champs financiers et d'état censés n'être modifiables que par des chemins contrôlés côté serveur ; une route créditrice d'un module de monétisation existe en parallèle d'un chemin protégé équivalent, sans reprendre aucune de ses protections — ni consommation de l'état qui fonde le montant, ni vérification que le bénéficiaire désigné par le client est bien la partie légitime — ce qui permet de rejouer indéfiniment le même crédit et de le rediriger vers un compte tiers ; une route de consommation d'objet d'inventaire accepte une quantité sans borner son signe, et la requête SQL sous-jacente ne fait pas la distinction entre consommer et ajouter — une valeur du mauvais signe multiplie un objet déjà possédé au lieu de le consommer ; un compteur qui alimente directement, y compris via le chemin de versement jusqu'ici tenu pour le plus sain de ce module, le calcul d'une récompense en monnaie réelle peut être incrémenté par le client sans aucune preuve qu'une activité correspondante a eu lieu |
+| **Critique** | **9** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie ; un second chemin de paiement, explicitement documenté comme factice dans son propre code, crédite directement le portefeuille jusqu'à un plafond élevé par appel, sans aucune vérification de paiement ni grille de prix serveur ; l'état serveur qui conditionne l'attribution d'une récompense exclusive à stock limité peut être forgé entièrement côté client ; un chemin d'attribution de cette même récompense contourne à la fois le contrôle de stock et le contrôle anti-doublon, y compris pour des comptes n'ayant rien forgé ; deux routes de mise à jour d'un module publicitaire appliquent au modèle en base l'intégralité du corps de requête envoyé par le client sans restreindre les champs acceptés, ce qui permet d'écrire directement des champs financiers et d'état censés n'être modifiables que par des chemins contrôlés côté serveur ; une route créditrice d'un module de monétisation existe en parallèle d'un chemin protégé équivalent, sans reprendre aucune de ses protections — ni consommation de l'état qui fonde le montant, ni vérification que le bénéficiaire désigné par le client est bien la partie légitime — ce qui permet de rejouer indéfiniment le même crédit et de le rediriger vers un compte tiers ; une route de consommation d'objet d'inventaire accepte une quantité sans borner son signe, et la requête SQL sous-jacente ne fait pas la distinction entre consommer et ajouter — une valeur du mauvais signe multiplie un objet déjà possédé au lieu de le consommer ; un compteur qui alimente directement, y compris via le chemin de versement jusqu'ici tenu pour le plus sain de ce module, le calcul d'une récompense en monnaie réelle peut être incrémenté par le client sans aucune preuve qu'une activité correspondante a eu lieu ; une route ne demandant aucune authentification déclenche une opération bloquante qui gèle le serveur entier le temps de son exécution, sans qu'aucun compte ni jeton ne soit nécessaire pour la déclencher |
 | **Moyenne** | **5** | Un mécanisme de confiance destiné au trafic applicatif légitime repose sur des informations entièrement fournies par le client, sans attache cryptographique — il conditionne l'exemption de plusieurs limites de débit, y compris sur l'opération créditrice ci-dessus ; un chemin d'échec d'upload laisse un fichier volumineux sur disque indéfiniment, sans purge ; une route d'écriture accepte sans aucune validation de type ni de borne une statistique financière d'affichage propre au compte appelant, qui alimente ensuite un tableau de bord agrégé consulté par ce même compte ; un module entier de routes de maintenance interne (rechargement de cache, retraitement en masse) n'exige qu'une authentification simple, sans contrôle de rôle ni limite de débit dédiée, et chacune déclenche des centaines à des milliers d'opérations séquentielles en base par appel ; une route d'invalidation de cache accessible à tout compte authentifié déclenche, sans vérifier aucun lien avec une action réelle de l'appelant, un balayage bloquant de l'ensemble d'un keyspace Redis partagé suivi d'une suppression en masse pour tous les utilisateurs |
 | **Élevée** | **2** | Une route d'administration économique accepte un montant sans valider qu'il est bien numérique : une requête malformée (champ omis, faute de frappe, valeur non numérique) n'est pas rejetée, elle remet silencieusement à zéro le solde de la cible et déplace la totalité vers la trésorerie, sans message d'erreur ; un type de média uploadé n'est, contrairement aux autres types du même dépôt, ni filtré par son contenu réel ni retraité avant d'être publié tel quel sur une URL publique, avec une extension de fichier laissée au choix du client |
 
-**À ce stade : 15 constats, dont 8 critiques et 2 élevés.** Le sixième
+**À ce stade : 16 constats, dont 9 critiques et 2 élevés.** Le neuvième
+constat critique se distingue de tous les autres : il ne demande aucun
+compte, aucun jeton, aucune connaissance du système économique — seulement
+l'URL de la route — pour un impact qui touche la disponibilité de la
+plateforme entière plutôt qu'un seul compte ou un seul solde. Le sixième
 constat critique est, avec le tout premier de cette section, celui dont
 l'exploitation demande le moins d'étapes : un seul appel HTTP, répétable
 sans délai, sans avoir besoin de forger quoi que ce soit au préalable — un
@@ -133,6 +137,19 @@ module tenu pour sain dans cette section. C'est un moyen indépendant
 d'obtenir un versement réel à partir d'une activité entièrement fabriquée,
 qui ne dépend d'aucune des failles déjà documentées du chemin direct de ce
 même module.
+
+## Constat critique (9/9) — détail (décompte uniquement ici)
+
+Une route ne porte aucun middleware d'authentification, contrairement à une
+route voisine du même fichier qui accomplit une tâche apparentée et qui,
+elle, exige bien un compte administrateur — tout indique une omission
+plutôt qu'un choix. Cette route déclenche une lecture disque bloquante
+suivie d'un parsing binaire entièrement synchrone, sans découpage ni appel
+asynchrone à aucune étape. Le modèle d'exécution du serveur ne permet
+qu'un seul fil d'exécution principal : pendant toute la durée de cette
+opération, aucune autre requête sur l'ensemble de la plateforme ne peut
+être traitée. Aucun compte, aucun jeton, aucune connaissance préalable
+n'est nécessaire pour la déclencher.
 
 ## Constat moyen (4/4) — détail (décompte uniquement ici)
 
