@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 9
-  constats, dont 5 CRITIQUES et 2 ÉLEVÉS.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 10
+  constats, dont 5 CRITIQUES, 2 ÉLEVÉS et 3 MOYENS.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -833,6 +833,54 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `password`, `platform`), aucun champ de rôle/statut acceptable depuis le
   client. `/stats`, `/search`, `/popular`, `/performance-test` : routes non
   implémentées (stubs), aucune donnée réelle exposée. **Aucun constat.**
+
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `premiumRoutes.js` (0 candidat
+  restant) et le parcours d'achat d'abonnement réel
+  (`userRoutes.js:1687` `POST /purchase-subscription`, fonction
+  `handleSubscriptionPurchase`, `userRoutes.js:122`).** L'ancien parcours
+  premium (Apple Pay simulé) est désactivé (routes `/subscribe`, `/cancel`,
+  `/plans` répondent `410`) — seul `/status` (lecture) reste actif. Le
+  parcours en vigueur calcule prix ET durée **entièrement côté serveur**
+  (`resolveSubscriptionPricing`), avec un commentaire confirmant qu'une
+  faille de durée négociable par le client (`req.body.duration`, sans
+  plafond) a déjà été corrigée — vérifié qu'elle ne l'est plus (la durée est
+  la constante `DEFAULT_DURATION_DAYS`, jamais lue depuis `req.body`).
+  Verrouillage de ligne (`NO_KEY_UPDATE`) avant lecture du solde, débit via
+  `spendCoins` → même garde `assertPositive` que le reste du grand livre.
+  **Aucun constat.**
+
+- **S3 — CONSTAT MOYEN (3/3), déjà écrit, NE PAS REFAIRE : module
+  `monetization` (route + modèle de métriques de monétisation par tweet).**
+  Une route d'écriture, réservée au propriétaire du tweet (vérifié :
+  comparaison stricte `tweet.user_id !== req.user.id`, donc pas d'IDOR),
+  transmet trois champs du corps de requête directement à la méthode de
+  sauvegarde du modèle, sans validation de type ni de borne sur aucun des
+  trois — dont celui qui représente un montant. Recherche menée dans
+  l'ensemble du dépôt pour un lien entre ce champ et un versement réel
+  (portefeuille, grand livre) : **aucun trouvé** — le champ semble
+  purement une statistique d'affichage agrégée ensuite dans un tableau de
+  bord consultable par ce même compte, d'où la gravité moyenne et non
+  critique. Correctif à transmettre : si ce module doit rester en
+  production, calculer ces trois champs côté serveur à partir de
+  l'activité réelle (vues/clics comptés en base), comme c'est déjà fait
+  pour les défis (`challengeProgressService.js`) ; sinon le retirer comme
+  l'ancien parcours premium l'a été. **NE PAS refaire cette recherche.**
+
+- **S3 — `monetizationRoutes.js` TERMINÉ (5/5 candidats).** Les deux
+  routes `GET` restantes (`eligible-tweets`, `stats`) sont des lectures
+  scopées à l'utilisateur courant ou globales sans donnée sensible.
+  `POST /tweets/:tweetId/simulate` (`simulateEngagement`) a la même garde
+  de propriété que `updateMetrics` (vérifiée), et recalcule les métriques
+  via une fonction serveur (`MonetizationMetrics.simulateEngagement`) sans
+  prendre aucune valeur du corps de requête — pas un constat séparé, une
+  route de test laissée accessible mais qui ne prend aucune entrée
+  arbitraire du client.
+
+- **S3 — prochain pas concret :** `tweetMonetizationRoutes.js`,
+  `inventoryRoutes.js`, `monetizationProgramRoutes.js` (tous petits
+  fichiers, non encore ouverts), puis le reste de la liste régénérée
+  (`events.js`, `userRoutes.js` — hors la portion déjà vérifiée saine
+  ci-dessus —, `progressiveRecommendationRoutes.js`, etc.).
 
 ## Règles de la routine
 
