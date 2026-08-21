@@ -1365,8 +1365,41 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `GET /stats` — relève de l'angle autorisation déjà comptabilisé en S2, pas
   d'angle validation/abus distinct au-delà du constat 9/9 ci-dessus).**
 
-- **S3 — prochain pas concret :** reste de la liste régénérée
-  (`developerAdminRoutes.js`, `shadowbanAdminRoutes.js`).
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `developerAdminRoutes.js` (3/3
+  candidats).** Malgré son nom, ce n'est pas un module d'administration
+  plateforme mais la gestion, par chaque développeur, de ses propres
+  applications OAuth. Toutes les routes scopées `user_id: req.user.id` en
+  base (`findOne({ where: { id, user_id } })` avant toute modification/
+  suppression), validation de forme correcte (`name` borné 3-50,
+  `description` bornée, `redirect_uris` typé tableau). Secrets générés
+  côté serveur (`crypto.randomBytes`), jamais acceptés du client.
+  **Aucun constat.**
+
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `shadowbanAdminRoutes.js` (9/9
+  candidats bruts).** **Toutes** les routes du fichier derrière
+  `router.use(authenticateToken)` + `router.use(requireAdminRole)` au
+  niveau routeur (vérifié aucune exception, y compris `POST /reload-maps`
+  — contrairement à l'omission constatée sur la route homonyme non
+  protégée de `userSimilarityRoutes.js`, ici c'est fait correctement).
+  Chaque champ numérique/énuméré validé par bornes explicites
+  (`isFloat({min,max})`, `isUUID()`, longueurs de chaîne) via
+  `express-validator`. **Aucun constat.**
+
+- **S3 — balayage brut RE-GÉNÉRÉ (script Python identique, tous les
+  fichiers déjà couverts exclus) : la liste des 156 candidats initiaux est
+  épuisée à l'exception de 7 fichiers.** `featureFlagRoutes.js` (9, admin —
+  à vérifier), puis 6 fichiers à 1 candidat chacun : `verifiedBadgeRoutes.js`,
+  `verificationStyleRoutes.js`, `trackingRoutes.js`, `searchRoutes.js`,
+  `policierCongoChatRoutes.js`, `insightsRoutes.js`.
+
+- **S3 — prochain pas concret :** `featureFlagRoutes.js` en premier (le
+  plus gros lot restant), puis les 6 fichiers à 1 candidat par ordre
+  alphabétique. Une fois ces 7 fichiers couverts, le balayage brut initial
+  des 156 candidats sera intégralement traité — il restera alors à
+  reprendre les deux points laissés ouverts plus haut dans cette section
+  (`adRoutes.js` : routes `GET`/ciblage non revues, probablement faible
+  risque ; `eventQuestService`/`events.js` : rien en suspens, section déjà
+  close) avant de considérer S3 TERMINÉE.
 
 - **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `events.js` + `eventQuestService.js`
   (8/8 candidats).** Module particulièrement soigné (commentaires défensifs
