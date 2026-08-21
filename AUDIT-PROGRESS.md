@@ -1280,9 +1280,35 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   échec du grand livre annule toute la transaction (pas d'idée marquée
   "construite" sans versement réel). **Aucun constat.**
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `policierCongoAdminRoutes.js`
+  (3/3 candidats).** Module de pilotage d'un bot d'automatisation, mais
+  **toutes** ses routes sont derrière `authenticateToken` +
+  `requireAdminRole` (vérifié, aucune exception) — surface de risque très
+  réduite. `POST /instruct` transmet du texte libre à un gestionnaire
+  d'instructions puis déclenche un cycle d'automatisation, mais un
+  administrateur est déjà pleinement privilégié. **Aucun constat.**
+
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `contestRoutes.js` (4/4
+  candidats).** Module particulièrement soigné. `POST /` : cagnotte
+  prélevée dans la MÊME transaction que la création du tweet/concours (pas
+  de concours public sans argent réellement bloqué), montant/nombre de
+  gagnants/durée tous validés par bornes explicites
+  (`Number.isFinite`, `MIN_PRIZE`, `1-100`, `MIN_DURATION_MINUTES`-
+  `MAX_DURATION_DAYS`) dans `contestService.normalizeCreatePayload`.
+  `POST /:id/participate` : conditions vérifiées à l'entrée ET revérifiées
+  au tirage (le commentaire du code le confirme explicitement — se
+  désabonner après participation ne paie pas), auto-participation de
+  l'organisateur refusée, unicité appliquée par contrainte de base
+  (`findOrCreate` + gestion de la course sur contrainte unique).
+  `DELETE /:id/participate` : `decrement` avec garde-fou anti-négatif.
+  `POST /:id/cancel` : appartenance vérifiée, remboursement dans la même
+  transaction que le changement de statut. Tirage vérifiable publiquement
+  après coup via une graine engagée par hash (`seed_commitment`) révélée
+  seulement après tirage — mécanisme anti-triche bien conçu. **Aucun
+  constat.**
+
 - **S3 — prochain pas concret :** reste de la liste régénérée
-  (`policierCongoAdminRoutes.js`, `contestRoutes.js`,
-  `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
+  (`aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
   validation cette fois —, `developerAdminRoutes.js`,
   `shadowbanAdminRoutes.js`). Ordre par nombre de candidats bruts décroissant.
 
