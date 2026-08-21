@@ -1392,14 +1392,25 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `verificationStyleRoutes.js`, `trackingRoutes.js`, `searchRoutes.js`,
   `policierCongoChatRoutes.js`, `insightsRoutes.js`.
 
-- **S3 — prochain pas concret :** `featureFlagRoutes.js` en premier (le
-  plus gros lot restant), puis les 6 fichiers à 1 candidat par ordre
-  alphabétique. Une fois ces 7 fichiers couverts, le balayage brut initial
-  des 156 candidats sera intégralement traité — il restera alors à
-  reprendre les deux points laissés ouverts plus haut dans cette section
-  (`adRoutes.js` : routes `GET`/ciblage non revues, probablement faible
-  risque ; `eventQuestService`/`events.js` : rien en suspens, section déjà
-  close) avant de considérer S3 TERMINÉE.
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `featureFlagRoutes.js` (9/9
+  candidats).** **Toutes** les routes derrière `authenticateToken` +
+  `requireAdminRole` (vérifié, aucune exception). `POST /admin` : clé
+  validée par expression régulière stricte (`KEY_PATTERN`, minuscules/
+  chiffres/`._-` uniquement), `buildWritablePayload` est une liste blanche
+  explicite champ par champ (pas d'assignation de masse) —
+  `rollout_percentage` bornée `0-100` et arrondie, `rules`/`variants`
+  passés par des fonctions d'assainissement dédiées
+  (`sanitizeRule`/`sanitizeVariants`). **Aucun constat.**
+
+- **S3 — prochain pas concret :** les 6 fichiers à 1 candidat restants, par
+  ordre alphabétique : `insightsRoutes.js`, `policierCongoChatRoutes.js`,
+  `searchRoutes.js`, `trackingRoutes.js`, `verificationStyleRoutes.js`,
+  `verifiedBadgeRoutes.js`. Une fois ces 6 fichiers couverts, le balayage
+  brut initial des 156 candidats sera intégralement traité — il restera
+  alors à reprendre le seul point laissé ouvert plus haut dans cette
+  section (`adRoutes.js` : routes `GET`/ciblage non revues, probablement
+  faible risque, à confirmer ou classer sain) avant de considérer S3
+  TERMINÉE.
 
 - **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `events.js` + `eventQuestService.js`
   (8/8 candidats).** Module particulièrement soigné (commentaires défensifs
