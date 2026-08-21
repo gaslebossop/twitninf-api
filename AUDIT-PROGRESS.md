@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 14
-  constats, dont 7 CRITIQUES, 2 ÉLEVÉS et 5 MOYENS.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 15
+  constats, dont 8 CRITIQUES, 2 ÉLEVÉS et 5 MOYENS.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -1173,8 +1173,73 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   booléen, pas d'ID arbitraire acceptable) — pas d'assignation de masse.
   **Aucun constat.**
 
-- **S3 — prochain pas concret :** reste de la liste régénérée
-  (`tweetRoutes.js`, `nfMapRoutes.js`, `featureProposalRoutes.js`,
+- **S3 — CONSTAT CRITIQUE (8/8), déjà écrit, NE PAS REFAIRE :
+  `src/routes/tweetRoutes.js:3290` `POST /api/tweets/views/increment` —
+  compteur de vues librement incrémenté par le client, sans lien avec une
+  vue réelle, qui alimente directement le calcul de récompense du module
+  de monétisation.** Chaîne vérifiée de bout en bout :
+  1. La route valide seulement que `tweetIds` est un tableau de 1 à 50
+     UUID (`:3291-3293`) — **aucune vérification qu'une vue a réellement eu
+     lieu** (pas de watch-time minimal, pas de déduplication par
+     utilisateur, pas de cooldown). Elle ne vérifie pas non plus que
+     l'appelant est l'auteur du tweet — n'importe quel tweet public
+     convient (`is_private: false`, `:3306`), donc l'abus fonctionne aussi
+     bien sur ses propres tweets que, avec moins d'intérêt direct, sur ceux
+     d'un tiers.
+  2. `Tweet.update({ view_count: sequelize.literal('view_count + 1') },
+     { where: { id: { [Op.in]: validTweetIds } } })` (`:3321-3328`) —
+     incrémentation inconditionnelle, un appel = +1 par tweet ciblé, répétable
+     sans aucune limite au-delà du débit HTTP.
+  3. **`src/services/tweetMonetizationService.js:136` et `:358`** : les deux
+     chemins de calcul de récompense qui existent dans ce service —
+     `calculateTweetEligibility` (aperçu, appelé aussi par le chemin direct
+     déjà documenté en constat critique 6/6) ET **`processEligibleTweets`,
+     le chemin AUTOMATISÉ qui remet les compteurs à zéro après paiement et
+     que le constat 6/6 citait justement comme la référence saine** — lisent
+     tous deux `tweet.view_count` en base et le multiplient par
+     `currentRates.VIEWS` (`:71`, `0.01 TWC/vue` pour un tweet classique) pour
+     composer le montant réellement versé (`distributeReward`,
+     `:393` → grand livre). **Le chemin automatisé, jusqu'ici tenu pour sain
+     dans cette section, verse donc lui aussi sur la foi d'un compteur que le
+     client contrôle entièrement.**
+  4. Limite en place : `tweetLimiter` (`server.js:319-330`, monté sur tout
+     `/api/tweets`) plafonne à 200 requêtes/15 min pour le trafic non
+     first-party — donc jusqu'à 200 incréments/15 min par tweet ciblé en
+     boucle, soit 2 TWC/15 min par tweet au tarif de base, **sans plafond
+     dans le temps** (répétable indéfiniment, 24h/24) — et cette limite
+     elle-même est contournable par l'usurpation de statut first-party déjà
+     documentée (constat moyen 1/5), auquel cas **aucune limite HTTP** ne
+     s'applique.
+  **Effet concret :** un compte monétisable (abonnement + programme
+  accepté, cf. constat 6/6) peut gonfler indéfiniment le compteur de vues de
+  son propre tweet en appelant cette route en boucle, puis déclencher le
+  versement via le chemin automatisé normal (`process-all` /
+  `processEligibleTweets`) — un versement réel en TWC, à partir d'une
+  activité entièrement fabriquée, **sans passer par aucune des failles déjà
+  documentées du chemin direct (6/6)**. C'est indépendant de ce constat :
+  même si 6/6 était corrigé (bénéficiaire dérivé de l'auteur réel, compteurs
+  remis à zéro), cette route resterait un moyen de payer le module de
+  monétisation avec de fausses vues. Correctif à transmettre : ne
+  jamais incrémenter `view_count` sur simple déclaration du client ;
+  dériver la vue d'un signal server-side vérifiable (temps de lecture
+  minimal côté client mais recoupé, unicité par utilisateur/tweet/fenêtre de
+  temps stockée en base plutôt qu'un compteur nu), et à défaut plafonner
+  strictement le nombre de vues comptées par utilisateur unique par tweet.
+  **NE PAS refaire cette recherche.**
+
+- **S3 — `tweetRoutes.js` — reste des candidats examinés à ce stade :**
+  `POST /:id/super-like` vérifié sain (transaction + verrou de ligne,
+  quota `super_hearts_remaining` entièrement server-side, aucune valeur
+  numérique acceptée du client). Routes restantes du fichier
+  (`/translations/batch`, `/:id/bookmark`, `/:id/share`, `POST /`,
+  `PUT /:id`, `DELETE /:id`, `/:id/like`, `/:id/retweet`) **pas encore
+  vérifiées sous l'angle validation** — à couvrir avant de considérer le
+  fichier clos pour S3 (l'upload vidéo, `POST /video`, est déjà couvert en
+  détail comme constat moyen séparé).
+
+- **S3 — prochain pas concret :** finir `tweetRoutes.js` (routes listées
+  juste au-dessus), puis reste de la liste régénérée
+  (`nfMapRoutes.js`, `featureProposalRoutes.js`,
   `policierCongoAdminRoutes.js`, `contestRoutes.js`,
   `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
   validation cette fois —, `developerAdminRoutes.js`,
