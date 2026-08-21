@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 13
-  constats, dont 7 CRITIQUES, 2 ÉLEVÉS et 4 MOYENS.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 14
+  constats, dont 7 CRITIQUES, 2 ÉLEVÉS et 5 MOYENS.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -1113,8 +1113,51 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   toujours scopé à `req.user.id`, aucune valeur numérique/économique
   acceptée du client. **Aucun constat.**
 
+- **S3 — CONSTAT MOYEN (5/5), déjà écrit, NE PAS REFAIRE :
+  `src/routes/neuralRankRoutes.js:699` `POST /on-publish` — invalidation
+  globale de caches Redis partagés, déclenchable par n'importe quel compte
+  authentifié, sans lien vérifié avec une réelle publication.** Vérifié :
+  la route lit seulement `tweetId` du corps (`:701`), **ne vérifie jamais
+  que ce tweet existe ni qu'il appartient à l'appelant**, puis (`:711-720`)
+  exécute pour CHACUN des 3 motifs (`twitninf:reco:*:trending`,
+  `*:discover`, `*:for_you`) un `rc.keys(pattern)` suivi d'un `rc.del(keys)`
+  sur l'ensemble de l'espace de clés Redis correspondant à **tous les
+  utilisateurs de la plateforme**, pas seulement l'appelant. `KEYS` est une
+  commande Redis bloquante en O(N) sur la taille totale du keyspace
+  (documenté comme tel par Redis lui-même) — vérifié qu'aucune alternative
+  non bloquante (`SCAN`) n'est utilisée ici. Aucun rôle requis au-delà de
+  `authenticateToken` (confirmé, pas de middleware supplémentaire sur cette
+  route ni englobant — `server.js:546`,
+  `app.use('/api/neural-rank', neuralRankRoutes)`, sans limiteur dédié).
+  **Effet concret :** un compte authentifié quelconque peut appeler cette
+  route en boucle avec un `tweetId` arbitraire (même inexistant) et forcer,
+  à chaque appel, un balayage bloquant de tout le keyspace Redis suivi de
+  la suppression en masse des caches de recommandation de **tous les
+  utilisateurs** — dégradation de performance partagée (chaque fil devra
+  être recalculé au prochain accès) et charge Redis disproportionnée par
+  rapport à un utilisateur légitime qui vient de publier un seul tweet.
+  Pas de fuite de données ni de gain économique — classé moyen, dans la
+  même famille que le constat moyen 4/4 (module de maintenance sans rôle ni
+  limite de débit), mais ici le vecteur est Redis/`KEYS` plutôt que des
+  requêtes SQL séquentielles. Correctif à transmettre : vérifier que
+  `tweetId` existe et appartient à `req.user.id` avant toute invalidation ;
+  remplacer `KEYS` par `SCAN` (non bloquant) ; envisager un débit dédié ou
+  un appel interne (déclenché par le serveur lors de la publication
+  elle-même) plutôt qu'une route publique séparée que le client doit
+  penser à appeler.
+  **NE PAS refaire cette recherche.**
+
+- **S3 — `neuralRankRoutes.js` TERMINÉ (4/4 candidats bruts), reste sain
+  hormis le constat ci-dessus.** `POST /track` : enum fermée
+  (`typeMap`), scope `req.user.id`, valeurs numériques toutes passées par
+  `Number.isFinite`/bornées avant transmission au moteur Rust.
+  `POST /calibration/round` : `round` borné entier 1-10, tableaux convertis
+  en chaînes, scope `req.user.id`. `POST /calibration/finish` : même scope,
+  n'écrit aucun like public (commentaire du code vérifié cohérent avec le
+  comportement — aucun appel à un service de like trouvé dans ce handler).
+
 - **S3 — prochain pas concret :** reste de la liste régénérée
-  (`neuralRankRoutes.js`, `supportRoutes.js`,
+  (`supportRoutes.js`,
   `tweetRoutes.js`, `nfMapRoutes.js`, `featureProposalRoutes.js`,
   `policierCongoAdminRoutes.js`, `contestRoutes.js`,
   `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
