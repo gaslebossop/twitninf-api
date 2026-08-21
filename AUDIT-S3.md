@@ -22,16 +22,18 @@ un client peut-il influencer un montant ou rejouer une opération créditrice.
 
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
-| **Critique** | **6** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie ; un second chemin de paiement, explicitement documenté comme factice dans son propre code, crédite directement le portefeuille jusqu'à un plafond élevé par appel, sans aucune vérification de paiement ni grille de prix serveur ; l'état serveur qui conditionne l'attribution d'une récompense exclusive à stock limité peut être forgé entièrement côté client ; un chemin d'attribution de cette même récompense contourne à la fois le contrôle de stock et le contrôle anti-doublon, y compris pour des comptes n'ayant rien forgé ; deux routes de mise à jour d'un module publicitaire appliquent au modèle en base l'intégralité du corps de requête envoyé par le client sans restreindre les champs acceptés, ce qui permet d'écrire directement des champs financiers et d'état censés n'être modifiables que par des chemins contrôlés côté serveur ; une route créditrice d'un module de monétisation existe en parallèle d'un chemin protégé équivalent, sans reprendre aucune de ses protections — ni consommation de l'état qui fonde le montant, ni vérification que le bénéficiaire désigné par le client est bien la partie légitime — ce qui permet de rejouer indéfiniment le même crédit et de le rediriger vers un compte tiers |
+| **Critique** | **7** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie ; un second chemin de paiement, explicitement documenté comme factice dans son propre code, crédite directement le portefeuille jusqu'à un plafond élevé par appel, sans aucune vérification de paiement ni grille de prix serveur ; l'état serveur qui conditionne l'attribution d'une récompense exclusive à stock limité peut être forgé entièrement côté client ; un chemin d'attribution de cette même récompense contourne à la fois le contrôle de stock et le contrôle anti-doublon, y compris pour des comptes n'ayant rien forgé ; deux routes de mise à jour d'un module publicitaire appliquent au modèle en base l'intégralité du corps de requête envoyé par le client sans restreindre les champs acceptés, ce qui permet d'écrire directement des champs financiers et d'état censés n'être modifiables que par des chemins contrôlés côté serveur ; une route créditrice d'un module de monétisation existe en parallèle d'un chemin protégé équivalent, sans reprendre aucune de ses protections — ni consommation de l'état qui fonde le montant, ni vérification que le bénéficiaire désigné par le client est bien la partie légitime — ce qui permet de rejouer indéfiniment le même crédit et de le rediriger vers un compte tiers ; une route de consommation d'objet d'inventaire accepte une quantité sans borner son signe, et la requête SQL sous-jacente ne fait pas la distinction entre consommer et ajouter — une valeur du mauvais signe multiplie un objet déjà possédé au lieu de le consommer |
 | **Moyenne** | **3** | Un mécanisme de confiance destiné au trafic applicatif légitime repose sur des informations entièrement fournies par le client, sans attache cryptographique — il conditionne l'exemption de plusieurs limites de débit, y compris sur l'opération créditrice ci-dessus ; un chemin d'échec d'upload laisse un fichier volumineux sur disque indéfiniment, sans purge ; une route d'écriture accepte sans aucune validation de type ni de borne une statistique financière d'affichage propre au compte appelant, qui alimente ensuite un tableau de bord agrégé consulté par ce même compte |
 | **Élevée** | **2** | Une route d'administration économique accepte un montant sans valider qu'il est bien numérique : une requête malformée (champ omis, faute de frappe, valeur non numérique) n'est pas rejetée, elle remet silencieusement à zéro le solde de la cible et déplace la totalité vers la trésorerie, sans message d'erreur ; un type de média uploadé n'est, contrairement aux autres types du même dépôt, ni filtré par son contenu réel ni retraité avant d'être publié tel quel sur une URL publique, avec une extension de fichier laissée au choix du client |
 
-**À ce stade : 11 constats, dont 6 critiques et 2 élevés.** Le sixième
+**À ce stade : 12 constats, dont 7 critiques et 2 élevés.** Le sixième
 constat critique est, avec le tout premier de cette section, celui dont
 l'exploitation demande le moins d'étapes : un seul appel HTTP, répétable
 sans délai, sans avoir besoin de forger quoi que ce soit au préalable — un
 compte qui remplit légitimement la condition d'accès au module concerné
-suffit. Les deux constats
+suffit. Le septième est plus restreint en portée (il faut déjà posséder
+l'objet visé) mais tout aussi direct — un seul appel, un seul champ, un
+seul mauvais signe. Les deux constats
 moyens touchent le premier constat critique : le second lève la limite de
 débit qui aurait pu, à défaut d'autre chose, borner son ampleur. Le
 troisième constat critique aggrave le second : même si la forge de
@@ -110,6 +112,15 @@ jamais le consommer ni vérifier qu'il ne l'a pas déjà été. Le second chemin
 accepte en outre l'identité du bénéficiaire depuis le corps de la requête,
 sans la confronter à l'appelant ni à la partie que le montant calculé est
 censé récompenser.
+
+## Constat critique (7/7) — détail (décompte uniquement ici)
+
+Une route qui consomme un exemplaire d'un objet d'inventaire accepte une
+quantité fournie par le client sans vérifier son signe. La requête qui
+applique cette quantité le fait par simple soustraction arithmétique dans
+la même instruction SQL — une valeur négative devient donc une addition, et
+la condition censée empêcher de descendre sous zéro ne protège pas contre
+ce cas puisqu'elle compare dans le même sens que l'opération elle-même.
 
 ## Vérifié et trouvé sain (S3, à ce stade)
 

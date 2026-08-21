@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 11
-  constats, dont 6 CRITIQUES, 2 ÉLEVÉS et 3 MOYENS.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 12
+  constats, dont 7 CRITIQUES, 2 ÉLEVÉS et 3 MOYENS.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -921,6 +921,56 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   chemin-là) — probable, mais pas encore formellement confirmé que ce
   chemin-ci est sain de bout en bout au-delà de ce qui est déjà noté.
   `inventoryRoutes.js`, `monetizationProgramRoutes.js` toujours pas ouverts.
+
+- **S3 — CONSTAT CRITIQUE (7/7), déjà écrit, NE PAS REFAIRE : `inventoryRoutes.js`,
+  route `POST /user/:userId/use-item`, service `inventoryService.js`
+  `useItem`.** La route vérifie bien que `userId` du chemin correspond à
+  l'appelant (pas d'IDOR sur ce point), mais lit `quantity` du corps de
+  requête sans jamais vérifier qu'elle est strictement positive avant de la
+  transmettre au service. Le service exécute une requête SQL brute de la
+  forme `UPDATE ... SET quantity = quantity - :quantity ... WHERE quantity
+  >= :quantity` : avec une valeur négative, la soustraction devient une
+  addition, et la clause de garde (comparée dans le même sens) ne bloque
+  rien puisqu'une quantité en stock est presque toujours ≥ une valeur
+  négative. Nécessite de posséder déjà au moins un exemplaire de l'objet
+  visé (la jointure ne crée pas de ligne), mais aucune borne au-delà — un
+  seul appel peut multiplier la quantité possédée par un facteur arbitraire.
+  Combiné aux constats déjà documentés sur les récompenses à stock limité
+  (constat critique 2/2 et 3/3 de cette section), un objet exclusif obtenu
+  une seule fois par ces chemins peut ensuite être multiplié à volonté par
+  celui-ci. Correctif à transmettre : rejeter toute `quantity` non entière
+  strictement positive avant l'appel au service, et par prudence
+  réécrire la requête pour ne jamais dépendre du signe du paramètre côté
+  SQL (`GREATEST(quantity - :quantity, 0)` avec `:quantity` déjà validé
+  positif en amont, ou recalculer la nouvelle valeur en JS et l'assigner
+  plutôt que de la dériver par soustraction en base). **NE PAS refaire
+  cette recherche.**
+
+- **S3 — `inventoryRoutes.js` TERMINÉ (3/3 candidats).** `GET
+  /user/:userId` et `GET /user/:userId/has-item/:itemName` sont en lecture
+  seule, correctement scopées (soi-même, ou admin/superadmin pour la
+  première) — aucun constat sur ces deux-là au-delà du constat critique
+  ci-dessus.
+
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `monetizationProgramRoutes.js`
+  (2/2 candidats).** `POST /apply` ne prend aucun champ du corps de
+  requête, appelle le service uniquement avec `req.user.id` — aucune
+  auto-approbation possible côté client. Les deux routes `/admin/*` sont
+  derrière `requireAdmin`. **Aucun constat.**
+
+- **S3 — prochain pas concret :** reste de la liste régénérée
+  (`events.js`, `userRoutes.js` — hors la portion déjà vérifiée saine —,
+  `progressiveRecommendationRoutes.js`, `functionalEventRoutes.js`,
+  `creatorIntelligenceRoutes.js`, `neuralRankRoutes.js`, `supportRoutes.js`,
+  `tweetRoutes.js`, `nfMapRoutes.js`, `featureProposalRoutes.js`,
+  `policierCongoAdminRoutes.js`, `contestRoutes.js`, `gAuthRoutes.js`,
+  `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
+  validation cette fois —, `developerAdminRoutes.js`,
+  `shadowbanAdminRoutes.js`). Vu le nombre de constats critiques déjà
+  trouvés, prioriser les fichiers touchant l'argent/objets en premier
+  (aucun ne reste dans la liste ci-dessus à première vue — à revérifier au
+  prochain tour avant de piocher dans le reste par ordre de nombre de
+  candidats).
 
 ## Règles de la routine
 
