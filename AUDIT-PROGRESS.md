@@ -1227,18 +1227,25 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   strictement le nombre de vues comptées par utilisateur unique par tweet.
   **NE PAS refaire cette recherche.**
 
-- **S3 — `tweetRoutes.js` — reste des candidats examinés à ce stade :**
-  `POST /:id/super-like` vérifié sain (transaction + verrou de ligne,
-  quota `super_hearts_remaining` entièrement server-side, aucune valeur
-  numérique acceptée du client). Routes restantes du fichier
-  (`/translations/batch`, `/:id/bookmark`, `/:id/share`, `POST /`,
-  `PUT /:id`, `DELETE /:id`, `/:id/like`, `/:id/retweet`) **pas encore
-  vérifiées sous l'angle validation** — à couvrir avant de considérer le
-  fichier clos pour S3 (l'upload vidéo, `POST /video`, est déjà couvert en
-  détail comme constat moyen séparé).
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `tweetRoutes.js` clos pour S3
+  (hors les 2 constats déjà documentés séparément : upload vidéo moyen, et
+  `views/increment` critique 8/8).** `POST /:id/super-like` : transaction +
+  verrou de ligne, quota entièrement server-side. `POST /` : validation
+  `express-validator` complète sur tous les champs, `spotify_track`/
+  `audio_url` assainis par des fonctions dédiées (jamais acceptés tels
+  quels), palier de traduction revérifié en base. `PUT /:id` et
+  `DELETE /:id` : appartenance vérifiée (`tweet.user_id !== userId`),
+  contenu passé par un service d'édition dédié avec fenêtre de temps et
+  historique, champs annexes (médias, confidentialité) en liste fermée.
+  `POST /:id/like` et `POST /:id/retweet` : dédoublonnage correct,
+  commentaire de retweet borné en longueur. `POST /translations/batch` :
+  tableau borné à 100, contenu payant non acheté filtré avant traduction.
+  `POST /:id/bookmark` et `POST /:id/share` : aucune valeur sensible
+  acceptée du client (le bookmark ne persiste d'ailleurs rien de réel —
+  bug fonctionnel déjà hors du périmètre sécurité de cette section).
+  **Aucun constat supplémentaire.**
 
-- **S3 — prochain pas concret :** finir `tweetRoutes.js` (routes listées
-  juste au-dessus), puis reste de la liste régénérée
+- **S3 — prochain pas concret :** reste de la liste régénérée
   (`nfMapRoutes.js`, `featureProposalRoutes.js`,
   `policierCongoAdminRoutes.js`, `contestRoutes.js`,
   `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
