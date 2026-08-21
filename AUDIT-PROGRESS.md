@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 16
-  constats, dont 9 CRITIQUES, 2 ÉLEVÉS et 5 MOYENS.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 17
+  constats, dont 10 CRITIQUES, 2 ÉLEVÉS et 5 MOYENS.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -1402,10 +1402,71 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   passés par des fonctions d'assainissement dédiées
   (`sanitizeRule`/`sanitizeVariants`). **Aucun constat.**
 
-- **S3 — prochain pas concret :** les 6 fichiers à 1 candidat restants, par
+- **S3 — CONSTAT CRITIQUE (10/10), déjà écrit, NE PAS REFAIRE :
+  `src/routes/searchRoutes.js:13` `POST /api/search/ai-summary/stream` —
+  route non authentifiée qui déclenche un appel facturé à une API IA
+  externe (Gemini) à partir de données entièrement fournies par le client,
+  avec un cache trivialement contournable.** Chaîne vérifiée :
+  1. `router.post('/ai-summary/stream', async (req, res) => {...})`
+     (`:13`) — **aucun middleware d'authentification** (contrairement à la
+     quasi-totalité des routes d'écriture du dépôt), seul le corps est lu :
+     `{ q, type, users, tweets, hashtags }` (`:14`), avec une seule
+     vérification (`q` non vide, `:17-22`) — **`users`, `tweets`,
+     `hashtags` sont censés être les résultats d'une recherche réelle,
+     mais rien ne vérifie qu'ils en proviennent : le client peut envoyer
+     n'importe quel contenu fabriqué dans ces trois tableaux.**
+  2. `streamSearchSummary` (`searchSummaryService.js:538`) : seule garde
+     avant l'appel IA, `totalResults = users.length + tweets.length +
+     hashtags.length`, doit être `>= 5` (`:547-550`) — **trivialement
+     satisfaite en envoyant 5 objets fabriqués n'importe où dans ces
+     tableaux**, sans lien avec une vraie recherche.
+  3. Le cache (`summaryCache`, `:553-559`) est indexé sur `{query, type}`
+     **seulement** — **varier `q` d'un caractère à chaque appel (espace en
+     plus, ponctuation) garantit un cache-miss et force un nouvel appel IA
+     à chaque fois**, alors que `users`/`tweets`/`hashtags` peuvent rester
+     fabriqués et identiques.
+  4. `buildSearchSummaryPrompt` (`:395-449`) intègre le contenu des
+     tableaux client (`content: t.content.substring(0, 220)`, jusqu'à 12
+     tweets + 10 users + 12 hashtags par appel) tel quel dans le prompt
+     envoyé au modèle — aucune limite sur le nombre total d'appels, juste
+     sur la taille d'un seul.
+  5. `generateWithConfiguredProvider` (confirmé par lecture du fichier,
+     `:317`, `:511`) appelle **l'API Google Gemini avec une clé API réelle
+     (`GEMINI_KEYS`)** — **un service facturé à l'usage.**
+  6. Seule limite en place : `searchLimiter` (`server.js:333-344`, monté
+     sur tout `/api/search`), 300 requêtes/15 min pour le trafic non
+     first-party, **lui-même contournable par l'usurpation de statut
+     first-party déjà documentée (constat moyen 1/5)**, auquel cas aucune
+     limite HTTP ne s'applique — et même sans contournement, 300 appels
+     IA facturés/15 min par IP anonyme, sans compte, est un coût réel et
+     répétable indéfiniment (changer d'IP/session suffit à repartir à
+     zéro).
+  **Effet concret :** n'importe qui sur Internet, sans compte, peut générer
+  des appels facturés à l'API Gemini en boucle, avec un contenu
+  intégralement fabriqué (pas de vraie recherche nécessaire), en contournant
+  le cache par une simple variation du terme recherché — un vecteur de coût
+  direct pour la plateforme, cumulable indéfiniment et sans lien avec
+  l'usage réel du produit. Accessoirement, le contenu des tableaux étant
+  injecté tel quel dans le prompt, c'est aussi un point d'entrée pour une
+  injection de prompt (contenu de tweet fabriqué contenant des instructions
+  pour le modèle) — impact non approfondi ici (le texte généré ne revient
+  qu'à l'appelant anonyme lui-même), mais le vecteur de coût à lui seul
+  suffit au classement critique. Correctif à transmettre : exiger
+  `authenticateToken` sur cette route ; ne jamais accepter `users`/
+  `tweets`/`hashtags` du client — re-exécuter la recherche côté serveur à
+  partir de `q`/`type` et construire le contexte depuis les résultats
+  réels ; inclure `users`/`tweets`/`hashtags` (ou leurs IDs) dans la clé de
+  cache pour qu'elle ne soit plus contournable par une simple variation de
+  `q` ; ajouter un débit dédié, distinct et plus sévère que le limiteur de
+  recherche générique, sur ce point d'appel précis vers un fournisseur
+  facturé.
+  **NE PAS refaire cette recherche.**
+
+- **S3 — prochain pas concret :** les 5 fichiers à 1 candidat restants, par
   ordre alphabétique : `insightsRoutes.js`, `policierCongoChatRoutes.js`,
-  `searchRoutes.js`, `trackingRoutes.js`, `verificationStyleRoutes.js`,
-  `verifiedBadgeRoutes.js`. Une fois ces 6 fichiers couverts, le balayage
+  `trackingRoutes.js`, `verificationStyleRoutes.js`,
+  `verifiedBadgeRoutes.js` (`searchRoutes.js` déjà couvert ci-dessus, seul
+  candidat brut du fichier). Une fois ces 5 fichiers couverts, le balayage
   brut initial des 156 candidats sera intégralement traité — il restera
   alors à reprendre le seul point laissé ouvert plus haut dans cette
   section (`adRoutes.js` : routes `GET`/ciblage non revues, probablement
