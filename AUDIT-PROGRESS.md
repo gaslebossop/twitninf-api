@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 12
-  constats, dont 7 CRITIQUES, 2 ÉLEVÉS et 3 MOYENS.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 13
+  constats, dont 7 CRITIQUES, 2 ÉLEVÉS et 4 MOYENS.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -1033,8 +1033,65 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   recherche en base (`g_auth_sub`), scope correct, aucune action si compte
   introuvable. **Aucun constat.**
 
+- **S3 — CONSTAT MOYEN (4/4), déjà écrit, NE PAS REFAIRE :
+  `src/routes/progressiveRecommendationRoutes.js` — module entier de routes
+  de maintenance du moteur de recommandation protégé par `authenticateToken`
+  seul, sans contrôle de rôle ni limite de débit dédiée, deux d'entre elles
+  déclenchant chacune des centaines à des milliers d'opérations séquentielles
+  en base par appel.** Vérifié route par route (6 candidats bruts,
+  toutes montées `authenticateToken` seul, aucun `requireAdmin`/rôle
+  nommé, confirmé par lecture complète du fichier et de
+  `server.js:543` — `app.use('/api/progressive-recommendations',
+  progressiveRecommendationRoutes)`, aucun middleware englobant, aucun
+  limiteur dédié) :
+  1. `POST /track-interaction` (`:141`) : validation correcte
+     (enum fermée `validInteractionTypes`, scope `req.user.id`) — sain sur
+     l'angle validation, mais toujours sans rôle (impact faible, écrit une
+     seule ligne de tracking).
+  2. `POST /cleanup-cache` (`:475`) : vide deux caches en mémoire — même
+     motif déjà noté « mineur, non publié séparément » pour
+     `advancedAdRoutes.js POST /cleanup-cache` (dégradation de perf
+     partagée, pas de charge DB).
+  3. `POST /add-tweet` (`:505`) et `PUT /update-tweet` (`:540`) : un seul
+     `tweetId` non validé au-delà de sa présence, appelle
+     `recommendationEngine.addNewTweet`/`updateTweet` — impact limité à un
+     seul tweet par appel, pas de charge disproportionnée en soi.
+  4. **`POST /reload-cache` (`:575`) →
+     `recommendationEngine.loadCachedData()`
+     (`src/services/progressiveRecommendationEngine.js:348-372`) : charge
+     jusqu'à 500 tweets récents (`Tweet.findAll`, `limit: 500`), puis pour
+     CHAQUE tweet, en séquence (boucle `for...of`, deux `await` par
+     itération) : `determineTweetRecommendationGroup` (lecture/calcul) puis
+     `updateTweetRecommendationGroup` (écriture DB). Soit jusqu'à ~1000
+     requêtes séquentielles déclenchées par un seul appel HTTP.**
+  5. **`POST /tag-all-tweets` (`:630-661`) : même motif, en pire — charge
+     jusqu'à 1000 tweets non tagués (`Tweet.findAll`, `limit: 1000`,
+     commentaire du code `// Limiter pour éviter la surcharge` — le plafond
+     existe mais reste élevé), puis boucle séquentielle identique
+     (`determineTweetRecommendationGroup` +
+     `updateTweetRecommendationGroup` par tweet) : jusqu'à ~2000 requêtes
+     séquentielles par appel.**
+  6. `GET /cache-status` (`:602`) : lecture seule, aucun impact.
+  **Effet concret :** un compte authentifié quelconque (pas de rôle requis)
+  peut appeler `/reload-cache` ou `/tag-all-tweets` en boucle — seul frein,
+  le quota global de `server.js:279` (1000 req/15 min), lui-même
+  contournable par l'usurpation de statut first-party déjà documentée
+  (constat moyen 1/4 de cette section) — et faire exécuter à chaque appel
+  jusqu'à ~2000 requêtes DB séquentielles, sans qu'aucune de ces routes ne
+  serve un usage utilisateur normal (ce sont des routes d'opération interne,
+  pas des routes produit). C'est un vecteur de charge disproportionnée
+  (DoS applicatif faible-coût), pas une fuite de données ni un gain
+  économique — d'où le classement moyen et non critique/élevé, mais le
+  ratio 1 requête HTTP → jusqu'à 2000 requêtes DB en fait un vecteur
+  d'amplification notable. Correctif à transmettre : `requireAdmin` (ou
+  rôle équivalent) sur les 5 routes de mutation de ce fichier ; paralléliser
+  ou traiter par lot le rechargement/retaguage plutôt qu'une boucle
+  séquentielle stricte ; ajouter un `rateLimiter` dédié, sévère, sur
+  `/reload-cache` et `/tag-all-tweets` spécifiquement.
+  **NE PAS refaire cette recherche.**
+
 - **S3 — prochain pas concret :** reste de la liste régénérée
-  (`progressiveRecommendationRoutes.js`, `functionalEventRoutes.js`,
+  (`functionalEventRoutes.js`,
   `creatorIntelligenceRoutes.js`, `neuralRankRoutes.js`, `supportRoutes.js`,
   `tweetRoutes.js`, `nfMapRoutes.js`, `featureProposalRoutes.js`,
   `policierCongoAdminRoutes.js`, `contestRoutes.js`,
