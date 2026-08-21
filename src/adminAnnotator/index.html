@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Annotateur de tweets — admin</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <section id="loginScreen" class="login-screen">
+    <form id="loginForm" class="login-card">
+      <h1>Annotateur de tweets</h1>
+      <p class="login-sub">Accès réservé aux comptes admin / superadmin.</p>
+      <input type="text" id="loginUsername" placeholder="Nom d'utilisateur" autocomplete="username" required />
+      <input type="password" id="loginPassword" placeholder="Mot de passe" autocomplete="current-password" required />
+      <button type="submit">Se connecter</button>
+      <p id="loginError" class="login-error"></p>
+    </form>
+  </section>
+
+  <div id="appRoot" class="hidden">
+    <header class="topbar">
+      <div class="progress">
+        <span id="progressText">0 / 0 annotés</span>
+        <div class="bar"><div class="bar-fill" id="progressFill"></div></div>
+      </div>
+      <div class="topbar-actions">
+        <a href="#" id="exportLink" class="export-link">Exporter (.jsonl)</a>
+        <button type="button" id="logoutBtn" class="logout-btn">Déconnexion</button>
+      </div>
+    </header>
+
+    <main id="app">
+      <section id="doneScreen" class="done-screen hidden">
+        <h1>Terminé 🎉</h1>
+        <p>Tous les tweets disponibles ont été annotés.</p>
+      </section>
+
+      <section id="tweetScreen" class="tweet-screen">
+        <div class="tweet-card">
+          <div class="tweet-meta">
+            <span id="tweetAuthor" class="tweet-author"></span>
+            <span id="tweetDate" class="tweet-date"></span>
+            <span id="dirtyBadge" class="dirty-badge hidden">● non sauvegardé</span>
+          </div>
+          <div id="tweetText" class="tweet-text"></div>
+          <p class="hint">Sélectionne un passage à la souris puis touche <kbd>I</kbd> pour marquer une insulte. Clique un passage surligné pour le retirer.</p>
+        </div>
+
+        <div class="panel">
+          <div class="field">
+            <div class="field-label">Score spam <span class="key-hint">1-9, 0=10</span></div>
+            <div id="spamScoreRow" class="score-row"></div>
+          </div>
+
+          <div class="field">
+            <div class="field-label">Score qualité <span class="key-hint">Shift+1-9, Shift+0=10</span></div>
+            <div id="qualityScoreRow" class="score-row"></div>
+          </div>
+
+          <div class="field">
+            <div class="field-label">Thème</div>
+            <div id="themeGrid" class="theme-grid"></div>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <div class="field-label">Sentiment</div>
+              <div class="button-pair">
+                <button type="button" class="choice-btn" id="btnPositif" data-value="positif">Positif <kbd>P</kbd></button>
+                <button type="button" class="choice-btn" id="btnNegatif" data-value="negatif">Négatif <kbd>N</kbd></button>
+              </div>
+            </div>
+
+            <div class="field">
+              <div class="field-label">Conformité</div>
+              <div class="button-pair">
+                <button type="button" class="choice-btn" id="btnConforme" data-value="true">Conforme <kbd>O</kbd></button>
+                <button type="button" class="choice-btn" id="btnNonConforme" data-value="false">Non-conforme <kbd>X</kbd></button>
+              </div>
+            </div>
+          </div>
+
+          <div class="field hidden" id="rulesField">
+            <div class="field-label">Règle violée</div>
+            <div id="ruleGrid" class="theme-grid"></div>
+          </div>
+
+          <div class="actions">
+            <button type="button" id="btnPrev" class="action-btn secondary">← Précédent</button>
+            <button type="button" id="btnSkip" class="action-btn secondary">Passer <kbd>S</kbd></button>
+            <button type="button" id="btnValidate" class="action-btn primary">Valider <kbd>Entrée</kbd></button>
+          </div>
+
+          <p id="statusText" class="status-text"></p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

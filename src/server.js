@@ -101,6 +101,7 @@ const storyRoutes = require('./routes/storyRoutes');
 const spotlightRoutes = require('./routes/spotlightRoutes');
 const spotifyRoutes = require('./routes/spotifyRoutes');
 const moderationRoutes = require('./routes/moderationRoutes');
+const tweetAnnotatorRoutes = require('./routes/tweetAnnotatorRoutes');
 const recommendationRoutes = require('./routes/recommendationRoutes');
 const behaviorRoutes = require('./routes/behaviorRoutes');
 const trackingRoutes = require('./routes/trackingRoutes');
@@ -448,6 +449,17 @@ app.use('/anim', express.static(path.join(__dirname, './anim'), {
   }
 }));
 
+// Page interne d'annotation manuelle de tweets (dataset anti-spam). Gate
+// réel côté admin sur les routes /api/moderation/annotator/* — cette page
+// statique n'est qu'un client, pas no-cache par prudence pendant qu'elle
+// bouge encore.
+app.use('/admin/annotator', express.static(path.join(__dirname, './adminAnnotator'), {
+  etag: true,
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'no-cache');
+  }
+}));
+
 /**
  * Place d'invitation, telle que la voit celui qui la scanne : `/i/<jeton>`.
  *
@@ -529,6 +541,7 @@ app.use('/api/spotlight', spotlightRoutes);
 app.use('/api/spotify', spotifyRoutes);
 
 app.use('/api/moderation', moderationRoutes);
+app.use('/api/moderation/annotator', tweetAnnotatorRoutes);
 
 // Modération communautaire (BÊTA) — pour l'instant consommée par la seule app Windows.
 app.use('/api/community-moderation', require('./routes/communityModerationRoutes'));
