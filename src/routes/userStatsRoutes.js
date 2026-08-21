@@ -5,6 +5,7 @@ const { Tweet, User, TweetLike, TweetRetweet, UserBehaviorData, sequelize } = re
 const { Op } = require('sequelize');
 const logger = require('../utils/logger');
 const { resolveTimeZone, hourInZoneSql } = require('../utils/timezone');
+const { getPlatformCurrency } = require('../economy/platformCurrency');
 
 const formatDateKey = (input) => {
   if (!input) return '';
@@ -424,7 +425,7 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
     });
 
     const followersGainedCounts = await sequelize.query(`
-      SELECT 
+      SELECT
         DATE(created_at) as date,
         COUNT(*) as followers_gained
       FROM user_follows
@@ -442,6 +443,83 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       type: sequelize.QueryTypes.SELECT
     });
 
+    // Temps de lecture reçu, jour par jour.
+    //
+    // Il existait déjà, mais uniquement agrégé À LA SEMAINE, par
+    // `economy/creatorPool/signals.js`, pour calculer la part du pot. Aucune
+    // surface ne pouvait donc montrer une courbe de temps de lecture : l'app
+    // n'avait le choix qu'entre la semaine ou une répartition inventée à
+    // partir des vues du jour. Cette requête donne la vraie granularité.
+    //
+    // Les trois règles de `signals.js` sont reprises telles quelles, sinon les
+    // deux surfaces afficheraient deux temps différents pour la même lecture :
+    //   * plafond par ligne à `DWELL_CAP_MS` (600 000 ms) — un téléphone posé
+    //     sur la table ne fabrique pas de l'attention ;
+    //   * la lecture de l'auteur sur ses propres publications ne compte pas ;
+    //   * le cast de `target_id` est protégé par un CASE, parce que la colonne
+    //     est polymorphe et porte aussi des 'promoted:<id>' (voir la note sur
+    //     `viewCounts` plus haut).
+    const dwellTotals = await sequelize.query(`
+      SELECT
+        DATE(ubd.timestamp) as date,
+        COALESCE(SUM(LEAST(COALESCE((ubd.context_data->>'time_spent_ms')::bigint, 0), 600000)), 0) as dwell_ms,
+        COUNT(*) as dwell_events
+      FROM user_behavior_data ubd
+      JOIN tweets t ON t.id = CASE WHEN ubd.target_type = 'tweet' AND ubd.target_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN ubd.target_id::uuid END
+      WHERE t.user_id = :userId::uuid
+        AND ubd.action_type = 'time_spent'
+        AND ubd.target_type = 'tweet'
+        AND ubd.user_id IS NOT NULL
+        AND ubd.user_id <> t.user_id
+        AND ubd.is_data_test IS NOT TRUE
+        AND ubd.timestamp >= :startDate
+        AND ubd.timestamp <= :endDate
+        AND t.deleted_at IS NULL
+      GROUP BY DATE(ubd.timestamp)
+    `, {
+      replacements: {
+        userId,
+        startDate: startDate.toISOString().split('T')[0],
+        endDate: endDateIso
+      },
+      type: sequelize.QueryTypes.SELECT
+    });
+
+    // Ce que la plateforme a versé, jour par jour.
+    //
+    // `type = 'REWARD'` est ce qu'écrit `economy/ledger.js` pour toute
+    // récompense créateur, part du pot hebdomadaire comprise (voir
+    // `rewardFromTreasury`). Un virement reçu d'une autre personne est un
+    // 'TRANSFER' et n'entre donc pas ici : ce n'est pas de la monétisation.
+    //
+    // La somme est bornée à la monnaie de plateforme. Additionner des montants
+    // libellés dans des monnaies communautaires différentes produirait un
+    // nombre qui ne veut rien dire.
+    const platformCurrency = await getPlatformCurrency();
+    const earningTotals = platformCurrency
+      ? await sequelize.query(`
+          SELECT
+            DATE(created_at) as date,
+            COALESCE(SUM(amount), 0) as earnings
+          FROM transactions
+          WHERE to_user_id = :userId::uuid
+            AND currency_id = :currencyId::uuid
+            AND type = 'REWARD'
+            AND status = 'COMPLETED'
+            AND created_at >= :startDate
+            AND created_at <= :endDate
+          GROUP BY DATE(created_at)
+        `, {
+          replacements: {
+            userId,
+            currencyId: platformCurrency.id,
+            startDate: startDate.toISOString().split('T')[0],
+            endDate: endDateIso
+          },
+          type: sequelize.QueryTypes.SELECT
+        })
+      : [];
+
     // Combiner les données
     const dailyStats = dates.map(date => {
       const dateStr = date.toISOString().split('T')[0];
@@ -454,7 +532,9 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
       const sharesData = sharesCounts.find(s => formatDateKey(s.date) === dateStr);
       const behaviorData = behaviorCounts.find(b => formatDateKey(b.date) === dateStr);
       const followersData = followersGainedCounts.find(f => formatDateKey(f.date) === dateStr);
-      
+      const dwellData = dwellTotals.find(d => formatDateKey(d.date) === dateStr);
+      const earningData = earningTotals.find(e => formatDateKey(e.date) === dateStr);
+
       return {
         date: dateStr,
         tweets: tweetData ? parseInt(tweetData.tweets) : 0,
@@ -464,7 +544,15 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
         comments: commentsData ? parseInt(commentsData.comments) : 0,
         shares: sharesData ? parseInt(sharesData.shares) : 0,
         profile_views: behaviorData ? parseInt(behaviorData.profile_views) : 0,
-        followers_gained: followersData ? parseInt(followersData.followers_gained) : 0
+        followers_gained: followersData ? parseInt(followersData.followers_gained) : 0,
+        // Temps de lecture RÉELLEMENT chronométré ce jour-là, en
+        // millisecondes. `dwell_events` sert au client à distinguer
+        // « personne n'a lu » de « personne n'était instrumenté » : sans lui,
+        // un zéro est ambigu et l'app afficherait une chute qui n'en est pas
+        // une.
+        dwell_ms: dwellData ? parseInt(dwellData.dwell_ms) : 0,
+        dwell_events: dwellData ? parseInt(dwellData.dwell_events) : 0,
+        earnings: earningData ? decimal(earningData.earnings) : 0
       };
     });
 
@@ -474,6 +562,11 @@ router.get('/:userId/daily', authenticateToken, async (req, res) => {
         userId,
         timeframe,
         dailyStats,
+        // Le symbole accompagne les montants : le client ne doit pas coder
+        // 'NF' en dur, la monnaie de plateforme est résolue en base.
+        currency: platformCurrency
+          ? { id: platformCurrency.id, symbol: platformCurrency.symbol, name: platformCurrency.name }
+          : null,
         generated_at: new Date().toISOString()
       }
     });
