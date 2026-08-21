@@ -1090,9 +1090,31 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   `/reload-cache` et `/tag-all-tweets` spécifiquement.
   **NE PAS refaire cette recherche.**
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `functionalEventRoutes.js` (5/5
+  candidats).** Les 5 routes de mutation (`createEvent`, `updateEvent`,
+  `activateEvent`, `deactivateEvent`, `deleteEvent`,
+  `initialize-defaults`) sont **toutes** derrière `requireAdmin` (vérifié
+  route par route, aucune exception). `createEvent`/`updateEvent`
+  transmettent le corps de requête tel quel au service (assignation de
+  masse potentielle), mais contrairement au constat critique 5/5
+  (`adRoutes.js`, accessible à tout utilisateur authentifié), l'accès est
+  déjà restreint aux administrateurs — surface de risque très réduite
+  (opérateur déjà pleinement privilégié), pas retenu comme constat
+  distinct. **Aucun constat.**
+
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `creatorIntelligenceRoutes.js`
+  (5/5 candidats).** Toutes les routes derrière `requirePremium`/
+  `requirePro`. `POST /generator` : système de crédits entièrement
+  server-side (`reserveCredit`/`refundCredit` dans
+  `customTweetGenerationService.js`, aucune valeur de crédit acceptée du
+  client), texte utilisateur borné en longueur avant tout appel au modèle
+  de génération. `POST /predict`, `POST /radar/idea`,
+  `POST /copilot/suggest`, `POST /copilot/review` : contenu utilisateur
+  toujours scopé à `req.user.id`, aucune valeur numérique/économique
+  acceptée du client. **Aucun constat.**
+
 - **S3 — prochain pas concret :** reste de la liste régénérée
-  (`functionalEventRoutes.js`,
-  `creatorIntelligenceRoutes.js`, `neuralRankRoutes.js`, `supportRoutes.js`,
+  (`neuralRankRoutes.js`, `supportRoutes.js`,
   `tweetRoutes.js`, `nfMapRoutes.js`, `featureProposalRoutes.js`,
   `policierCongoAdminRoutes.js`, `contestRoutes.js`,
   `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
