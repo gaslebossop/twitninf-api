@@ -972,6 +972,25 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   prochain tour avant de piocher dans le reste par ordre de nombre de
   candidats).
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `events.js` + `eventQuestService.js`
+  (8/8 candidats).** Module particulièrement soigné (commentaires défensifs
+  explicites tout au long du service, rares ailleurs dans le dépôt).
+  `claim(userId, questId)` : progression recalculée côté serveur
+  (`measureAll`), complétion et prérequis revérifiés à la remise (pas
+  seulement affichés), contrainte unique en base empêchant une double
+  réclamation même en cas de course concurrente, récompense entièrement
+  définie par la configuration serveur de la quête — **aucune valeur
+  numérique acceptée du client à aucune étape**. L'octroi passe par
+  `EconomyLedger.rewardFromTreasury` (même garde que le reste du grand
+  livre), et le commentaire du code documente explicitement pourquoi ce
+  choix rend la dérive de masse monétaire impossible (la trésorerie refuse
+  si elle est à sec). `reportSignal` : enregistre uniquement un
+  identifiant d'idempotence fourni par le client, sans aucune valeur de
+  progression — la remise réelle ne s'appuie jamais sur le nombre de
+  signaux envoyés sans re-vérification. Routes admin (création/modif/
+  activation/suppression d'événement) toutes derrière `requireAdmin`.
+  **Aucun constat.**
+
 ## Règles de la routine
 
 - ⚠️ **`.gitignore` ligne 30 contient `*.md`.** Un nouveau fichier
