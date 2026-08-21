@@ -453,7 +453,13 @@ app.use('/anim', express.static(path.join(__dirname, './anim'), {
 // réel côté admin sur les routes /api/moderation/annotator/* — cette page
 // statique n'est qu'un client, pas no-cache par prudence pendant qu'elle
 // bouge encore.
-app.use('/admin/annotator', express.static(path.join(__dirname, './adminAnnotator'), {
+//
+// Chemin volontairement HORS de /admin/ : nginx a déjà un location /admin/
+// qui route tout vers un autre service sur le port 3002 (le cockpit
+// infrastructure) — une page servie ici sous /admin/annotator ne serait
+// jamais atteinte par ce process, elle se ferait intercepter en 404 par
+// l'autre service avant même d'arriver à Express.
+app.use('/tools/annotator', express.static(path.join(__dirname, './adminAnnotator'), {
   etag: true,
   setHeaders(res) {
     res.setHeader('Cache-Control', 'no-cache');
