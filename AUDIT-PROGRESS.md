@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 10
-  constats, dont 5 CRITIQUES, 2 ÉLEVÉS et 3 MOYENS.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 11
+  constats, dont 6 CRITIQUES, 2 ÉLEVÉS et 3 MOYENS.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -881,6 +881,46 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   fichiers, non encore ouverts), puis le reste de la liste régénérée
   (`events.js`, `userRoutes.js` — hors la portion déjà vérifiée saine
   ci-dessus —, `progressiveRecommendationRoutes.js`, etc.).
+
+- **S3 — CONSTAT CRITIQUE (6/6), déjà écrit, NE PAS REFAIRE : module
+  `tweetMonetizationService` (fichier `tweetMonetizationRoutes.js` +
+  service associé), route de distribution directe.** Chaîne vérifiée de
+  bout en bout dans le code : la route accepte à la fois l'identifiant du
+  tweet et l'identifiant du bénéficiaire depuis la requête du client, sans
+  jamais vérifier que ce bénéficiaire est l'auteur réel du tweet désigné —
+  seule sa propre éligibilité au programme de monétisation est vérifiée,
+  pas son lien avec le tweet. Le montant est recalculé à chaque appel à
+  partir de compteurs d'engagement cumulés (vues, likes, commentaires,
+  partages, temps de visionnage), **sans jamais les remettre à zéro ni
+  marquer l'opération comme déjà effectuée** — contrairement au chemin
+  automatisé équivalent du même service, qui lui remet ces compteurs à
+  zéro et pose un indicateur dédié après paiement (vérifié dans le code :
+  c'est la seule fonction du service qui le fait, et la route directe ne
+  l'appelle jamais). Aucun limiteur de débit dédié sur cette route (vérifié
+  dans `server.js` — seul le quota global s'applique, lui-même
+  contournable par l'usurpation first-party déjà documentée en constat
+  moyen). Le montant crédité passe par `NewEconomyService.rewardUser` →
+  le grand livre, donc plafonné par la trésorerie disponible mais pas par
+  autre chose. **Impact vérifié :** un compte qui remplit légitimement la
+  condition d'accès (abonnement payant actif + programme de monétisation
+  accepté) peut rejouer ce montant indéfiniment sur son propre tweet sans
+  aucune nouvelle activité, et/ou le rediriger vers son propre compte
+  depuis un tweet appartenant à un autre créateur également éligible.
+  Correctif à transmettre : faire porter cette route par le même mécanisme
+  de consommation d'état que le chemin automatisé (compteurs remis à zéro
+  et tweet marqué comme déjà monétisé dans la même transaction que le
+  crédit), et dériver le bénéficiaire de l'auteur réel du tweet plutôt que
+  d'un champ du corps de requête. **NE PAS refaire cette recherche.**
+
+- **S3 — `tweetMonetizationRoutes.js` — reste à vérifier :** les routes
+  `GET` (`rpm-rates`, `eligibility/:tweetId`, `reward/:tweetId`, `stats`,
+  `preview`, `preview-earnings`, `user/:userId/eligible`) et la route
+  `POST /process-all` elle-même (son propre appel interne à
+  `distributeReward` avec un montant précalculé — voir le commentaire du
+  code cité dans le constat 6/6 : ce paramètre existe précisément pour ce
+  chemin-là) — probable, mais pas encore formellement confirmé que ce
+  chemin-ci est sain de bout en bout au-delà de ce qui est déjà noté.
+  `inventoryRoutes.js`, `monetizationProgramRoutes.js` toujours pas ouverts.
 
 ## Règles de la routine
 
