@@ -584,11 +584,26 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
           return null;
         }
 
+        // Score et confiance du moteur, restreints aux tweets RÉELLEMENT
+        // servis : l'hydratation en perd (tweet supprimé entre le classement
+        // et la lecture) et l'injection publicitaire en ajoute qui n'en ont
+        // pas. Relayer la liste brute enverrait des lignes qui ne
+        // correspondent à rien à l'écran.
+        //
+        // C'est construit ICI, dans le `producer`, et donc AVANT
+        // `withFeedCache` : attacher les scores après la mise en cache
+        // servirait une charge cachée sans eux, et la question explicite
+        // resterait muette pour tout lecteur tombant sur un cache chaud —
+        // c'est-à-dire presque tout le monde.
+        const servedIds = new Set(tweets.map((t) => String(t?.id)));
+        const scores = result.scores.filter((s) => servedIds.has(String(s?.tweet_id)));
+
         return {
           success: true,
           engine: 'rust-neural-rank',
           data: {
             recommendations: tweets,
+            scores,
             count: tweets.length,
             algorithm: result.algorithm,
             latency_ms: result.latencyMs,

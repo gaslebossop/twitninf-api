@@ -219,6 +219,20 @@ async function getRecommendations(userId, opts = {}) {
 
   return {
     tweetIds: result.tweet_ids,
+    // Ce que le moteur sait de chacun des tweets qu'il vient de servir :
+    // `[{ tweet_id, score, confidence }]`, aligné sur la page.
+    //
+    // La CONFIANCE est ce qui compte ici, et elle ne dit pas « ce tweet est
+    // bon » — c'est le score qui répond à ça. Elle dit sur quoi la décision
+    // s'appuie : ce qu'on sait du LECTEUR multiplié par ce qu'on sait du
+    // TWEET. Basse, elle signale que le moteur devine, et c'est exactement le
+    // moment où l'app pose la question explicite (« ça t'intéresse ? »).
+    //
+    // Le champ traversait jusqu'ici sans être lu : l'app portait déjà son
+    // déclencheur (`HESITATION_CEILING = 0.45` dans `utils/algoCheck`), mais
+    // `_recommendation_confidence` valait 0 en permanence faute de relais, et
+    // le déclencheur n'a jamais pu s'armer une seule fois.
+    scores: Array.isArray(result.scores) ? result.scores : [],
     // Publicités ciblées par les signaux de l'algorithme (profil lecteur,
     // vecteur de goût, heures actives) — voir `rust-recommender/src/ads/`.
     // Vide dans le cas courant : aucune campagne active ou aucune qui
