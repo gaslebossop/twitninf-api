@@ -1261,9 +1261,27 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   autres routes du dépôt) — sans conséquence, la requête paramétrée ne
   matche simplement rien si la valeur n'est pas un UUID. **Aucun constat.**
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `featureProposalRoutes.js` (3/3
+  candidats).** Module particulièrement soigné (le seul du dépôt qui
+  documente explicitement dans ses commentaires le risque d'injection de
+  prompt sur son agent automatisé, et s'en protège en conséquence).
+  `POST /proposals` : limiteur de débit dédié + plafond d'idées en cours
+  côté service. `POST /agent/proposals/:id/complete` : jeton d'agent dédié
+  comparé en temps constant (`tokenMatches`), transition de statut limitée
+  à `accepted → built` uniquement, **et le montant demandé par l'agent est
+  systématiquement écrasé par `Math.min(requested,
+  FORGE_AGENT_MAX_REWARD_NF)` côté serveur** — même si la validation du
+  corps de requête était contournée, aucun versement ne peut dépasser le
+  plafond. `PATCH /proposals/:id` (staff) : rôle revérifié en base (jamais
+  depuis le JWT), montant validé par `Number.isFinite(amount) &&
+  amount >= 0` avant tout versement (**contrairement au défaut déjà
+  documenté sur `economyAdminRoutes.js updateWalletBalance`, ici `NaN` est
+  bien rejeté, pas absorbé en 0**), refus sans motif écrit interdit, un
+  échec du grand livre annule toute la transaction (pas d'idée marquée
+  "construite" sans versement réel). **Aucun constat.**
+
 - **S3 — prochain pas concret :** reste de la liste régénérée
-  (`featureProposalRoutes.js`,
-  `policierCongoAdminRoutes.js`, `contestRoutes.js`,
+  (`policierCongoAdminRoutes.js`, `contestRoutes.js`,
   `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
   validation cette fois —, `developerAdminRoutes.js`,
   `shadowbanAdminRoutes.js`). Ordre par nombre de candidats bruts décroissant.
