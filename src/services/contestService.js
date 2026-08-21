@@ -359,7 +359,7 @@ async function drawContest(contestId) {
       );
     });
 
-    await notifyResults(contest, winners.map((w) => w.entry), Notification);
+    await notifyResults(contest, entries, winners.map((w) => w.entry), Notification);
 
     logger.info(
       `[Concours] ${contestId} tiré : ${winners.length} gagnant(s) sur ${eligible.length} éligible(s) (${entries.length} participant(s))`
@@ -456,15 +456,22 @@ async function refundEscrow(contest, transaction) {
 }
 
 /**
- * Notifie les gagnants et l'organisateur. Le type reste `system` avec un
- * sous-type dans `metadata.kind` : ajouter une valeur à l'ENUM `type` des
- * notifications imposerait une migration à toute la table.
+ * Notifie les gagnants, les participants non tirés et l'organisateur. Le
+ * type reste `system` avec un sous-type dans `metadata.kind` : ajouter une
+ * valeur à l'ENUM `type` des notifications imposerait une migration à toute
+ * la table.
+ *
+ * `entries` contient TOUS les participants (gagnants inclus) : sans notifier
+ * aussi les non-gagnants, seuls les gagnants et l'organisateur apprenaient
+ * que le tirage avait eu lieu — les autres participants n'avaient aucun
+ * moyen de savoir que leur concours était terminé, ni où revoir le résultat.
  */
-async function notifyResults(contest, winners, Notification) {
+async function notifyResults(contest, entries, winners, Notification) {
   const prize = `${roundTWC(Number(contest.prize_amount))} ${contest.prize_currency}`;
   // `paid` = les portefeuilles ont bougé. Sur un concours hérité (sans
   // séquestre), annoncer un crédit qui n'a pas eu lieu serait un mensonge.
   const paidOut = contest.escrow_status === 'paid';
+  const winnerIds = new Set(winners.map((w) => w.user_id));
   try {
     for (const winner of winners) {
       await Notification.create({
@@ -479,6 +486,23 @@ async function notifyResults(contest, winners, Notification) {
         priority: 'high',
         content: { contest_id: contest.id, rank: winner.rank, prize },
         metadata: { kind: 'contest_won', contest_id: contest.id },
+      });
+    }
+    for (const entry of entries) {
+      if (winnerIds.has(entry.user_id)) continue;
+      await Notification.create({
+        recipient_id: entry.user_id,
+        sender_id: contest.creator_id,
+        tweet_id: contest.tweet_id,
+        type: 'system',
+        title: 'Le tirage du concours a eu lieu',
+        message:
+          winners.length > 0
+            ? "Tu n'as pas été tiré au sort cette fois. Viens voir qui a gagné."
+            : 'Aucun participant ne remplissait les conditions au moment du tirage.',
+        priority: 'normal',
+        content: { contest_id: contest.id },
+        metadata: { kind: 'contest_ended', contest_id: contest.id },
       });
     }
     await Notification.create({
