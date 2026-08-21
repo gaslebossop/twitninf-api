@@ -806,12 +806,33 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   risque (lecture seule), à confirmer si le temps le permet, sinon fichier
   considérable comme couvert sur son périmètre à risque (écriture/argent).**
 
-- **S3 — mise à jour de la liste de priorité :** après `adRoutes.js`,
-  prochain pas concret = `authRoutes.js` (9 candidats, priorité haute —
-  authentification), puis `premiumRoutes.js`, `monetizationRoutes.js`,
-  `tweetMonetizationRoutes.js`, `inventoryRoutes.js`, `monetizationProgramRoutes.js`
-  (tous « argent »), avant le reste de la liste régénérée au tour précédent
-  (`events.js`, `userRoutes.js`, `progressiveRecommendationRoutes.js`, etc.).
+- **S3 — mise à jour de la liste de priorité :** `adRoutes.js` et
+  `authRoutes.js` traités (voir ci-dessus/ci-dessous). Prochain pas concret =
+  `premiumRoutes.js`, `monetizationRoutes.js`, `tweetMonetizationRoutes.js`,
+  `inventoryRoutes.js`, `monetizationProgramRoutes.js` (tous « argent »),
+  avant le reste de la liste régénérée au tour précédent (`events.js`,
+  `userRoutes.js`, `progressiveRecommendationRoutes.js`, etc.).
+
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `authRoutes.js` (9/9 candidats
+  bruts).** Vérifié en détail car priorité haute (authentification) :
+  `register`/`login` ont un limiteur de débit dédié (`server.js:301-312`,
+  100/15 min), contrairement à `forgot-password` — mais ce point précis est
+  déjà documenté sain dans la liste « vérifié sain » plus haut (jetons
+  écrasés à chaque demande, envoi d'e-mail non implémenté, donc pas
+  d'accumulation ni de fuite exploitable pour l'instant). `PUT /profile`
+  (`authService.js:586` `updateProfile`) : **liste blanche de champs
+  explicite** (`allowedFields`, une boucle nommée) avant toute écriture —
+  contrairement au constat critique 5/5 sur `adRoutes.js`, aucune assignation
+  de masse ici ; changer de pseudo revoque la vérification du compte
+  (comportement voulu, pas un défaut). `updateDemographics`,
+  `changePassword`, `resetPassword` (token JWT signé vérifié avant toute
+  comparaison, donc la comparaison de chaîne non constante en temps sur le
+  jeton stocké n'est pas exploitable), `sessions`/`revokeSession` (scopés
+  `user_id`) : tous à paramètres nommés ou scope vérifié, rien trouvé.
+  `register` (service) : whitelist explicite (`username`, `full_name`,
+  `password`, `platform`), aucun champ de rôle/statut acceptable depuis le
+  client. `/stats`, `/search`, `/popular`, `/performance-test` : routes non
+  implémentées (stubs), aucune donnée réelle exposée. **Aucun constat.**
 
 ## Règles de la routine
 
