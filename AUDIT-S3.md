@@ -4,11 +4,14 @@
 > la gravité**. Aucun chemin exact, aucune méthode d'exploitation n'y figure.
 > Le détail est transmis au propriétaire hors dépôt.
 
-## ⏳ Section EN COURS — décompte partiel
+## ✅ Section TERMINÉE
 
-Cette section n'est **pas terminée**. Le décompte ci-dessous porte sur la
-partie déjà couverte ; il augmentera. L'état de reprise est tenu à jour dans
-`AUDIT-PROGRESS.md`.
+Le périmètre déclaré ci-dessous a été couvert dans son intégralité :
+l'ensemble des routes d'écriture (`POST`/`PUT`/`PATCH`) du dépôt a été
+recensé par balayage automatisé (156 candidats initiaux), puis chaque
+candidat a été trié et vérifié individuellement, fichier par fichier.
+L'historique complet de la couverture — fichier par fichier, avec ce qui a
+été trouvé sain et pourquoi — est conservé dans `AUDIT-PROGRESS.md`.
 
 ## Périmètre
 
@@ -18,7 +21,7 @@ sur les routes d'écriture, upload (type réel, taille, chemin), limitation de
 débit sur connexion/inscription/mot de passe oublié, et logique économique :
 un client peut-il influencer un montant ou rejouer une opération créditrice.
 
-## Décompte partiel
+## Décompte final
 
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
@@ -234,10 +237,20 @@ couvre cette route.
   fonctionnel potentiel pour l'utilisateur qui réessaierait après un
   timeout.
 
+## Couverture
+
+L'intégralité des routes d'écriture du dépôt a été passée en revue sous
+l'angle validation/injection/abus, en plus des points de périmètre
+spécifiques (secrets, upload, limitation de débit, logique économique).
+Une large majorité des fichiers examinés — dont plusieurs modules qui
+manipulent directement de l'argent ou des objets à valeur réelle — n'a
+donné lieu à aucun constat : validation par bornes explicites, listes
+blanches de champs, vérification d'appartenance systématique, et montants
+recalculés côté serveur plutôt qu'acceptés du client. Le détail complet de
+ce qui a été vérifié sain, fichier par fichier, est conservé dans
+`AUDIT-PROGRESS.md`.
+
 ## Suite
 
-Le détail complet — chemins exacts, méthode, correctif — est transmis au
-propriétaire hors dépôt. La poursuite de la section (validation des routes
-d'écriture restantes, limitation de débit sur authentification, rejeu
-d'opération créditrice sur les autres routes économiques) est décrite dans
-`AUDIT-PROGRESS.md`.
+Le détail complet des 17 constats ci-dessus — chemins exacts, méthode,
+correctif — est transmis au propriétaire hors dépôt.

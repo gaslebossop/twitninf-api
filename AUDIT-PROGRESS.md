@@ -1,3 +1,5 @@
+AUDIT TERMINÉ
+
 # Audit approfondi — twitninf-api
 
 Suivi d'avancement. Une routine périodique traite **une section à la fois**,
@@ -20,17 +22,19 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 | B2 | Robustesse | Erreurs et journaux | **TERMINÉE** | `AUDIT-B2.md` |
 | S1 | Sécurité | Secrets dans l'historique git | **TERMINÉE** | `AUDIT-S1.md` |
 | S2 | Sécurité | Autorisation et IDOR | **TERMINÉE (+1 constat ajouté après coup)** | `AUDIT-S2.md` |
-| S3 | Sécurité | Injection, validation, abus | **EN COURS** | `AUDIT-S3.md` |
+| S3 | Sécurité | Injection, validation, abus | **TERMINÉE** | `AUDIT-S3.md` |
 
-## REPRENDRE À
+## AUDIT TERMINÉ — toutes les sections sont closes
 
-> Ligne de reprise, tenue à jour **après chaque constat**. La session peut
-> s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
+> Cette routine peut être désactivée : il n'y a plus de section À FAIRE ni
+> EN COURS. Les lignes ci-dessous restent pour mémoire (historique complet
+> de la couverture, utile si une reprise ou une extension du périmètre est
+> demandée plus tard) mais **aucune analyse supplémentaire n'est
+> nécessaire**.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 17
-  constats, dont 10 CRITIQUES, 2 ÉLEVÉS et 5 MOYENS.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
-  **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
+  S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS), **S3 (17, dont 10 CRITIQUES, 2
+  ÉLEVÉS et 5 MOYENS)** — **TOUTES LES SECTIONS R1 à S3 TERMINÉES.**
 
 - **S2 — CONSTAT CRITIQUE AJOUTÉ APRÈS CLÔTURE, déjà écrit, NE PAS REFAIRE :
   `userRoutes.js`, quatre routes de modération de compte
@@ -1513,8 +1517,26 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   audiences) — notées probablement à faible risque (lecture seule) lors du
   passage initial sur ce fichier.
 
-- **S3 — prochain pas concret :** revenir sur `adRoutes.js` (routes `GET`
-  restantes, ci-dessus) ; si rien de neuf, S3 peut passer TERMINÉE.
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `adRoutes.js` — routes `GET`
+  restantes (9/9 : `/campaigns`, `/advertisements`, `/campaigns/:id/stats`,
+  `/advertisements/:id/stats`, `/eligible`, `/balance`, `/stats`,
+  `/targeting/options`, `/targeted/me`).** Listes et statistiques toutes
+  scopées `user_id: req.user.id` (`findOne`/`findAndCountAll` avec
+  `where` incluant l'appartenance, ou requête paramétrée avec
+  `replacements: { userId: req.user.id }`). `/targeting/options` : requêtes
+  SQL agrégées lourdes mais entièrement paramétrées, aucune entrée client
+  n'influence une colonne ou une clause — pas de risque d'injection.
+  `status` en paramètre de requête sur `/campaigns` est utilisé comme
+  VALEUR dans un `where` Sequelize, jamais comme nom de colonne — motif
+  déjà jugé sain ailleurs dans le dépôt. **Aucun constat.**
+
+- **S3 — balayage brut des 156 candidats initiaux + point resté ouvert sur
+  `adRoutes.js` : INTÉGRALEMENT TRAITÉS.** Plus aucun candidat connu à
+  vérifier pour cette section. **S3 peut être considérée comme couvrant
+  l'intégralité de son périmètre déclaré** (SQL/injection, validation des
+  routes d'écriture, upload, limitation de débit, logique économique) —
+  passage à TERMINÉE au prochain tour, avec le récapitulatif final dans
+  `AUDIT-S3.md`.
 
 - **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `events.js` + `eventQuestService.js`
   (8/8 candidats).** Module particulièrement soigné (commentaires défensifs
