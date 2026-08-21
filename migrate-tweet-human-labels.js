@@ -38,6 +38,10 @@ async function migrate() {
         violation_rule VARCHAR(40),
         insult_spans JSONB NOT NULL DEFAULT '[]',
         annotator_id UUID REFERENCES users(id),
+        -- 'human' = soumis via la page /tools/annotator par un admin connecté ;
+        -- toute autre valeur ('claude', ...) = généré en masse hors UI, à
+        -- distinguer du jugement humain pour qui consomme le dataset ensuite.
+        source VARCHAR(20) NOT NULL DEFAULT 'human',
         skipped BOOLEAN NOT NULL DEFAULT false,
         annotated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         CONSTRAINT chk_theme CHECK (theme IS NULL OR theme IN (${themeList})),
@@ -61,6 +65,11 @@ async function migrate() {
 
     await client.query(
       'CREATE INDEX IF NOT EXISTS idx_tweet_human_labels_tweet_id ON tweet_human_labels(tweet_id)',
+    );
+
+    // Patch une table déjà créée avant l'ajout de `source`.
+    await client.query(
+      "ALTER TABLE tweet_human_labels ADD COLUMN IF NOT EXISTS source VARCHAR(20) NOT NULL DEFAULT 'human'",
     );
 
     console.log('✅ Table tweet_human_labels prête.');

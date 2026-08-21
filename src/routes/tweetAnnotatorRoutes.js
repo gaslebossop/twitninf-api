@@ -165,7 +165,7 @@ router.get('/export', async (req, res, next) => {
   try {
     const rows = await sequelize.query(
       `SELECT tweet_id, content_snapshot AS content, spam_score, quality_score, theme,
-              sentiment, compliant, violation_rule, insult_spans, annotator_id, annotated_at
+              sentiment, compliant, violation_rule, insult_spans, annotator_id, source, annotated_at
        FROM tweet_human_labels
        WHERE skipped = false
        ORDER BY annotated_at`,
