@@ -115,9 +115,12 @@ class VideoService {
             ...editFilters,
           ])
           // Optimisation pour streaming fluide et boucles sans freeze (-g 30 = I-Frame chaque sec)
+          // `superfast`/CRF 26 dégradait visiblement l'image (bug Forge « page creer tweet » :
+          // rendu flou/pixelisé après compression) ; `veryfast`/CRF 23 reste rapide côté
+          // serveur tout en gardant un niveau de détail correct.
           .outputOptions([
-            '-preset superfast',
-            '-crf 26',
+            '-preset veryfast',
+            '-crf 23',
             '-movflags +faststart',
             '-pix_fmt yuv420p',
             '-r 30',   // Force 30 fps
