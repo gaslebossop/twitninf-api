@@ -1156,9 +1156,25 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   n'écrit aucun like public (commentaire du code vérifié cohérent avec le
   comportement — aucun appel à un service de like trouvé dans ce handler).
 
+- **S3 — VÉRIFIÉ, SAIN — NE PAS REFAIRE. `supportRoutes.js` (4/4
+  candidats).** `POST /tickets` : sujet/message bornés en longueur, plafond
+  de tickets ouverts appliqué (compté en base, pas déclaratif), catégorie
+  restreinte à une liste fermée. `POST /tickets/:id/messages` : appartenance
+  vérifiée (`ticket.user_id === actor.id` ou staff), `is_staff`/`is_internal`
+  dérivés du rôle vérifié en base (`resolveSupportActor`), **jamais** du
+  corps de requête malgré la présence de `req.body?.asStaff` — ce champ ne
+  fait qu'activer le mode staff pour un membre du staff qui répond dans son
+  propre ticket, il ne peut pas faire passer un non-staff pour staff (vérifié
+  : `actingAsStaff = staff && (...)`, `staff` vient de `actor.isStaff`, pas
+  du corps). Plafond de messages par fil appliqué. `POST /tickets/:id/close` :
+  même vérification d'appartenance. `PATCH /admin/tickets/:id` : derrière
+  `requireModeratorRole`, `status` restreint à une énumération fermée,
+  `assigned_to` seulement assignable à soi-même ou nul (`assignToMe`
+  booléen, pas d'ID arbitraire acceptable) — pas d'assignation de masse.
+  **Aucun constat.**
+
 - **S3 — prochain pas concret :** reste de la liste régénérée
-  (`supportRoutes.js`,
-  `tweetRoutes.js`, `nfMapRoutes.js`, `featureProposalRoutes.js`,
+  (`tweetRoutes.js`, `nfMapRoutes.js`, `featureProposalRoutes.js`,
   `policierCongoAdminRoutes.js`, `contestRoutes.js`,
   `aiRecommendationRoutes.js`, `userSimilarityRoutes.js` — sous l'angle
   validation cette fois —, `developerAdminRoutes.js`,
