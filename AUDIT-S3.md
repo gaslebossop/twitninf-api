@@ -22,17 +22,19 @@ un client peut-il influencer un montant ou rejouer une opération créditrice.
 
 | Gravité | Nombre de constats | Nature |
 |---|---|---|
-| **Critique** | **4** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie ; un second chemin de paiement, explicitement documenté comme factice dans son propre code, crédite directement le portefeuille jusqu'à un plafond élevé par appel, sans aucune vérification de paiement ni grille de prix serveur ; l'état serveur qui conditionne l'attribution d'une récompense exclusive à stock limité peut être forgé entièrement côté client ; un chemin d'attribution de cette même récompense contourne à la fois le contrôle de stock et le contrôle anti-doublon, y compris pour des comptes n'ayant rien forgé |
+| **Critique** | **5** | Une opération créditrice peut être déclenchée par le client sans preuve qu'elle a été honorée en contrepartie ; un second chemin de paiement, explicitement documenté comme factice dans son propre code, crédite directement le portefeuille jusqu'à un plafond élevé par appel, sans aucune vérification de paiement ni grille de prix serveur ; l'état serveur qui conditionne l'attribution d'une récompense exclusive à stock limité peut être forgé entièrement côté client ; un chemin d'attribution de cette même récompense contourne à la fois le contrôle de stock et le contrôle anti-doublon, y compris pour des comptes n'ayant rien forgé ; deux routes de mise à jour d'un module publicitaire appliquent au modèle en base l'intégralité du corps de requête envoyé par le client sans restreindre les champs acceptés, ce qui permet d'écrire directement des champs financiers et d'état censés n'être modifiables que par des chemins contrôlés côté serveur |
 | **Moyenne** | **2** | Un mécanisme de confiance destiné au trafic applicatif légitime repose sur des informations entièrement fournies par le client, sans attache cryptographique — il conditionne l'exemption de plusieurs limites de débit, y compris sur l'opération créditrice ci-dessus ; un chemin d'échec d'upload laisse un fichier volumineux sur disque indéfiniment, sans purge |
 | **Élevée** | **2** | Une route d'administration économique accepte un montant sans valider qu'il est bien numérique : une requête malformée (champ omis, faute de frappe, valeur non numérique) n'est pas rejetée, elle remet silencieusement à zéro le solde de la cible et déplace la totalité vers la trésorerie, sans message d'erreur ; un type de média uploadé n'est, contrairement aux autres types du même dépôt, ni filtré par son contenu réel ni retraité avant d'être publié tel quel sur une URL publique, avec une extension de fichier laissée au choix du client |
 
-**À ce stade : 8 constats, dont 4 critiques et 2 élevés.** Les deux constats
+**À ce stade : 9 constats, dont 5 critiques et 2 élevés.** Les deux constats
 moyens touchent le premier constat critique : le second lève la limite de
 débit qui aurait pu, à défaut d'autre chose, borner son ampleur. Le
 troisième constat critique aggrave le second : même si la forge de
 progression était corrigée, le chemin d'attribution qu'il documente
 resterait un moyen d'obtenir la même récompense en dépassant son plafond de
-stock.
+stock. Le cinquième constat critique est indépendant des quatre premiers —
+module différent, mécanisme différent (assignation de masse plutôt
+qu'absence de vérification de paiement).
 
 ## Constat critique — détail (décompte uniquement ici, méthode complète transmise au propriétaire)
 
@@ -73,6 +75,15 @@ contenu envoyé — ce qui inclut le cas simple d'un fichier qui n'est pas ce
 qu'il prétend être — le chemin d'erreur emprunté ne supprime jamais le
 fichier déjà écrit sur disque. Le fichier peut atteindre plusieurs centaines
 de mégaoctets, et rien dans le dépôt ne le purge ensuite.
+
+## Constat critique (5/5) — détail (décompte uniquement ici)
+
+Deux routes de mise à jour d'un module publicitaire transmettent
+l'intégralité du corps de requête reçu directement à la méthode de mise à
+jour du modèle, sans liste blanche de champs modifiables. Le modèle
+concerné porte, parmi ses colonnes, des champs financiers et un champ
+d'état qui conditionnent normalement un flux de crédit/débit contrôlé côté
+serveur. Ces deux routes contournent entièrement ce flux contrôlé.
 
 ## Vérifié et trouvé sain (S3, à ce stade)
 

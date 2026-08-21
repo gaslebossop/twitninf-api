@@ -27,8 +27,8 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
 > Ligne de reprise, tenue à jour **après chaque constat**. La session peut
 > s'interrompre sans préavis : cette ligne est le seul point de reprise fiable.
 
-- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 5
-  constats, dont 2 CRITIQUES et 1 ÉLEVÉ.**
+- **Section en cours :** S3 — injection, validation, abus. **PARTIELLE, 9
+  constats, dont 5 CRITIQUES et 2 ÉLEVÉS.**
 - **Couvert :** R1 (10), R2 (12), R3 (11), R4 (9), B1 (8), B2 (9), S1 (4),
   **S2 (6, dont 1 CRITIQUE et 3 ÉLEVÉS)** — **R1 à S2 TERMINÉES**. S3 en cours.
 
@@ -776,6 +776,42 @@ par ordre de priorité impératif : **1) RAPIDITÉ, 2) ROBUSTESSE, 3) SÉCURITÉ
   qui n'appelle pas `assertPositive` avant d'écrire un solde. `toggleWalletLock`
   (`:362-390`) : pas de montant, `userId` non trouvé → 404 propre. **Fichier
   clos, aucun nouveau constat.**
+
+- **S3 — CONSTAT CRITIQUE (5/5), déjà écrit, NE PAS REFAIRE : `adRoutes.js`,
+  les deux routes `PUT` de mise à jour du module publicitaire.** Assignation
+  de masse : le corps de requête est transmis tel quel à la méthode de mise
+  à jour du modèle, sans restriction de champs, ce qui permet d'écrire
+  directement des colonnes financières et un champ d'état que le dépôt
+  destine par ailleurs à un flux contrôlé côté serveur (financement,
+  activation). Détail complet — noms de route, noms de champs, chaîne de
+  conséquence vérifiée jusqu'au bout — transmis au propriétaire hors dépôt,
+  pas ici (dépôt public, voir avertissement en tête de fichier). Correctif à
+  transmettre : restreindre chaque `.update()` à une liste blanche explicite
+  de champs modifiables par le client, distincte des champs financiers/état
+  qui ne doivent transiter que par les routes dédiées déjà existantes.
+  **NE PAS refaire cette recherche.**
+
+- **S3 — `adRoutes.js` — candidats restants examinés à ce stade (hors le
+  constat ci-dessus et le candidat `total_budget` déjà noté « auto-neutralisé »
+  au tour précédent) : routes `/campaigns` (POST), `/advertisements` (POST),
+  `/campaigns/:id/fund` (POST), `/advertisements/:id/fund` (POST) — les
+  quatre vérifiées SAINES : tout débit réel passe par le grand livre, qui
+  rejette lui-même une valeur non strictement positive avant toute écriture
+  (même garde que celle déjà confirmée saine sur `walletRoutes.js` et
+  `economyAdminRoutes.js`) ; la création de publicité ne débite que si le
+  budget déclaré est strictement positif après conversion, sinon aucun débit
+  n'a lieu (pas de gain net possible pour l'appelant, seulement un
+  enregistrement incohérent dans ce cas limite). Il reste des routes
+  `GET`/ciblage non revues (statistiques, audiences) — probablement à faible
+  risque (lecture seule), à confirmer si le temps le permet, sinon fichier
+  considérable comme couvert sur son périmètre à risque (écriture/argent).**
+
+- **S3 — mise à jour de la liste de priorité :** après `adRoutes.js`,
+  prochain pas concret = `authRoutes.js` (9 candidats, priorité haute —
+  authentification), puis `premiumRoutes.js`, `monetizationRoutes.js`,
+  `tweetMonetizationRoutes.js`, `inventoryRoutes.js`, `monetizationProgramRoutes.js`
+  (tous « argent »), avant le reste de la liste régénérée au tour précédent
+  (`events.js`, `userRoutes.js`, `progressiveRecommendationRoutes.js`, etc.).
 
 ## Règles de la routine
 
