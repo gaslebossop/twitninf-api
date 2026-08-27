@@ -11,7 +11,7 @@
  * décor d'avatar et son nom animé indéfiniment, aux yeux de tout le monde.
  */
 
-const { TIER } = require('../constants/subscriptionTiers');
+const { TIER, isProOrAbove } = require('../constants/subscriptionTiers');
 
 /** Palettes proposées : on ne stocke que des couleurs validées, jamais du CSS libre. */
 const PROFILE_BANNER_STYLES = ['none', 'gradient', 'glow', 'mesh', 'stripes'];
@@ -133,7 +133,7 @@ function sanitizeCustomization(input, tier, { verified = false, existing = null 
    * l'abonnement a expiré reviendrait à reprendre une récompense, ce qui vide
    * de sens la promesse « on ne la reverra pas ».
    */
-  const allows = (slot, value) => tier === TIER.PRO || owned.includes(`${slot}:${value}`);
+  const allows = (slot, value) => isProOrAbove(tier) || owned.includes(`${slot}:${value}`);
 
   if (paid && typeof source.accent_color === 'string' && HEX_COLOR.test(source.accent_color.trim())) {
     output.accent_color = source.accent_color.trim().toLowerCase();
@@ -164,7 +164,7 @@ function sanitizeCustomization(input, tier, { verified = false, existing = null 
     // autres suivent le palier payant.
     const allowed = source.name_effect === CERTIFIED_NAME_EFFECT
       ? verified
-      : tier === TIER.PRO;
+      : isProOrAbove(tier);
     output.name_effect = allowed ? source.name_effect : 'none';
   }
   if (PROFILE_EFFECTS.includes(source.profile_effect)) {
@@ -173,7 +173,7 @@ function sanitizeCustomization(input, tier, { verified = false, existing = null 
       : 'none';
   }
   if (PROFILE_NAME_SIZES.includes(source.name_size)) {
-    output.name_size = tier === TIER.PRO ? source.name_size : 'normal';
+    output.name_size = isProOrAbove(tier) ? source.name_size : 'normal';
   }
   if (paid && typeof source.profile_title === 'string') {
     const title = source.profile_title.trim().replace(/\s+/g, ' ').slice(0, PROFILE_TITLE_MAX);
@@ -212,7 +212,7 @@ function sanitizeCustomization(input, tier, { verified = false, existing = null 
 /** Palier minimum pour personnaliser : Plus. Pro débloque les décorations. */
 function customizationTier(user) {
   const tier = String(user?.subscription_tier || TIER.FREE);
-  if (tier === TIER.PRO || tier === TIER.PLUS) return tier;
+  if (tier === TIER.PRO || tier === TIER.PLUS || tier === TIER.ULTRA) return tier;
   // `premium` est l'ancien drapeau : il vaut Pro pour les comptes historiques.
   return user?.premium ? TIER.PRO : TIER.FREE;
 }

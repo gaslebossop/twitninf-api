@@ -1977,6 +1977,12 @@ router.get('/invitations', authenticateToken, denySuspended, async (req, res) =>
     // `getGroupInvitationForUser`) reste la source de vérité et n'est pas
     // retiré : ce pré-filtre ne fait que réduire le volume chargé, il ne
     // remplace pas la logique d'éligibilité existante.
+    // Le statut d'invitation de groupe est indexé par l'id utilisateur dans le
+    // JSONB. On l'atteint via jsonb_extract_path_text(...) et non via
+    // metadata->'group_invitations'->:userId : dans cette position (juste après
+    // l'opérateur ->), Sequelize ne substitue pas le :userId, et Postgres
+    // recevait un ":" littéral -> 42601 "syntax error at or near \":\"".
+    // En argument de fonction, le :userId est remplacé normalement.
     const invitationRows = await sequelize.query(`
       SELECT DISTINCT c.id
       FROM conversation_participants cp
@@ -1988,7 +1994,7 @@ router.get('/invitations', authenticateToken, denySuspended, async (req, res) =>
             AND c.metadata->>'invitation_to' = :userId)
           OR
           (c.type = 'group'
-            AND c.metadata->'group_invitations'->:userId->>'status' = 'pending')
+            AND jsonb_extract_path_text(c.metadata, 'group_invitations', :userId, 'status') = 'pending')
         )
       ORDER BY c.id
       LIMIT 50

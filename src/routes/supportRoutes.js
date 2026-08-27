@@ -12,7 +12,7 @@ const {
   Notification,
   sequelize,
 } = require('../models');
-const { TIER } = require('../constants/subscriptionTiers');
+const { TIER, isProOrAbove } = require('../constants/subscriptionTiers');
 const { maybeExpireSubscription, isSubscriptionActive } = require('../utils/subscriptionHelpers');
 const logger = require('../utils/logger');
 
@@ -158,7 +158,7 @@ router.post('/tickets', authenticateToken, async (req, res) => {
     }
 
     const { tier } = await resolveTier(req.user.id);
-    const isPro = tier === TIER.PRO;
+    const isPro = isProOrAbove(tier);
     const maxOpen = isPro ? MAX_OPEN_TICKETS_PRO : MAX_OPEN_TICKETS_STANDARD;
 
     const openCount = await SupportTicket.count({
@@ -459,7 +459,7 @@ router.post('/tickets/:id/close', authenticateToken, async (req, res) => {
 router.get('/summary', authenticateToken, async (req, res) => {
   try {
     const { tier, user } = await resolveTier(req.user.id);
-    const isPro = tier === TIER.PRO;
+    const isPro = isProOrAbove(tier);
     const isStaff = isStaffRole(user?.role);
 
     const [unread, open] = await Promise.all([

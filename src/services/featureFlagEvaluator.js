@@ -43,6 +43,28 @@ const OPERATORS = [
 ];
 
 /** Attributs de contexte reconnus, avec leur type — sert aussi à l'UI admin. */
+/**
+ * Type d'audience d'un drapeau — QUI la fonctionnalité vise, par nature.
+ *
+ * `rollout` : le comportement historique. L'audience est un pourcentage du
+ *   trafic, éventuellement affiné par des segments.
+ *
+ * `beta` : la fonctionnalité appartient au PROGRAMME BETA. Elle est servie aux
+ *   membres, à personne d'autre, et `rollout_percentage` n'est plus consulté
+ *   du tout.
+ *
+ * Pourquoi un type plutôt qu'un segment `is_beta eq true` écrit à la main :
+ *   - un segment laisse le palier global actif DERRIÈRE lui. Le relever, même
+ *     par mégarde depuis l'écran mobile, sert la fonctionnalité hors de la
+ *     beta sans que rien ne le signale ;
+ *   - l'écran d'administration mobile ne sait pas lire un segment arbitraire :
+ *     il affiche « ciblage personnalisé » et verrouille le bloc. Le type, lui,
+ *     est une donnée simple qu'il peut montrer ;
+ *   - l'intention est lisible dans la ligne elle-même. « Cette fonctionnalité
+ *     est en beta » se lit ; un tableau de conditions se déchiffre.
+ */
+const AUDIENCES = ['rollout', 'beta'];
+
 const ATTRIBUTES = {
   // Identité
   user_id: 'string',
@@ -60,6 +82,9 @@ const ATTRIBUTES = {
   // Attributs résolus à la demande (une requête, mise en cache)
   country: 'string',
   nf_balance: 'number',
+  // Appartenance au programme beta. Vrai UNIQUEMENT pour un compte dont la
+  // ligne `beta_members` est en statut `approved` — voir models/BetaMember.js.
+  is_beta: 'boolean',
   // Technique — vient des en-têtes envoyés par le client officiel
   platform: 'string',
   app_version: 'semver',
@@ -72,7 +97,7 @@ const ATTRIBUTES = {
  * si une règle les mentionne réellement. Un drapeau qui ne cible pas le pays
  * ne doit pas provoquer de lecture supplémentaire.
  */
-const LAZY_ATTRIBUTES = ['country', 'nf_balance'];
+const LAZY_ATTRIBUTES = ['country', 'nf_balance', 'is_beta'];
 
 /** FNV-1a 32 bits. Déterministe, stable entre Node et Hermes. */
 function hash32(input) {
@@ -294,6 +319,29 @@ function evaluate(flag, context = {}, now = new Date()) {
     };
   }
 
+  // ── Porte du programme beta ──
+  //
+  // Placée APRÈS l'allowlist (un testeur interne reste servi sans être membre)
+  // et AVANT le tirage, qu'elle remplace entièrement : sur un drapeau de type
+  // `beta`, `rollout_percentage` n'est jamais consulté. C'est ce qui rend
+  // impossible la fuite hors de la beta par une montée de palier.
+  //
+  // `is_beta` absent vaut « pas membre » : un contexte incomplet ferme la
+  // porte, il ne l'ouvre pas.
+  if (flag.audience === 'beta') {
+    if (context.is_beta !== true) return off('not_beta');
+
+    const variant = pickVariant(flag, unit);
+    return {
+      enabled: true,
+      variant: variant ? variant.key : null,
+      payload: variant ? variant.payload ?? flag.payload ?? null : flag.payload ?? null,
+      reason: 'beta',
+      bucket: unit ? bucketOf(flag.key, flag.salt, unit) : null,
+      rule: null,
+    };
+  }
+
   if (!unit) return off('no_bucket_unit');
 
   const bucket = bucketOf(flag.key, flag.salt, unit);
@@ -382,6 +430,11 @@ function isBoostRule(rule) {
 /** Attributs réellement référencés par un drapeau — pour la résolution paresseuse. */
 function referencedAttributes(flag) {
   const found = new Set();
+  // Un drapeau de type `beta` référence `is_beta` sans qu'aucune condition ne
+  // l'écrive. L'omettre ici serait le défaut le plus vicieux du dispositif :
+  // `resolveLazyAttributes` ne résoudrait pas l'attribut, `context.is_beta`
+  // vaudrait `undefined`, et la porte se refermerait sur TOUS les membres.
+  if (flag?.audience === 'beta') found.add('is_beta');
   for (const rule of Array.isArray(flag?.rules) ? flag.rules : []) {
     for (const condition of Array.isArray(rule?.conditions) ? rule.conditions : []) {
       if (condition?.attribute) found.add(condition.attribute);
@@ -393,6 +446,7 @@ function referencedAttributes(flag) {
 module.exports = {
   BUCKET_SPACE,
   OPERATORS,
+  AUDIENCES,
   ATTRIBUTES,
   LAZY_ATTRIBUTES,
   hash32,

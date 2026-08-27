@@ -49,6 +49,7 @@ const { MIN_ONBOARDING_FOLLOWS: ONBOARDING_MIN_FOLLOWS } = require('../config/on
 const {
   TIER,
   TIER_PRICES_EUR,
+  TIER_PRICES_NF_FIXED,
   DEFAULT_DURATION_DAYS,
   nfAmountForEur,
 } = require('../constants/subscriptionTiers');
@@ -62,6 +63,7 @@ const {
   isSubscriptionActive,
   computeNewExpiry,
   normalizePurchasableTier,
+  isProOrAbove,
 } = require('../utils/subscriptionHelpers');
 
 const {
@@ -126,6 +128,8 @@ async function resolveSubscriptionPricing(transaction) {
     duration_days: DEFAULT_DURATION_DAYS,
     plus,
     pro,
+    // Prix fixe en NF, pas de conversion euro : voir TIER_PRICES_NF_FIXED.
+    ultra: { nf: TIER_PRICES_NF_FIXED[TIER.ULTRA], live: true },
     upgrade: {
       eur: upgradeEur,
       nf: upgradeNf ?? 0,
@@ -356,6 +360,159 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
       success: false,
       message: 'Erreur lors de l\'achat de l\'abonnement'
     });
+  }
+}
+
+/**
+ * Achat de l'abonnement Ultra — prix FIXE en NF (30 NF), pas de conversion au
+ * cours de l'euro comme Plus/Pro : c'est le prix demandé pour cette offre.
+ * Fonction séparée de `handleSubscriptionPurchase` plutôt qu'un cas de plus
+ * dedans : le calcul de prorata Plus→Pro de cette dernière ne s'applique pas
+ * ici (prix fixe, pas de palier intermédiaire), et une offre qui débite de
+ * l'argent réel ne gagne rien à partager son chemin avec une logique qui ne
+ * la concerne pas.
+ */
+async function handleUltraPurchase(req, res) {
+  const transaction = await sequelize.transaction();
+
+  try {
+    const userId = req.user.id;
+    const NewEconomyService = require('../services/newEconomyService');
+
+    // Même choix de verrou que `handleSubscriptionPurchase` : NO KEY UPDATE
+    // plutôt que FOR UPDATE, pour ne pas bloquer sur la FK que l'autorisation
+    // antifraude prend en parallèle (voir [[verrou-users-vs-antifraude]]).
+    const subscriptionLock = transaction.LOCK.NO_KEY_UPDATE;
+    const user = await User.findByPk(userId, { transaction, lock: subscriptionLock });
+    if (!user) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+    }
+
+    await maybeExpireSubscription(user, transaction);
+    await user.reload({ transaction, lock: subscriptionLock });
+
+    const price = TIER_PRICES_NF_FIXED[TIER.ULTRA];
+    const durationDays = DEFAULT_DURATION_DAYS;
+    const itemId = `subscription_${TIER.ULTRA}_${durationDays}d`;
+    const description = `Abonnement Ultra (${durationDays} j.)`;
+
+    const currency = await getPlatformCurrency({ transaction });
+    const currencyId = currency?.id || null;
+    if (!currencyId) {
+      await transaction.rollback();
+      return res.status(503).json({ success: false, message: 'Le portefeuille NF est momentanément indisponible.' });
+    }
+
+    await NewEconomyService.ensureWalletsForUser(userId, transaction);
+
+    let userWallet;
+    try {
+      userWallet = await NewEconomyService.getUserWallet(currencyId, userId, transaction);
+    } catch (walletError) {
+      logger.error('❌ [SUB] Erreur récupération wallet (Ultra):', walletError);
+      await transaction.rollback();
+      return res.status(500).json({ success: false, message: 'Impossible de vérifier votre solde' });
+    }
+
+    if (userWallet.wallet.balance < price) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Solde insuffisant. Vous avez ${userWallet.wallet.balance} NF, il en faut ${price} NF.`,
+        data: {
+          current_balance: userWallet.wallet.balance,
+          required_amount: price,
+          missing_amount: price - userWallet.wallet.balance,
+        },
+      });
+    }
+
+    let spendResult;
+    try {
+      spendResult = await NewEconomyService.spendCoins(
+        userId, currencyId, price, 'subscription_purchase', itemId, description, transaction
+      );
+    } catch (spendError) {
+      logger.error('❌ [SUB] Erreur transaction NF (Ultra):', spendError);
+      await transaction.rollback();
+      const isRiskError = transactionAuthorizationService.constructor.isRiskError(spendError);
+      return res.status(isRiskError ? spendError.httpStatus : 500).json({
+        success: false,
+        message: isRiskError ? spendError.message : 'Erreur lors de la transaction. Vos NF n\'ont pas été débités.',
+        code: isRiskError ? spendError.code : undefined,
+      });
+    }
+
+    const paymentTransactionId =
+      spendResult?.transaction?.transactionHash || spendResult?.transactionHash || spendResult?.transaction?.id;
+    if (!paymentTransactionId) {
+      await transaction.rollback();
+      return res.status(500).json({ success: false, message: 'Le paiement NF n’a pas pu être confirmé. Aucun abonnement n’a été activé.' });
+    }
+
+    // Crédit publicitaire (100 €, converti en NF) : versé DEPUIS le trésor
+    // (`rewardFromTreasury`), pas prélevé sur qui que ce soit — même
+    // transaction que l'achat, donc annulé avec lui si la suite échoue. Il
+    // atterrit sur le portefeuille NF normal : pas de grand livre séparé
+    // « publicité uniquement », donc rien n'empêche techniquement de le
+    // dépenser ailleurs — présenté côté client comme un crédit pub, pas
+    // appliqué comme tel en base.
+    const AD_CREDIT_EUR = 100;
+    const adCreditNf = nfAmountForEur(AD_CREDIT_EUR, currency?.currentPrice);
+    let adCreditGranted = 0;
+    if (adCreditNf) {
+      const rewardResult = await NewEconomyService.rewardUser(
+        userId, currencyId, adCreditNf, 'Crédit publicitaire Ultra', transaction
+      );
+      if (rewardResult.success) adCreditGranted = adCreditNf;
+      else logger.warn(`[SUB] Crédit publicitaire Ultra non versé pour ${userId}: ${rewardResult.reason}`);
+    }
+
+    const nextExpiry = computeNewExpiry(user, durationDays);
+
+    const restoredCustomization = hasPaidCustomization(user.profile_customization, { verified: !!user.verified })
+      ? null
+      : restoreFromArchive(user.profile_customization_archive, TIER.ULTRA, { verified: !!user.verified });
+
+    await user.update(
+      {
+        subscription_tier: TIER.ULTRA,
+        subscription_expires_at: nextExpiry,
+        tweet_generation_credits: creditsAfterSubscriptionPurchase(user.tweet_generation_credits),
+        ...(restoredCustomization
+          ? { profile_customization: restoredCustomization, profile_customization_archive: null }
+          : {}),
+        updated_at: new Date(),
+      },
+      { transaction }
+    );
+
+    await transaction.commit();
+
+    res.json({
+      success: true,
+      message: 'Abonnement Ultra activé !',
+      data: {
+        premium: true,
+        subscription_tier: TIER.ULTRA,
+        subscription_expires_at: nextExpiry,
+        tweet_generation_credits: user.tweet_generation_credits,
+        tweet_generation_credits_granted: SUBSCRIPTION_TWEET_CREDITS,
+        duration_days: durationDays,
+        payment_confirmed: true,
+        transaction_id: paymentTransactionId,
+        amount_spent: price,
+        currency_symbol: currency?.symbol || 'NF',
+        remaining_balance: spendResult.remainingBalance,
+        ad_credit_granted: adCreditGranted,
+        ad_credit_eur_equivalent: AD_CREDIT_EUR,
+      },
+    });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Erreur lors de l\'achat de l\'abonnement Ultra:', error);
+    res.status(500).json({ success: false, message: 'Erreur lors de l\'achat de l\'abonnement' });
   }
 }
 
@@ -1194,7 +1351,10 @@ router.get('/:id/tweets', [
  */
 router.get('/:id/followers', [
   param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
-  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
+  // Plafond à 2000 : l'app charge la liste complète en une fois pour bâtir
+  // l'ensemble « abonnements » utilisé par le fil. À 100, la requête partait
+  // en `?limit=500` et se faisait rejeter en 400 (badge « abonné » jamais posé).
+  query('limit').optional().isInt({ min: 1, max: 2000 }).withMessage('La limite doit être entre 1 et 2000'),
   query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
   handleValidationErrors
 ], async (req, res) => {
@@ -1254,7 +1414,9 @@ router.get('/:id/followers', [
  */
 router.get('/:id/following', [
   param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
-  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
+  // Plafond à 2000 : voir la note sur `/:id/followers`. L'app demande `limit=500`
+  // pour récupérer tous les abonnements d'un coup ; à 100 elle prenait un 400.
+  query('limit').optional().isInt({ min: 1, max: 2000 }).withMessage('La limite doit être entre 1 et 2000'),
   query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
   handleValidationErrors
 ], async (req, res) => {
@@ -1816,6 +1978,15 @@ router.post('/purchase-premium', [
   denySuspended
 ], async (req, res) => handleSubscriptionPurchase(req, res, TIER.PLUS));
 
+/**
+ * POST /api/users/purchase-ultra
+ * Achète ou prolonge l'abonnement Ultra — 30 NF fixe, voir `handleUltraPurchase`.
+ */
+router.post('/purchase-ultra', [
+  authenticateToken,
+  denySuspended
+], handleUltraPurchase);
+
 /* ── Personnalisation de profil premium (façon Discord) ─────────────────── */
 
 // Règles, listes fermées et neutralisation : voir `utils/profileCustomization`.
@@ -1847,7 +2018,7 @@ router.get('/me/profile-customization', authenticateToken, async (req, res) => {
         customization: user.profile_customization || {},
         tier,
         can_customize: tier !== TIER.FREE,
-        can_use_decorations: tier === TIER.PRO,
+        can_use_decorations: isProOrAbove(tier),
         // Droit adossé à la certification, pas à l'abonnement.
         can_use_certified_name: !!user.verified,
         verification_style: user.verification_style || 'default',

@@ -250,10 +250,11 @@ router.post('/message', authenticateToken, chatLimiter, async (req, res) => {
       try {
         const v2 = await runPolicierCongoV2Turn({
           event,
-          buildOptions: {
-            contextPack,
-            model: 'haiku'
-          },
+          // Pas de `model` ici : le pont V3 ne lit de buildOptions que
+          // contextPack et systemPrompt. Un `model: 'haiku'` y traînait et
+          // n'a jamais rien choisi — le modèle du chat est celui du moteur
+          // (POLICIERCONGO_V3_CLAUDE_MODEL), comme partout ailleurs.
+          buildOptions: { contextPack },
           geminiIntelligence
         });
         if (v2 && v2.replyText) {

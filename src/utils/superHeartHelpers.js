@@ -1,7 +1,8 @@
 const { TIER, isSubscriptionActive } = require('./subscriptionHelpers');
 
-/** Solde accordé à chaque renouvellement, par palier. */
+/** Solde accordé à chaque renouvellement, par palier. Ultra reprend le plafond Pro. */
 const SUPER_HEART_CAPS = {
+  [TIER.ULTRA]: 10,
   [TIER.PRO]: 10,
   [TIER.PLUS]: 3,
 };

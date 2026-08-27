@@ -24,19 +24,47 @@ function csvEnv(name, fallback) {
   return raw.split(',').map(value => value.trim()).filter(Boolean);
 }
 
+/**
+ * Niveaux de réflexion acceptés par le CLI Claude (EffortLevel du SDK).
+ * Une valeur hors liste fait échouer l'appel à la génération, pas au
+ * démarrage : elle serait donc découverte en production, un passage sur
+ * deux, sous forme d'un run raté. On la ramène ici sur la valeur par
+ * défaut plutôt que de la laisser passer.
+ */
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function effortEnv(name, fallback) {
+  const raw = String(process.env[name] || '').trim().toLowerCase();
+  return EFFORT_LEVELS.includes(raw) ? raw : fallback;
+}
+
 function loadV3Config(overrides = {}) {
   const config = {
     enabled: boolEnv('POLICIERCONGO_V3_ENABLED', false),
     dryRun: boolEnv('POLICIERCONGO_V3_DRY_RUN', true),
-    providerOrder: csvEnv('POLICIERCONGO_V3_PROVIDERS', ['codex']),
-    claudeModel: process.env.POLICIERCONGO_V3_CLAUDE_MODEL || 'sonnet',
-    claudeReasoningEffort: process.env.POLICIERCONGO_V3_CLAUDE_REASONING_EFFORT || 'low',
+    // Claude Opus 5 est le modèle de PolicierCongo depuis le 2026-08-25.
+    // Codex ne reste dans l'ordre par défaut qu'en second : il tient le rôle
+    // de vérificateur croisé (voir crossModelVerification.js, qui exige
+    // toujours l'AUTRE modèle) et de repli quand le compte Claude est à sec.
+    providerOrder: csvEnv('POLICIERCONGO_V3_PROVIDERS', ['claude', 'codex']),
+    claudeModel: process.env.POLICIERCONGO_V3_CLAUDE_MODEL || 'claude-opus-5',
+    // xhigh : le niveau au-dessus de `high`, celui qui sert de défaut à
+    // Claude Code sur les tâches agentiques. La boucle V3 en est une —
+    // jusqu'à 18 tours et 72 appels d'outils par passage.
+    claudeReasoningEffort: effortEnv('POLICIERCONGO_V3_CLAUDE_REASONING_EFFORT', 'xhigh'),
     codexModel: process.env.POLICIERCONGO_V3_CODEX_MODEL || 'gpt-5.5',
     codexReasoningEffort: process.env.POLICIERCONGO_V3_CODEX_REASONING_EFFORT || 'medium',
     maxIterations: intEnv('POLICIERCONGO_V3_MAX_ITERATIONS', 18, 2, 64),
     maxToolCalls: intEnv('POLICIERCONGO_V3_MAX_TOOL_CALLS', 72, 1, 500),
     maxParallelReads: intEnv('POLICIERCONGO_V3_MAX_PARALLEL_READS', 6, 1, 20),
-    modelTimeoutMs: intEnv('POLICIERCONGO_V3_MODEL_TIMEOUT_MS', 240000, 10000, 900000),
+    // 7 minutes, et non 4 : mesure des 1147 passages autonomes servis par
+    // codex/medium — 50 s en moyenne, 86 s au 95e centile, 235 s au pire,
+    // pour 3,7 itérations. Un tour Opus 5 à effort xhigh réfléchit
+    // sensiblement plus longtemps, et le plafond de 4 minutes se serait
+    // mis à mordre sur des tours parfaitement sains. Le plafond ne sert
+    // qu'à couper ce qui est bloqué : le monter ne ralentit aucun tour
+    // normal, il évite juste d'en tuer un qui allait aboutir.
+    modelTimeoutMs: intEnv('POLICIERCONGO_V3_MODEL_TIMEOUT_MS', 420000, 10000, 900000),
     toolTimeoutMs: intEnv('POLICIERCONGO_V3_TOOL_TIMEOUT_MS', 600000, 1000, 600000),
     contextCharBudget: intEnv('POLICIERCONGO_V3_CONTEXT_CHARS', 150000, 16000, 500000),
     // Le prompt porte l'index compact des 84 outils (~25 000 caractères) au
@@ -65,9 +93,10 @@ function loadV3Config(overrides = {}) {
     // À partir de la 2e itération d'un même run, réutilise la session du
     // provider primaire (codex exec resume) et n'envoie que le delta au lieu
     // de reconstruire tout le prompt (~40K caractères de catalogue d'outils
-    // et de manuel identiques à chaque itération). Sans effet sur un
-    // provider qui ne supporte pas les sessions (ex. Claude) : ce cas
-    // retombe silencieusement sur le comportement plein prompt existant.
+    // et de manuel identiques à chaque itération). Les DEUX providers
+    // supportent désormais les sessions : `codex exec resume` côté codex,
+    // `options.resume` côté Claude. Un provider qui ne les supporterait pas
+    // retombe silencieusement sur le comportement plein prompt.
     sessionReuseEnabled: boolEnv('POLICIERCONGO_V3_SESSION_REUSE', true),
     defaultWakeMinutes: intEnv('POLICIERCONGO_V3_DEFAULT_WAKE_MINUTES', 30, 1, 10080),
     bootstrapWakeMinutes: intEnv('POLICIERCONGO_V3_BOOTSTRAP_WAKE_MINUTES', 2, 1, 1440),
@@ -95,9 +124,9 @@ function loadV3Config(overrides = {}) {
   };
 
   if (!Array.isArray(config.providerOrder) || !config.providerOrder.length) {
-    config.providerOrder = ['codex'];
+    config.providerOrder = ['claude', 'codex'];
   }
   return Object.freeze(config);
 }
 
-module.exports = { loadV3Config, boolEnv, intEnv, numberEnv, csvEnv };
+module.exports = { loadV3Config, boolEnv, intEnv, numberEnv, csvEnv, effortEnv, EFFORT_LEVELS };

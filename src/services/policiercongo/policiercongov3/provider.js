@@ -38,7 +38,7 @@ class ClaudeProvider {
   constructor(config) {
     this.name = 'claude';
     this.model = config.claudeModel;
-    this.reasoningEffort = config.claudeReasoningEffort || 'low';
+    this.reasoningEffort = config.claudeReasoningEffort || 'xhigh';
     this.config = config;
     // Le SDK Claude Code expose `options.resume` (comme `codex exec resume`) :
     // un tour N>1 peut reprendre la session au lieu de retransmettre system +
@@ -70,6 +70,13 @@ class ClaudeProvider {
     // sans systemPrompt, à l'identique de l'ancien comportement.
     const options = {
       model: this.model,
+      // Réflexion adaptative : le modèle décide lui-même de la profondeur,
+      // `effort` ne fait qu'en donner le registre. Sur Opus 5 c'est déjà le
+      // défaut, mais l'écrire protège d'un `thinking` désactivé hérité d'un
+      // réglage global — et thinking coupé sur Opus 5 fait écrire les appels
+      // d'outils en texte visible au lieu de blocs d'appel, ce que la boucle
+      // V3 lirait comme une envelope illisible.
+      thinking: { type: 'adaptive' },
       effort: this.reasoningEffort,
       allowedTools: [],
       abortController
@@ -248,6 +255,44 @@ function extractCodexError(stdout) {
   return messages.join(' | ');
 }
 
+/**
+ * Les échecs que réessayer ne peut pas réparer : plafond d'usage atteint,
+ * jeton expiré, compte non connecté, délai de génération dépassé.
+ *
+ * Le retry n'a de sens que sur une panne passagère — réseau coupé, flux
+ * tronqué, sortie illisible. Appliqué à un plafond d'abonnement il refait
+ * trois fois le même appel, avec des attentes entre chaque, pour une réponse
+ * connue d'avance ; appliqué à un dépassement de délai il coûte deux fois
+ * sept minutes de scheduler bloqué.
+ *
+ * On bascule donc immédiatement sur le provider suivant de `providerOrder`.
+ * Rien n'est masqué : le message d'origine reste dans les `failures` remontées
+ * et dans le journal, préfixé pour être reconnaissable d'un coup d'œil.
+ */
+const ERREURS_DEFINITIVES = [
+  // Le plafond est déjà à sept minutes : un tour qui l'atteint n'est pas
+  // « momentanément lent », il est bloqué. Le réessayer coûte sept minutes de
+  // plus pendant lesquelles le scheduler ne traite aucun autre réveil — et
+  // c'est redondant, puisqu'un run raté est de toute façon reprogrammé par
+  // PersistentWakeScheduler (5 à 60 min selon le nombre de tentatives).
+  /^Timeout mod[èe]le/i,
+  /session limit/i,
+  /usage limit/i,
+  /rate.?limit/i,
+  /quota/i,
+  /credit balance/i,
+  /insufficient.*(credit|fund)/i,
+  /(401|403|unauthorized|forbidden)/i,
+  /invalid api key/i,
+  /authentication/i,
+  /not logged in|please run .?claude login/i
+];
+
+function estDefinitive(message) {
+  const texte = String(message || '');
+  return ERREURS_DEFINITIVES.some(motif => motif.test(texte));
+}
+
 class ProviderRouter {
   constructor({ config, logger = console, providers = {} }) {
     this.config = config;
@@ -323,6 +368,11 @@ class ProviderRouter {
         // basculer sur un autre provider, relance un travail que personne
         // n'attend plus.
         if (error.name === 'AbortError' || signal?.aborted) throw error;
+        if (estDefinitive(error.message)) {
+          errors.push(`${name}#${i + 1} (définitif, pas de retry): ${error.message}`);
+          this.logger.warn?.(`[pc3.provider] ${errors.at(-1)}`);
+          break;
+        }
         errors.push(`${name}#${i + 1}: ${error.message}`);
         this.logger.warn?.(`[pc3.provider] ${errors.at(-1)}`);
         if (i < this.config.providerRetries) await delay(500 * (2 ** i), signal);
@@ -332,4 +382,4 @@ class ProviderRouter {
   }
 }
 
-module.exports = { ProviderRouter, CodexProvider, ClaudeProvider, collectClaudeText, extractThreadId, normalizePromptInput, flattenPrompt };
+module.exports = { ProviderRouter, CodexProvider, ClaudeProvider, collectClaudeText, extractThreadId, normalizePromptInput, flattenPrompt, estDefinitive };

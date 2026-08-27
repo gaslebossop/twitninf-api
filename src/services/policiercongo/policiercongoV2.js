@@ -7,7 +7,7 @@
  * Le bot observe, accumule les signaux bruts de la commu, et décide seul quoi faire.
  *
  * Fixes vs V2 :
- *  1. Modèle Claude Code (alias 'sonnet'/'opus'/'haiku', configurable via env POLICIERCONGO_V2_MODEL)
+ *  1. Modèle Claude Code (par défaut claude-opus-5, configurable via env POLICIERCONGO_V2_MODEL)
  *  2. ReplyQueue : file réelle — le bot ne répond PLUS à des fantômes
  *  3. CommunitySignals : signaux bruts transmis à l'IA tels quels, sans interprétation
  *  4. ProactiveEngine : agit sur ce que la commu a RÉELLEMENT exprimé
@@ -20,7 +20,7 @@ const logger = require('../../utils/logger');
 // ─── Modèle & limites ────────────────────────────────────────────────────────
 
 const DEFAULT_CLAUDE_MODEL =
-  process.env.POLICIERCONGO_V2_MODEL || 'sonnet';
+  process.env.POLICIERCONGO_V2_MODEL || 'claude-opus-5';
 
 const SHORT_TERM_MAX_MESSAGES = 20;
 

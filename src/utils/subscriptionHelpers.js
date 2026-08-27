@@ -1,4 +1,4 @@
-const { TIER, tierRank, DEFAULT_DURATION_DAYS } = require('../constants/subscriptionTiers');
+const { TIER, tierRank, isProOrAbove, DEFAULT_DURATION_DAYS } = require('../constants/subscriptionTiers');
 const {
   freeTierCustomization,
   hasPaidCustomization,
@@ -152,6 +152,7 @@ module.exports = {
   computeNewExpiry,
   normalizePurchasableTier,
   tierRank,
+  isProOrAbove,
   TIER,
   DEFAULT_DURATION_DAYS,
 };

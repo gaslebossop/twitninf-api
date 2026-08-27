@@ -33,7 +33,9 @@ const HASHTAG = 'JoyeuxTwitninf';
  * saveur. Le lot le plus gros doit rester rare pour que les autres comptent.
  */
 const TOUR_POOL = [
-  { weight: 45, kind: 'coins', label: '300 NF', payload: { amount: 300 } },
+  // 5 NF et pas plus : la quête est offerte à tout le monde depuis la panne
+  // de suivi client, le lot en NF ne doit pas rémunérer l'attente.
+  { weight: 45, kind: 'coins', label: '5 NF', payload: { amount: 5 } },
   { weight: 30, kind: 'cosmetic', label: 'Effet de profil « Étincelles »', payload: { slot: 'profile_effect', value: 'sparkles' } },
   { weight: 18, kind: 'cosmetic', label: 'Police de nom « Techno »', payload: { slot: 'name_font', value: 'techno' } },
   { weight: 7, kind: 'pro_days', label: '3 jours de Pro', payload: { days: 3 } },
@@ -96,8 +98,10 @@ const QUESTS = [
       'Passe voir les six recoins de l\'app : la Carte NF, le Casino, le Studio créateur, le Trading, les Lives et le Marché des pseudos.',
     icon: 'compass-outline',
     goal: 6,
-    // Seule source possible : l'API ne voit pas passer une navigation.
-    measure: { source: 'signals' },
+    // Offerte à tous : le suivi de navigation dépend de signaux que le client
+    // n'a jamais envoyés, la quête restait à zéro pour tout le monde. La
+    // remise reste manuelle et unique par compte.
+    measure: { source: 'auto' },
     reward: {
       kind: 'lootbox',
       label: 'Paquet surprise',
@@ -138,12 +142,14 @@ const QUESTS = [
     tier: 'gold',
     title: 'À minuit pile',
     description:
-      'Publie quelque chose dans les vingt minutes qui suivent minuit, la nuit du 24. Vingt minutes, une fois. Après, c\'est fini.',
+      'Publie quelque chose dans les vingt minutes qui suivent minuit, la nuit du 27. Vingt minutes, une fois. Après, c\'est fini.',
     icon: 'moon-outline',
     goal: 1,
     // La fenêtre est en +02:00 et resserre celle de l'événement. Le moteur
     // compare en UTC après conversion — pas en heure locale du serveur.
-    window: { from: '2026-08-24T00:00:00+02:00', to: '2026-08-24T00:20:00+02:00' },
+    // Décalée au 27 : la nuit du 24, le suivi de publication était cassé
+    // (filtre hashtag sans dièse), personne n'a pu la gagner loyalement.
+    window: { from: '2026-08-27T00:00:00+02:00', to: '2026-08-27T00:20:00+02:00' },
     measure: { source: 'tweets' },
     reward: {
       kind: 'cosmetic',
@@ -170,9 +176,9 @@ const QUESTS = [
     tier: 'silver',
     title: 'Le gâteau géant',
     description:
-      'Un objectif commun à TOUTE l\'app : 10 000 tweets publiés pendant la semaine. Si le compte y est, tout le monde touche la récompense, y compris ceux qui n\'ont rien posté.',
+      'Un objectif commun à TOUTE l\'app : 200 tweets publiés pendant la semaine. Si le compte y est, tout le monde touche la récompense, y compris ceux qui n\'ont rien posté.',
     icon: 'people-outline',
-    goal: 10000,
+    goal: 200,
     measure: { source: 'global_tweets' },
     reward: { kind: 'coins', label: '300 NF pour tout le monde', payload: { amount: 300 } },
   },

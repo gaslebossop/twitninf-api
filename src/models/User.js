@@ -283,9 +283,9 @@ const userSchema = {
     defaultValue: false
   },
 
-  /** Palier d'abonnement : free, plus (payant), pro (payant, tout inclus) */
+  /** Palier d'abonnement : free, plus (payant), pro (payant, tout inclus), ultra (payant, 10x les limites API) */
   subscription_tier: {
-    type: DataTypes.ENUM('free', 'plus', 'pro'),
+    type: DataTypes.ENUM('free', 'plus', 'pro', 'ultra'),
     allowNull: false,
     defaultValue: 'free'
   },

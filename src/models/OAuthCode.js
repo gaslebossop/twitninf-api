@@ -24,6 +24,11 @@ module.exports = function(sequelize) {
       type: DataTypes.STRING,
       allowNull: false,
     },
+    scopes: {
+      type: DataTypes.JSON,
+      defaultValue: [],
+      allowNull: false,
+    },
     expires_at: {
       type: DataTypes.DATE,
       allowNull: false,

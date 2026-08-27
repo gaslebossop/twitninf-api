@@ -222,6 +222,29 @@ async function invalidate() {
   }
 }
 
+/**
+ * Purge les attributs coûteux mis en cache pour UN utilisateur.
+ *
+ * À appeler après tout changement qui rend le cache faux — aujourd'hui la
+ * seule source est l'appartenance beta (`is_beta`). Sans cet appel, un compte
+ * qu'on vient d'admettre reste jusqu'à cinq minutes sur l'ancien
+ * comportement, sans erreur, sans log, et avec une interface qui lui promet
+ * déjà la nouveauté.
+ *
+ * La clé n'est connue que d'ici : les appelants passent un identifiant, pas
+ * un format de clé.
+ */
+async function invalidateUserContext(userId) {
+  if (!userId) return;
+  const redisClient = await getClient();
+  if (!redisClient) return;
+  try {
+    await redisClient.del(`feature-flags:ctx:${userId}`);
+  } catch (error) {
+    stats.errors += 1;
+  }
+}
+
 // ───────────────────── Construction du contexte ─────────────────────
 
 function accountAgeDays(createdAt) {
@@ -331,6 +354,21 @@ async function resolveLazyAttributes(context, definitions) {
     }
   }
 
+  if (needed.has('is_beta')) {
+    try {
+      const { BetaMember } = require('../models');
+      const row = await BetaMember.findOne({
+        where: { user_id: context.user_id, status: 'approved' },
+        attributes: ['user_id'],
+      });
+      resolved.is_beta = Boolean(row);
+    } catch (error) {
+      // Une panne vaut « pas membre », donc l'ancien comportement — jamais un
+      // etat intermediaire ou l'app afficherait la beta sans y avoir droit.
+      resolved.is_beta = false;
+    }
+  }
+
   if (redisClient) {
     try {
       await redisClient.set(cacheKey, JSON.stringify(resolved), { EX: LAZY_TTL_SECONDS });
@@ -381,10 +419,27 @@ async function contextFromRequest(req) {
 // ───────────────────── API publique du service ─────────────────────
 
 /** Décision détaillée pour un drapeau. Ne lève jamais. */
+/**
+ * Évalue UN drapeau.
+ *
+ * ⚠️ Résout les attributs coûteux, comme `resolveAll` — et seulement ceux que
+ * CE drapeau référence. Sans cela, `isEnabled()` et le middleware `requireFlag`
+ * évalueraient un ciblage sur `country`, `nf_balance` ou `is_beta` comme si
+ * l'attribut était absent : le segment ne matcherait jamais, silencieusement,
+ * et le drapeau retomberait sur son palier global. Le même drapeau répondrait
+ * alors « oui » à l'app (qui passe par `/resolve`) et « non » à une garde
+ * serveur — deux vérités pour un seul drapeau.
+ */
 async function evaluateFlag(key, context = {}) {
   try {
     const definitions = await getDefinitions();
-    return evaluator.evaluate(definitions[key], context);
+    const definition = definitions[key];
+    if (!definition) return evaluator.evaluate(undefined, context);
+
+    // Un seul drapeau à considérer : inutile de résoudre les attributs que
+    // seuls les AUTRES drapeaux référencent.
+    const fullContext = await resolveLazyAttributes(context, { [key]: definition });
+    return evaluator.evaluate(definition, fullContext);
   } catch (error) {
     stats.errors += 1;
     return { enabled: false, variant: null, payload: null, reason: 'error', bucket: null, rule: null };
@@ -433,6 +488,7 @@ function getStats() {
 module.exports = {
   getDefinitions,
   invalidate,
+  invalidateUserContext,
   contextFromUser,
   contextFromHeaders,
   contextFromRequest,

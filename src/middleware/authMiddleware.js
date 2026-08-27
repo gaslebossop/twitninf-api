@@ -125,7 +125,7 @@ const requirePremium = async (req, res, next) => {
 const requirePro = async (req, res, next) => {
   try {
     const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
-    const { TIER } = require('../constants/subscriptionTiers');
+    const { isProOrAbove } = require('../constants/subscriptionTiers');
     const u = await User.findByPk(req.user.id, {
       attributes: ['id', 'premium', 'subscription_tier', 'subscription_expires_at']
     });
@@ -139,7 +139,7 @@ const requirePro = async (req, res, next) => {
     await u.reload({
       attributes: ['id', 'premium', 'subscription_tier', 'subscription_expires_at']
     });
-    if (u.subscription_tier !== TIER.PRO || !u.premium) {
+    if (!isProOrAbove(u.subscription_tier) || !u.premium) {
       return res.status(403).json({
         success: false,
         message: 'Abonnement Pro requis pour accéder à cette fonctionnalité'
@@ -151,6 +151,37 @@ const requirePro = async (req, res, next) => {
     return res.status(500).json({
       success: false,
       message: 'Erreur lors de la vérification de l\'abonnement Pro'
+    });
+  }
+};
+
+/** Réservé au palier Ultra (après expiration éventuelle) — voir `strikeRoutes.js`. */
+const requireUltra = async (req, res, next) => {
+  try {
+    const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
+    const { TIER } = require('../constants/subscriptionTiers');
+    const u = await User.findByPk(req.user.id, {
+      attributes: ['id', 'premium', 'subscription_tier', 'subscription_expires_at']
+    });
+    if (!u) {
+      return res.status(401).json({ success: false, message: 'Utilisateur non trouvé' });
+    }
+    await maybeExpireSubscription(u);
+    await u.reload({
+      attributes: ['id', 'premium', 'subscription_tier', 'subscription_expires_at']
+    });
+    if (u.subscription_tier !== TIER.ULTRA || !u.premium) {
+      return res.status(403).json({
+        success: false,
+        message: 'Abonnement Ultra requis pour accéder à cette fonctionnalité'
+      });
+    }
+    next();
+  } catch (error) {
+    logger.error('Erreur de vérification abonnement Ultra:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la vérification de l\'abonnement Ultra'
     });
   }
 };
@@ -565,6 +596,7 @@ module.exports = {
   requireVerified,
   requirePremium,
   requirePro,
+  requireUltra,
   requireAdmin,
   requireOwnership,
   logAuthenticatedRequest,

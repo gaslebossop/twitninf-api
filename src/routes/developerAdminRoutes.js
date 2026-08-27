@@ -1,6 +1,6 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { DeveloperApp } = require('../models');
+const { DeveloperApp, OAuthToken } = require('../models');
 const { authenticateToken } = require('../middleware/authMiddleware');
 const crypto = require('crypto');
 
@@ -51,6 +51,63 @@ router.post('/', createValidation, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Ce nom d\'application est déjà utilisé. Veuillez en choisir un autre.' });
     }
     res.status(500).json({ success: false, message: 'Erreur lors de la création' });
+  }
+});
+
+// Modifier une application (nom déjà pris à la création, non modifiable ici)
+const updateValidation = [
+  body('description').optional().isLength({ max: 500 }).withMessage('La description est trop longue'),
+  body('redirect_uris').optional().isArray().withMessage('Les URI de redirection doivent être un tableau')
+];
+router.put('/:id', updateValidation, async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
+  try {
+    const app = await DeveloperApp.findOne({ where: { id: req.params.id, user_id: req.user.id } });
+    if (!app) return res.status(404).json({ success: false, message: 'App introuvable' });
+
+    const { description, redirect_uris } = req.body;
+    if (description !== undefined) app.description = description;
+    if (redirect_uris !== undefined) app.redirect_uris = redirect_uris;
+    await app.save();
+
+    res.json({ success: true, data: app });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Erreur lors de la mise à jour' });
+  }
+});
+
+// Lister les tokens émis pour cette application (le secret n'y figure jamais)
+router.get('/:id/tokens', async (req, res) => {
+  try {
+    const app = await DeveloperApp.findOne({ where: { id: req.params.id, user_id: req.user.id } });
+    if (!app) return res.status(404).json({ success: false, message: 'App introuvable' });
+
+    const tokens = await OAuthToken.findAll({
+      where: { developer_app_id: app.id },
+      attributes: ['id', 'scopes', 'expires_at', 'created_at'],
+      order: [['created_at', 'DESC']]
+    });
+    res.json({ success: true, count: tokens.length, data: tokens });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Erreur serveur' });
+  }
+});
+
+// Révoquer un token émis pour cette application
+router.delete('/:id/tokens/:tokenId', async (req, res) => {
+  try {
+    const app = await DeveloperApp.findOne({ where: { id: req.params.id, user_id: req.user.id } });
+    if (!app) return res.status(404).json({ success: false, message: 'App introuvable' });
+
+    const token = await OAuthToken.findOne({ where: { id: req.params.tokenId, developer_app_id: app.id } });
+    if (!token) return res.status(404).json({ success: false, message: 'Token introuvable' });
+
+    await token.destroy();
+    res.json({ success: true, message: 'Token révoqué' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Erreur lors de la révocation' });
   }
 });
 

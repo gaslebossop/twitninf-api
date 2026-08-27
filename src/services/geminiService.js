@@ -1,5 +1,6 @@
 const logger = require('../utils/logger');
 const { GoogleGenAI } = require('@google/genai');
+const axios = require('axios');
 // Les clés vivaient en dur ici, une par fonction. Elles viennent maintenant du
 // pool partagé, alimenté par `GEMINI_API_KEYS` : une seule liste à tenir à
 // jour, et rien de secret dans le dépôt.
@@ -462,10 +463,123 @@ async function processPendingTweet(tweetId, tweetContent, authorUsername, isRepl
   }
 }
 
+/**
+ * Tranche une contestation de strike Ultra.
+ *
+ * Le strike bloque la diffusion SANS revue préalable ; cette fonction EST la
+ * seule revue qui existe, déclenchée uniquement quand l'auteur conteste.
+ * Volontairement DISTINCTE de `evaluateTweetForRecommendations` : celle-ci
+ * juge la conformité générale du contenu et est délibérément permissive
+ * (« privilégie l'inclusion »). Rejouer CE test sur une contestation
+ * annulait quasiment tout strike : un tweet déjà approuvé une première fois
+ * repasse mécaniquement ce même test très permissif, sans jamais évaluer si
+ * le MOTIF du strike avait un fondement — c'est pourtant lui qui est
+ * contesté, pas la conformité du tweet.
+ *
+ * @returns {Promise<{ upheld: boolean, reason: string }>}
+ */
+async function evaluateStrikeDispute({ content, authorUsername, strikeReason }) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  const model = process.env.OPENROUTER_MODEL;
+  if (!apiKey || !model) {
+    // Pas de moteur disponible : impossible de trancher, donc pas de
+    // blocage maintenu qu'on ne peut pas justifier.
+    return { upheld: false, reason: 'Moteur d\'évaluation indisponible : strike annulé par précaution.' };
+  }
+
+  const prompt = `Tâche : Un abonné Ultra de TwitNinf a « striké » un tweet — action qui bloque
+IMMÉDIATEMENT sa diffusion (recommandations, recherche, fils publics), SANS
+revue préalable. L'auteur du tweet conteste ce strike. Ta tâche est de
+trancher : le strike est-il justifié par un problème RÉEL et CONCRET avec ce
+contenu précis, ou est-il frivole ou abusif ?
+
+CONTEXTE DE LA PLATEFORME : TwitNinf est un réseau social francophone. Argot,
+verlan, abréviations, mélange de langues, humour interne sont NORMAUX et ne
+justifient rien à eux seuls.
+
+Contenu du tweet contesté : ${JSON.stringify(content)}
+Auteur du tweet : ${JSON.stringify(authorUsername || 'inconnu')}
+Motif donné par l'utilisateur qui a striké : ${JSON.stringify(strikeReason)}
+
+RÈGLE ABSOLUE : le strike n'est PAS un outil de modération de contenu
+générale — c'est un pouvoir individuel exercé par un compte payant contre un
+autre. Le maintenir exige un motif SPÉCIFIQUE et VÉRIFIABLE ancré dans le
+contenu lui-même (harcèlement ciblé, désinformation factuelle, spam,
+usurpation, incitation à la violence), jamais une simple opinion, un
+désaccord de fond, une plaisanterie, ou « je n'aime pas ce message ». Dans le
+doute, la contestation gagne : un strike maintenu à tort prive quelqu'un de
+portée sans qu'il ait rien fait de mal ; un strike annulé à tort ne coûte
+qu'un peu de portée, récupérable plus tard.
+
+Retourne un JSON strict avec les champs EXACTS :
+- upheld (boolean) : true si le strike doit être MAINTENU, false s'il doit être ANNULÉ
+- reason (string) : explication courte en français, adressée à l'auteur du tweet
+
+Réponds UNIQUEMENT avec le JSON brut, SANS backticks, SANS markdown.
+Exemple : {"upheld":false,"reason":"Le motif donné ne décrit aucun problème concret avec ce tweet."}`;
+
+  // AUDIT 2026-08-26 : les 9 clés de `GEMINI_API_KEYS` sont toutes révoquées
+  // par Google (« reported as leaked » — probablement liées au passage en
+  // public des dépôts). Ce n'était pas réparable par du code côté Gemini, et
+  // corriger `evaluateTweetForRecommendations`/`generatePoliceResponse` de la
+  // même façon reste hors scope (chemin critique de publication, à ne pas
+  // toucher sans clé pour tester). Cette fonction bascule donc sur OpenRouter
+  // — transport différent, même prompt/contrat de sortie, config via
+  // `OPENROUTER_API_KEY`/`OPENROUTER_MODEL` dans `.env`.
+  let text;
+  try {
+    const response = await axios.post(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        model,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.2,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 20000,
+      }
+    );
+    text = response.data?.choices?.[0]?.message?.content;
+  } catch (error) {
+    logger.error('[strikeDispute] appel OpenRouter en échec:', error?.response?.data || error.message);
+    return { upheld: false, reason: 'Erreur d\'évaluation : strike annulé par précaution.' };
+  }
+
+  if (typeof text !== 'string' || !text.includes('{') || !text.includes('}')) {
+    logger.warn(`[strikeDispute] réponse OpenRouter sans JSON exploitable: "${text}"`);
+    return { upheld: false, reason: 'Réponse d\'évaluation illisible : strike annulé par précaution.' };
+  }
+
+  text = text.trim();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = null;
+  }
+  if (!json || typeof json.upheld !== 'boolean') {
+    const match = text.match(/\{[\s\S]*?\}/);
+    if (match) {
+      try { json = JSON.parse(match[0]); } catch { json = null; }
+    }
+  }
+  if (!json || typeof json.upheld !== 'boolean') {
+    logger.warn(`[strikeDispute] réponse OpenRouter non exploitable: "${text}"`);
+    return { upheld: false, reason: 'Réponse d\'évaluation illisible : strike annulé par précaution.' };
+  }
+
+  return { upheld: json.upheld, reason: json.reason || 'Évaluation automatique.' };
+}
+
 module.exports = {
   evaluateTweetForRecommendations,
   generatePoliceResponse,
-  processPendingTweet
+  processPendingTweet,
+  evaluateStrikeDispute
 };
 
 

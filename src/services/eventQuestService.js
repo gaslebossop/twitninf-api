@@ -41,7 +41,7 @@ const {
 } = require('../models');
 const logger = require('../utils/logger');
 const EconomyLedger = require('../economy/ledger');
-const VirtualCurrencyService = require('./virtualCurrencyService');
+const { getPlatformCurrency } = require('../economy/platformCurrency');
 
 /** Mémoïsation du comptage global, qui est le seul à balayer toute la table. */
 const globalCache = new Map();
@@ -57,6 +57,20 @@ function windowOf(event, quest) {
 
 function between(from, to) {
   return { [Op.gte]: from, [Op.lte]: to };
+}
+
+/**
+ * Le filtre à comparer dans la colonne `hashtags`.
+ *
+ * Les tags y sont stockés AVEC leur dièse — le validateur du modèle l'exige.
+ * Comparer sans dièse (`joyeuxtwitninf` contre `#joyeuxtwitninf`) ne matche
+ * donc jamais rien : les quêtes à hashtag restaient désespérément à zéro,
+ * quel que soit ce que les comptes publiaient. Corrigé le 2026-08-25, en
+ * pleine semaine d'événement.
+ */
+function hashtagNeedle(raw) {
+  const tag = String(raw || '').trim();
+  return tag.startsWith('#') ? tag : `#${tag}`;
 }
 
 // ─── Sources de mesure ───────────────────────────────────────────────────────
@@ -81,7 +95,7 @@ async function countTweets(userId, from, to, measure) {
       // et une qualification en dur casse dans l'un des deux cas. Il n'y a
       // qu'une table dans ces requêtes, donc la colonne nue est sans ambiguïté.
       `EXISTS (SELECT 1 FROM jsonb_array_elements_text(hashtags) AS h
-               WHERE lower(h) = lower(${sequelize.escape(String(measure.hashtag).replace(/^#/, ''))}))`
+               WHERE lower(h) = lower(${sequelize.escape(hashtagNeedle(measure.hashtag))}))`
     );
   }
 
@@ -112,7 +126,7 @@ async function countDistinctLikers(userId, from, to, measure) {
       // et une qualification en dur casse dans l'un des deux cas. Il n'y a
       // qu'une table dans ces requêtes, donc la colonne nue est sans ambiguïté.
       `EXISTS (SELECT 1 FROM jsonb_array_elements_text(hashtags) AS h
-               WHERE lower(h) = lower(${sequelize.escape(String(measure.hashtag).replace(/^#/, ''))}))`
+               WHERE lower(h) = lower(${sequelize.escape(hashtagNeedle(measure.hashtag))}))`
     );
   }
 
@@ -225,6 +239,11 @@ async function measureQuest(userId, event, quest, completedIds) {
         // Se compte sur les AUTRES quêtes, sinon elle se compterait elle-même
         // et le sommet serait atteint une quête trop tôt.
         return completedIds.filter((id) => id !== quest.id).length;
+      case 'auto':
+        // Quête OFFERTE : terminée d'office pour tout le monde. Réservé aux
+        // rattrapages en cours d'événement (suivi impossible côté client) —
+        // la remise reste manuelle, re-mesurée et idempotente.
+        return Math.max(1, Number(quest.goal) || 1);
       default:
         // Une quête sans descripteur n'avance que par signal explicite. C'est
         // le cas des quêtes secrètes, dont le déclencheur est ailleurs.
@@ -369,7 +388,14 @@ async function claim(userId, questId) {
   }
 
   try {
-    await grant(userId, granted);
+    const failedKinds = await grant(userId, granted);
+    if (failedKinds.length > 0) {
+      // La remise reste ACQUISE (l'index unique interdit de réclamer en
+      // boucle) mais `settled_at` reste nul : la dette est visible et le
+      // rattrapage la reprendra une fois la cause corrigée.
+      logger.error(`Octroi incomplet pour ${userId} / ${questId}: ${failedKinds.join(', ')}`);
+      return { ok: true, granted, incomplete: failedKinds };
+    }
     // Marque la dette comme honorée. Tant que `settled_at` est nul, la remise
     // est enregistrée mais rien n'a été donné — et l'index unique empêche de
     // re-réclamer. C'est exactement ce qui s'est produit pour les remises
@@ -417,6 +443,7 @@ async function grant(userId, granted) {
   // jours de Pro et un titre) déclenche plusieurs octrois. On les tente tous,
   // indépendamment.
   const jobs = [];
+  const failedKinds = [];
 
   if (granted.kind === 'coins' || payload.coins) {
     jobs.push(['coins', () => grantCoins(userId, Number(payload.amount ?? payload.coins), granted.label)]);
@@ -444,6 +471,7 @@ async function grant(userId, granted) {
     try {
       await run();
     } catch (error) {
+      failedKinds.push(kind);
       logger.error(`Octroi ${kind} echoue pour ${userId} (${granted.label}):`, error.message);
     }
   }
@@ -455,6 +483,11 @@ async function grant(userId, granted) {
     // accorder du Pro. La trace reste dans `tw_quest_claims.granted`.
     logger.info(`Recompense ${granted.kind} enregistree sans octroi automatique: ${granted.label}`);
   }
+
+  // Retournés à l'appelant : tant qu'un octroi a échoué, la remise ne doit PAS
+  // être marquée honorée — sinon la dette devient invisible pour le
+  // rattrapage (`replayEventGrants.js` ne voit que `settled_at IS NULL`).
+  return failedKinds;
 }
 
 /**
@@ -519,7 +552,11 @@ async function earnMultiplierFor(userId) {
 async function grantCoins(userId, amount, description) {
   if (!Number.isFinite(amount) || amount <= 0) return;
 
-  const currency = await VirtualCurrencyService.getMainCurrency();
+  // Résolution par le chemin standard de la stack : la façade legacy
+  // (`getMainCurrency`) cherchait encore le symbole 'TWC', disparu de la base
+  // au profit de 'NF' — chaque récompense en NF de l'événement échouait donc
+  // avec « Monnaie principale introuvable ».
+  const currency = await getPlatformCurrency();
   if (!currency) throw new Error('Monnaie principale introuvable');
 
   const dbTransaction = await sequelize.transaction();

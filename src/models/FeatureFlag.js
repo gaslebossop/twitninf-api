@@ -33,6 +33,9 @@ const { DataTypes } = require('sequelize');
 /** Unités de découpage possibles pour le tirage progressif. */
 const BUCKET_UNITS = ['user', 'device', 'session'];
 
+/** Types d'audience. Source de vérité : `services/featureFlagEvaluator.js`. */
+const AUDIENCES = ['rollout', 'beta'];
+
 module.exports = (sequelize) => {
   const FeatureFlag = sequelize.define(
     'FeatureFlag',
@@ -82,7 +85,27 @@ module.exports = (sequelize) => {
         defaultValue: false,
       },
 
-      /** Palier de déploiement global, en pourcentage (0 à 100). */
+      /**
+       * Type d'audience — QUI la fonctionnalité vise, par nature.
+       *
+       * `rollout` (défaut) : un pourcentage du trafic, affiné par des segments.
+       * `beta` : les membres du programme beta, et personne d'autre.
+       *   `rollout_percentage` n'est alors PAS consulté — c'est ce qui rend la
+       *   fuite hors de la beta impossible par une montée de palier.
+       *
+       * Voir `AUDIENCES` dans `services/featureFlagEvaluator.js`.
+       */
+      audience: {
+        type: DataTypes.STRING(16),
+        allowNull: false,
+        defaultValue: 'rollout',
+        validate: { isIn: [AUDIENCES] },
+      },
+
+      /**
+       * Palier de déploiement global, en pourcentage (0 à 100).
+       * Ignoré quand `audience = 'beta'`.
+       */
       rollout_percentage: {
         type: DataTypes.INTEGER,
         allowNull: false,
@@ -222,6 +245,7 @@ module.exports = (sequelize) => {
   );
 
   FeatureFlag.BUCKET_UNITS = BUCKET_UNITS;
+  FeatureFlag.AUDIENCES = AUDIENCES;
 
   FeatureFlag.associate = function associate(models) {
     FeatureFlag.belongsTo(models.User, { foreignKey: 'created_by', as: 'creator' });
@@ -237,6 +261,7 @@ module.exports = (sequelize) => {
     return {
       key: this.key,
       enabled: this.enabled,
+      audience: this.audience || 'rollout',
       rollout_percentage: this.rollout_percentage,
       rules: this.rules || [],
       variants: this.variants || [],

@@ -8,7 +8,7 @@ const authService = require('./authService');
 const NewEconomyService = require('./newEconomyService');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
 const { TIER } = require('../constants/subscriptionTiers');
-const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
+const { isSubscriptionActive, isProOrAbove } = require('../utils/subscriptionHelpers');
 
 /**
  * Connexion / association de compte via g-auth (fournisseur d'identité du
@@ -368,13 +368,15 @@ async function linkAccount(userId, { sub }) {
       throw new Error(reward.reason || 'échec du crédit du bonus');
     }
 
-    // Le volet Pro ne s'applique pas à un compte déjà Pro actif — inutile
-    // (et trompeur) d'« offrir » ce que la personne a déjà. Un compte gratuit,
+    // Le volet Pro ne s'applique pas à un compte déjà Pro OU AU-DESSUS et actif
+    // — inutile (et trompeur) d'« offrir » ce que la personne a déjà, et ça
+    // aurait RÉTROGRADÉ un Ultra actif vers un Pro temporaire de 3 jours si la
+    // comparaison avait été une égalité stricte à TIER.PRO. Un compte gratuit,
     // Plus, ou Pro expiré reçoit 3 jours de Pro pleins à partir de maintenant :
     // pas une extension de son palier courant (qui n'a pas de sens si c'est
     // Plus), un vrai palier Pro temporaire.
     let trialDays = 0;
-    if (!(isSubscriptionActive(user) && user.subscription_tier === TIER.PRO)) {
+    if (!(isSubscriptionActive(user) && isProOrAbove(user.subscription_tier))) {
       trialDays = LINK_BONUS_TRIAL_PRO_DAYS;
       user.subscription_tier = TIER.PRO;
       user.premium = true;

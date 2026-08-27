@@ -25,6 +25,7 @@
  * résilier.
  */
 
+const { Op } = require('sequelize');
 const { sequelize, User, Notification } = require('../models');
 const { queryRead } = require('../database/readReplica');
 const { createLocalEmbedQuery, cosineSimilarity } = require('./policiercongo/policiercongoV2Embeddings');
@@ -389,7 +390,8 @@ async function recentlyNotifiedTerms(userId) {
 /** Abonnés Pro dont l'abonnement est réellement actif. */
 async function fetchEligibleUsers() {
   const users = await User.findAll({
-    where: { subscription_tier: TIER.PRO, premium: true },
+    // Ultra est un sur-ensemble de Pro : voir isProOrAbove.
+    where: { subscription_tier: { [Op.in]: [TIER.PRO, TIER.ULTRA] }, premium: true },
     attributes: ['id', 'username', 'subscription_tier', 'subscription_expires_at', 'premium'],
   });
   return users.filter((u) => isSubscriptionActive(u));

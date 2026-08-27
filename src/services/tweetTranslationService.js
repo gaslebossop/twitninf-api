@@ -19,7 +19,7 @@
 const crypto = require('crypto');
 const { Tweet, TweetTranslation, User } = require('../models');
 const { generateWithCodex } = require('./policiercongo/codexClient');
-const { isSubscriptionActive, TIER } = require('../utils/subscriptionHelpers');
+const { isSubscriptionActive, isProOrAbove } = require('../utils/subscriptionHelpers');
 const logger = require('../utils/logger');
 
 const CODEX_MODEL = process.env.TRANSLATION_CODEX_MODEL || 'gpt-5.4-mini';
@@ -69,7 +69,7 @@ async function canUseTranslation(tokenUser) {
       attributes: ['id', 'subscription_tier', 'subscription_expires_at'],
     });
     if (!user) return false;
-    return user.subscription_tier === TIER.PRO && isSubscriptionActive(user);
+    return isProOrAbove(user.subscription_tier) && isSubscriptionActive(user);
   } catch (error) {
     logger.error(`[translation] Vérification du palier impossible: ${error.message}`);
     return false;

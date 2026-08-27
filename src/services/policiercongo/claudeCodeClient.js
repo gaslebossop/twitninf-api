@@ -11,7 +11,7 @@
 
 const logger = require('../../utils/logger');
 
-const DEFAULT_MODEL = (process.env.POLICIERCONGO_CLAUDE_CODE_MODEL || 'sonnet').trim();
+const DEFAULT_MODEL = (process.env.POLICIERCONGO_CLAUDE_CODE_MODEL || 'claude-opus-5').trim();
 
 let _queryFn = null;
 async function loadQuery() {
@@ -23,7 +23,8 @@ async function loadQuery() {
 
 /**
  * @param {string} prompt Prompt complet déjà aplati (system + user).
- * @param {string} [model] Alias de modèle Claude Code ('sonnet' | 'opus' | 'haiku').
+ * @param {string} [model] Modèle Claude Code : identifiant exact ('claude-opus-5')
+ *   ou alias ('opus' | 'sonnet' | 'haiku').
  * @returns {Promise<string|null>} Texte brut de la réponse, ou null en cas d'échec.
  */
 async function generateWithClaudeCode(prompt, model = DEFAULT_MODEL) {

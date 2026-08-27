@@ -42,6 +42,27 @@ const { evaluateBonuses, describeCatalog } = require('./bonuses');
 const { percentileRanks, qualityScore, creatorWeight, shareOfPool, rpmFor } = require('./ranking');
 
 /**
+ * Première période que le pot créateur a le droit de payer.
+ *
+ * Ce n'est pas une précaution théorique. Les signaux sont lus depuis
+ * `user_behavior_data`, qui existe depuis bien avant le pot : une clôture
+ * lancée sur une semaine ANTÉRIEURE à la mise en service trouve donc des vues,
+ * calcule des parts et verse de l'argent pour une période où le programme
+ * n'existait pas, où personne n'avait accepté ses règles, et où les entrées de
+ * trésorerie étaient d'un tout autre ordre. Relevé le 2026-08-22 : clôturer
+ * 2026-W33 aurait versé 7 534 NF, et 2026-W32 26 340 NF, contre ~174 NF pour
+ * la première semaine réellement couverte.
+ *
+ * Le garde-fou vit ici plutôt que dans l'appelant parce que c'est ici qu'on
+ * verse : une reprise manuelle, un rattrapage au démarrage ou un futur script
+ * de maintenance doivent tous buter dessus, pas seulement le cron.
+ *
+ * Comparaison lexicographique volontaire : `YYYY-Www` avec la semaine sur deux
+ * chiffres se trie exactement comme la chronologie.
+ */
+const FIRST_COVERED_PERIOD = process.env.CREATOR_POOL_FIRST_PERIOD || '2026-W34';
+
+/**
  * Taille du pot d'une période.
  *
  * `inflows` = tout ce qui a rejoint la trésorerie pendant la fenêtre : dépenses
@@ -280,6 +301,12 @@ async function closePeriod({ periodKey = null, now = new Date() } = {}) {
   if (p.end > now) {
     throw new Error(`La période ${p.key} n'est pas terminée (fin ${p.end.toISOString()})`);
   }
+  if (p.key < FIRST_COVERED_PERIOD) {
+    throw new Error(
+      `La période ${p.key} précède la mise en service du pot (${FIRST_COVERED_PERIOD}) : ` +
+      `refus de verser pour une semaine que le programme ne couvrait pas.`
+    );
+  }
 
   const breakdown = await computePeriodBreakdown(p);
   const settings = await getSettings();
@@ -356,6 +383,40 @@ async function closePeriod({ periodKey = null, now = new Date() } = {}) {
   );
 
   return { period: p.key, created, pool: breakdown.pool.pool, total: roundTWC(total) };
+}
+
+/**
+ * Clôture la dernière période terminée, si elle ne l'a pas déjà été.
+ *
+ * ── Pourquoi ça ne peut pas rester un simple cron ────────────────────────
+ * `node-cron` ne rejoue JAMAIS une occurrence manquée. Le worker arrêté au
+ * moment du déclenchement hebdomadaire — un déploiement, un `pm2 restart`, un
+ * incident de dix minutes un lundi à 03:20 — et la semaine n'est jamais
+ * clôturée : les parts ne sont pas écrites, et comme la clôture suivante ne
+ * regarde que la semaine précédente, elles ne le seront pas non plus la
+ * semaine d'après. Personne n'est payé, et rien ne le signale.
+ *
+ * Cette fonction est donc appelée aux DEUX endroits : par le cran horaire
+ * habituel, et au démarrage du worker. Elle est sûre à rejouer autant de fois
+ * qu'on veut — l'index unique `(user_id, period_key)` absorbe les doublons, et
+ * le test de présence évite même de recalculer un partage déjà figé.
+ */
+async function closeLastPeriodIfNeeded({ now = new Date() } = {}) {
+  const p = period.lastClosedPeriod(now);
+
+  if (p.key < FIRST_COVERED_PERIOD) {
+    return { period: p.key, skipped: `antérieure à ${FIRST_COVERED_PERIOD}`, created: 0 };
+  }
+
+  const [row] = await sequelize.query(
+    `SELECT COUNT(*)::int AS n FROM creator_payouts WHERE period_key = :key`,
+    { replacements: { key: p.key }, type: sequelize.QueryTypes.SELECT }
+  );
+  if ((row?.n || 0) > 0) {
+    return { period: p.key, skipped: 'déjà clôturée', created: 0, existing: row.n };
+  }
+
+  return closePeriod({ periodKey: p.key, now });
 }
 
 /**
@@ -462,12 +523,21 @@ async function getDashboard(userId, { now = new Date() } = {}) {
   const current = period.currentPeriod(now);
   const settings = await getSettings();
 
-  const [live, payouts] = await Promise.all([
+  const [live, payouts, myEligibilityMap] = await Promise.all([
     computePeriodBreakdown(current, { settings }),
     listPayouts(userId),
+    // Indépendant de `withAudience` (computePeriodBreakdown ne garde que les
+    // créateurs ayant au moins une vue cette semaine) : sans vue cette
+    // semaine, `mine` ci-dessous est `null`, et l'éligibilité réelle du
+    // compte (abonnement + programme) ne doit pas en dépendre — sans quoi
+    // « pas encore de vue » s'affichait comme « paiement suspendu », ce qui
+    // n'est pas ce que dit le compte.
+    loadEligibility([String(userId)]),
   ]);
 
   const mine = live.rows.find((r) => r.creatorId === String(userId)) || null;
+  const myEligibility = myEligibilityMap.get(String(userId))
+    || { eligible: false, lockedReason: 'La monétisation nécessite d\'être accepté dans le programme de monétisation' };
   const claimable = payouts.filter((p) => p.status === 'claimable');
   const claimableTotal = roundTWC(
     claimable.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0)
@@ -483,27 +553,28 @@ async function getDashboard(userId, { now = new Date() } = {}) {
       pool: live.pool,
       cohortSize: live.cohort.size,
       // Projection : ce que la part vaudrait si la semaine s'arrêtait là.
-      projection: mine
-        ? {
-            amount: mine.amount,
-            payableAmount: mine.payableAmount,
-            rpm: mine.rpm,
-            share: mine.share,
-            quality: mine.quality,
-            qualifiedViews: mine.qualifiedViews,
-            measurableViews: mine.measurableViews,
-            rawViews: mine.rawViews,
-            distinctViewers: mine.distinctViewers,
-            hasRealDwell: mine.hasRealDwell,
-            attentionFactor: mine.attentionFactor,
-            rates: mine.rates,
-            percentiles: mine.percentiles,
-            raw: mine.raw,
-            bonuses: mine.bonuses,
-            eligible: mine.eligible,
-            lockedReason: mine.lockedReason,
-          }
-        : null,
+      // Toujours renvoyée (même sans vue cette semaine) : `eligible` et
+      // `lockedReason` viennent de `myEligibility`, pas de `mine`, qui peut
+      // être absent sans que le compte soit inéligible pour autant.
+      projection: {
+        amount: mine?.amount || 0,
+        payableAmount: mine?.payableAmount || 0,
+        rpm: mine?.rpm || 0,
+        share: mine?.share ?? null,
+        quality: mine?.quality ?? null,
+        qualifiedViews: mine?.qualifiedViews || 0,
+        measurableViews: mine?.measurableViews || 0,
+        rawViews: mine?.rawViews || 0,
+        distinctViewers: mine?.distinctViewers || 0,
+        hasRealDwell: mine?.hasRealDwell ?? null,
+        attentionFactor: mine?.attentionFactor ?? null,
+        rates: mine?.rates ?? null,
+        percentiles: mine?.percentiles ?? null,
+        raw: mine?.raw ?? null,
+        bonuses: mine?.bonuses ?? null,
+        eligible: myEligibility.eligible,
+        lockedReason: myEligibility.lockedReason,
+      },
     },
     claimable: {
       count: claimable.length,
@@ -540,7 +611,9 @@ module.exports = {
   computePool,
   computePeriodBreakdown,
   closePeriod,
+  closeLastPeriodIfNeeded,
   claim,
   listPayouts,
   getDashboard,
+  FIRST_COVERED_PERIOD,
 };

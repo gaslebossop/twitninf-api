@@ -14,6 +14,7 @@ const TIER = {
   FREE: 'free',
   PLUS: 'plus',
   PRO: 'pro',
+  ULTRA: 'ultra',
 };
 
 const DEFAULT_DURATION_DAYS = 5;
@@ -22,6 +23,17 @@ const DEFAULT_DURATION_DAYS = 5;
 const TIER_PRICES_EUR = {
   [TIER.PLUS]: 15,
   [TIER.PRO]: 30,
+};
+
+/**
+ * Ultra est tarifé en NF FIXE, pas en euros convertis au cours du moment
+ * comme Plus/Pro : demandé tel quel (300 NF, confirmé « = 3000e » — palier
+ * réservé aux gros créateurs), donc pas de recalcul de `nfAmountForEur` ni de
+ * dépendance au cours du NF pour cette offre. Voir `handleUltraPurchase` dans
+ * `userRoutes.js`.
+ */
+const TIER_PRICES_NF_FIXED = {
+  [TIER.ULTRA]: 300,
 };
 
 /**
@@ -49,9 +61,20 @@ function nfAmountForEur(amountEur, nfPriceEur) {
 }
 
 function tierRank(tier) {
+  if (tier === TIER.ULTRA) return 3;
   if (tier === TIER.PRO) return 2;
   if (tier === TIER.PLUS) return 1;
   return 0;
+}
+
+/**
+ * Ultra est un sur-ensemble de Pro : partout où le code réservait un avantage
+ * « Pro », Ultra doit aussi passer, sans quoi le palier le plus cher offrirait
+ * moins que le palier en dessous. Source unique pour ce test plutôt que
+ * `tier === TIER.PRO || tier === TIER.ULTRA` recopié à chaque appelant.
+ */
+function isProOrAbove(tier) {
+  return tierRank(tier) >= tierRank(TIER.PRO);
 }
 
 module.exports = {
@@ -59,6 +82,8 @@ module.exports = {
   DEFAULT_DURATION_DAYS,
   TIER_PRICES_EUR,
   TIER_PRICES_TWC,
+  TIER_PRICES_NF_FIXED,
   nfAmountForEur,
   tierRank,
+  isProOrAbove,
 };

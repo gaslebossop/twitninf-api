@@ -459,6 +459,14 @@ async function runMigrations() {
       -- toutes les minutes et ne doit lire que les drapeaux reellement armes.
       -- Il compare ensuite l'echeance en memoire, d'ou un index sur la seule
       -- condition de selection et non sur la date.
+      -- Type d'audience : `rollout` (palier) ou `beta` (membres du programme).
+      -- Sur un drapeau `beta`, `rollout_percentage` n'est plus consulte.
+      ALTER TABLE feature_flags
+        ADD COLUMN IF NOT EXISTS audience VARCHAR(16) NOT NULL DEFAULT 'rollout';
+      ALTER TABLE feature_flags DROP CONSTRAINT IF EXISTS feature_flags_audience_check;
+      ALTER TABLE feature_flags ADD CONSTRAINT feature_flags_audience_check
+        CHECK (audience IN ('rollout','beta'));
+
       ALTER TABLE feature_flags
         ADD COLUMN IF NOT EXISTS auto_rollout JSONB NULL;
 
@@ -466,6 +474,64 @@ async function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_feature_flags_auto_rollout
         ON feature_flags (updated_at)
         WHERE auto_rollout IS NOT NULL AND archived_at IS NULL;
+    `);
+
+    // Programme beta : une seule porte, « on est sur la version beta ou pas ».
+    //
+    // Une ligne par compte, qui porte a la fois la candidature et
+    // l'appartenance. Les separer donnerait deux verites contradictoires sur
+    // le meme compte, alors que la seule question posee a chaque requete est
+    // « ce compte est-il membre ? ».
+    //
+    // `approved` est le SEUL statut pour lequel l'attribut de ciblage
+    // `is_beta` vaut vrai (voir services/featureFlagService.js).
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS beta_members (
+        user_id      UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        status       VARCHAR(16) NOT NULL DEFAULT 'pending',
+        motivation   TEXT NULL,
+        source       VARCHAR(16) NULL,
+        platform     VARCHAR(16) NULL,
+        app_version  VARCHAR(32) NULL,
+        applied_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        reviewed_at  TIMESTAMPTZ NULL,
+        reviewed_by  UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+        review_note  TEXT NULL,
+        approved_at  TIMESTAMPTZ NULL,
+        revoked_at   TIMESTAMPTZ NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      ALTER TABLE beta_members DROP CONSTRAINT IF EXISTS beta_members_status_check;
+      ALTER TABLE beta_members ADD CONSTRAINT beta_members_status_check
+        CHECK (status IN ('pending','approved','rejected','revoked','left'));
+
+      -- La file d'attente : la requete chaude de la console d'administration.
+      CREATE INDEX IF NOT EXISTS idx_beta_members_pending
+        ON beta_members (applied_at) WHERE status = 'pending';
+
+      -- Le decompte des membres, lu par la vitrine publique ET par le
+      -- controle de capacite a chaque approbation.
+      CREATE INDEX IF NOT EXISTS idx_beta_members_approved
+        ON beta_members (approved_at DESC) WHERE status = 'approved';
+    `);
+
+    // Reglages du programme beta. Singleton : la contrainte `id = 1` vaut
+    // mieux qu'une convention, un second jeu de reglages donnerait deux
+    // reponses a « les candidatures sont-elles ouvertes ? ».
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS beta_settings (
+        id          SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        is_open     BOOLEAN NOT NULL DEFAULT TRUE,
+        capacity    INTEGER NULL,
+        headline    VARCHAR(160) NOT NULL DEFAULT 'La beta TwitNinf',
+        pitch       TEXT NULL,
+        updated_by  UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      INSERT INTO beta_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
     `);
 
     // Carte NF : position PARTAGEE, et rien d'autre.

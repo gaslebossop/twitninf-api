@@ -138,6 +138,22 @@ class ContentQualityService {
   static async applyConsequence({ userId, tweetId, kind, reason, occurrence, settings }) {
     const label = KIND_LABELS[kind] || 'Publication écartée';
 
+    // Immunité Ultra : l'événement reste enregistré (il a déjà été inséré par
+    // `record`, avant cet appel — l'historique sert toujours à l'analyse de
+    // motifs), mais aucune restriction de portée n'est appliquée. Seul ce
+    // pipeline automatique est couvert : un retrait manuel par un modérateur
+    // reste possible, ce n'est pas la même porte.
+    if (occurrence >= 2) {
+      const { User } = require('../models');
+      const { TIER } = require('../constants/subscriptionTiers');
+      const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
+      const user = await User.findByPk(userId, { attributes: ['subscription_tier', 'subscription_expires_at'] });
+      if (user && user.subscription_tier === TIER.ULTRA && isSubscriptionActive(user)) {
+        logger.info(`[contentQuality] ${userId}: restriction ignorée (palier Ultra), occurrence ${occurrence}`);
+        return { action: 'ultra_exempt' };
+      }
+    }
+
     if (occurrence <= 1) {
       await this.notify(userId, tweetId, {
         title: label,

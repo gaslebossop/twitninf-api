@@ -135,7 +135,15 @@ class Tweet extends Model {
           attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'profile_customization']
         }
       ],
-      order: [[sortBy, sortOrder]],
+      // Avantage Ultra/Pro (« être premier dans les recherches ») : les
+      // paliers payants remontent d'abord, à égalité de pertinence sinon
+      // — jamais au-dessus d'une correspondance plus pertinente. Le tri
+      // alphabétique suffit : 'free' < 'plus' < 'pro' < 'ultra' respecte déjà
+      // exactement l'ordre de palier voulu, pas besoin d'un CASE SQL.
+      order: [
+        [{ model: this.sequelize.models.User, as: 'author' }, 'subscription_tier', 'DESC'],
+        [sortBy, sortOrder],
+      ],
       limit,
       offset
     });

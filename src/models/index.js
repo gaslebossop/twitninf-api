@@ -34,6 +34,8 @@ const TwQuestClaim = require('./TwQuestClaim');
 const TwQuestSignal = require('./TwQuestSignal');
 const TwEventPost = require('./TwEventPost');
 const FeatureFlagModule = require('./FeatureFlag');
+const BetaMemberModule = require('./BetaMember');
+const BetaSettingsModule = require('./BetaSettings');
 const VerificationRequest = require('./VerificationRequest');
 const Advertisement = require('./Advertisement');
 const AdCampaign = require('./AdCampaign');
@@ -44,6 +46,7 @@ const UserChallenge = require('./UserChallenge');
 const DeveloperAppModule = require('./DeveloperApp');
 const OAuthCodeModule = require('./OAuthCode');
 const OAuthTokenModule = require('./OAuthToken');
+const TweetStrikeModule = require('./TweetStrike');
 const SessionModule = require('./Session');
 const UserLocationEventModule = require('./UserLocationEvent');
 const UserConsentRecordModule = require('./UserConsentRecord');
@@ -149,6 +152,10 @@ const TwEventPostModel = TwEventPost(sequelize);
 // Drapeaux de fonctionnalité — déploiement progressif et ciblage par attributs
 const FeatureFlag = FeatureFlagModule(sequelize);
 
+// Programme beta — file d'attente et roster, source de l'attribut `is_beta`
+const BetaMember = BetaMemberModule(sequelize);
+const BetaSettings = BetaSettingsModule(sequelize);
+
 // Initialiser les modèles publicitaires
 const AdvertisementModel = Advertisement(sequelize);
 const AdCampaignModel = AdCampaign(sequelize);
@@ -159,6 +166,7 @@ const UserChallengeModel = UserChallenge(sequelize);
 const DeveloperApp = DeveloperAppModule(sequelize);
 const OAuthCode = OAuthCodeModule(sequelize);
 const OAuthToken = OAuthTokenModule(sequelize);
+const TweetStrike = TweetStrikeModule(sequelize);
 const Session = SessionModule(sequelize);
 const UserLocationEvent = UserLocationEventModule(sequelize);
 const UserConsentRecord = UserConsentRecordModule(sequelize);
@@ -531,6 +539,11 @@ FunctionalEventModel.belongsTo(User, {
 FeatureFlag.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
 FeatureFlag.belongsTo(User, { foreignKey: 'updated_by', as: 'updater' });
 
+BetaMember.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+BetaMember.belongsTo(User, { foreignKey: 'reviewed_by', as: 'reviewer' });
+User.hasOne(BetaMember, { foreignKey: 'user_id', as: 'betaMembership' });
+BetaSettings.belongsTo(User, { foreignKey: 'updated_by', as: 'updater' });
+
 // Associations pour les demandes de vérification
 User.hasMany(VerificationRequestModel, { 
   foreignKey: 'user_id', 
@@ -829,6 +842,25 @@ User.hasMany(OAuthToken, {
 OAuthToken.belongsTo(User, {
   foreignKey: 'user_id',
   as: 'user'
+});
+
+// Strikes Ultra (blocage de diffusion, voir contentQualityService/strikeRoutes)
+Tweet.hasMany(TweetStrike, {
+  foreignKey: 'tweet_id',
+  as: 'strikes',
+  onDelete: 'CASCADE'
+});
+TweetStrike.belongsTo(Tweet, {
+  foreignKey: 'tweet_id',
+  as: 'tweet'
+});
+TweetStrike.belongsTo(User, {
+  foreignKey: 'striker_id',
+  as: 'striker'
+});
+TweetStrike.belongsTo(User, {
+  foreignKey: 'author_id',
+  as: 'author'
 });
 
 // Sessions de connexion (jetons de rafraîchissement avec rotation)
@@ -2248,6 +2280,8 @@ module.exports = {
   TwQuestSignal: TwQuestSignalModel,
   TwEventPost: TwEventPostModel,
   FeatureFlag,
+  BetaMember,
+  BetaSettings,
   VerificationRequest: VerificationRequestModel,
   BotReputation,
   Advertisement: AdvertisementModel,
@@ -2259,6 +2293,7 @@ module.exports = {
   DeveloperApp,
   OAuthCode,
   OAuthToken,
+  TweetStrike,
   Session,
   UserLocationEvent,
   UserConsentRecord,

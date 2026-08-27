@@ -120,6 +120,7 @@ const functionalEventRoutes = require('./routes/functionalEventRoutes');
 const eventPassRoutes = require('./routes/eventPassRoutes');
 const eventPassPageRoutes = require('./routes/eventPassPageRoutes');
 const featureFlagRoutes = require('./routes/featureFlagRoutes');
+const betaRoutes = require('./routes/betaRoutes');
 const nfMapRoutes = require('./routes/nfMapRoutes');
 const themePresetRoutes = require('./routes/themePresets');
 const progressiveRecommendationRoutes = require('./routes/progressiveRecommendationRoutes');
@@ -139,6 +140,10 @@ const policierCongoChatRoutes = require('./routes/policierCongoChatRoutes');
 const policierCongoV3Router = require('./services/policiercongo/policiercongov3/router');
 const { getPolicierCongoV3 } = require('./services/policiercongo/policiercongov3/orchestrator');
 const developerAdminRoutes = require('./routes/developerAdminRoutes');
+const oauthRoutes = require('./routes/oauthRoutes');
+const publicApiRoutes = require('./routes/publicApiRoutes');
+const strikeRoutes = require('./routes/strikeRoutes');
+const { resolveOAuthUser } = require('./middleware/oauthMiddleware');
 const detectionRoutes = require('./routes/detectionRoutes');
 const userSimilarityRoutes = require('./routes/userSimilarityRoutes');
 const neuralRankRoutes = require('./routes/neuralRankRoutes');
@@ -359,6 +364,60 @@ const searchLimiter = rateLimit({
 });
 
 app.use('/api/search', searchLimiter);
+
+// Protection rate limit sur l'API publique OAuth (/api/public/v1).
+//
+// AUDIT 2026-08-26 : cette API n'héritait que du limiteur global (1000/15min,
+// et de toute façon `isTrustedFirstPartyClient` ne s'applique jamais ici —
+// c'est un token OAuth tiers, pas le JWT de l'app officielle). 1000/15min
+// n'arrête aucune rafale : 12 tweets identiques ont été créés en 6 secondes
+// avec un seul access token pendant les tests du playground.
+//
+// `resolveOAuthUser` tourne AVANT le limiteur d'écriture, exprès : la limite
+// dépend du palier d'abonnement du propriétaire du token
+// (`req.user.subscriptionTier`), donc l'utilisateur doit être résolu avant de
+// pouvoir choisir un plafond. Les routes de `publicApiRoutes.js` n'ont donc
+// plus qu'à vérifier le scope (`requireOAuthScopes`), l'utilisateur est déjà
+// posé sur `req.user` à ce stade. Un token invalide est rejeté ici, avant
+// même d'atteindre le compteur — le plancher IP générique (1000/15min sur
+// tout `/api/`, plus haut dans ce fichier) reste la protection contre un
+// déluge de tokens bidons.
+const PUBLIC_API_WRITE_LIMITS_PER_MINUTE = {
+  free: 5,
+  plus: 5,
+  pro: 20,
+  ultra: 300, // 15× Pro — palier vendu 300 NF, réservé aux gros créateurs
+};
+const publicApiWriteLimiter = rateLimit({
+  store: makeRateLimitStore('public-api-write'),
+  windowMs: 60 * 1000, // 1 minute
+  keyGenerator: (req) => req.user?.id || req.ip,
+  max: (req) => PUBLIC_API_WRITE_LIMITS_PER_MINUTE[req.user?.subscriptionTier] ?? PUBLIC_API_WRITE_LIMITS_PER_MINUTE.free,
+  skip: (req) => req.method === 'GET',
+  message: {
+    success: false,
+    message: 'Trop d\'écritures pour votre palier d\'abonnement. Passez à Pro ou Ultra pour une limite plus haute, ou réessayez dans une minute.'
+  }
+});
+const publicApiReadLimiter = rateLimit({
+  store: makeRateLimitStore('public-api-read'),
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  keyGenerator: (req) => req.user?.id || req.ip,
+  max: 300, // 300 lectures/15min, tous paliers — non demandé, non limité par palier
+  skip: (req) => req.method !== 'GET',
+  message: { success: false, message: 'Trop de requêtes via l\'API publique. Réessayez plus tard.' }
+});
+app.use('/api/public/v1', resolveOAuthUser, publicApiWriteLimiter, publicApiReadLimiter);
+
+// Protection rate limit sur l'échange de token OAuth (code/secret/refresh
+// token) — cible directe d'un brute-force si elle reste sur le quota global.
+const oauthTokenLimiter = rateLimit({
+  store: makeRateLimitStore('oauth-token'),
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { success: false, message: 'Trop de tentatives. Réessayez plus tard.' }
+});
+app.use('/api/oauth/token', oauthTokenLimiter);
 
 // Logging des requêtes
 app.use(morgan('combined', {
@@ -582,6 +641,7 @@ app.use('/api/functional-events', functionalEventRoutes);
 
 // Drapeaux de fonctionnalité — déploiement progressif et ciblage par attributs
 app.use('/api/feature-flags', featureFlagRoutes);
+app.use('/api/beta', betaRoutes);
 
 // Carte NF — présence partagée, entièrement sous drapeau `fil.cartenf`
 app.use('/api/nf-map', nfMapRoutes);
@@ -607,6 +667,7 @@ app.use('/api/creator-intelligence', creatorIntelligenceRoutes);
 
 // Support par ticket (traitement prioritaire pour le palier Pro)
 app.use('/api/support', supportRoutes);
+app.use('/api/support/ai-agent', require('./routes/ultraSupportAgentRoutes'));
 app.use('/api/forge', featureProposalRoutes);
 
 // Offre créateur : contenu à l'unité, file de publication, renseignements
@@ -677,6 +738,11 @@ if (targetingRoutes) {
 
 // 📦 Routes pour les développeurs externes
 app.use('/api/developer', developerAdminRoutes);
+app.use('/api/oauth', oauthRoutes);
+app.use('/api/public/v1', publicApiRoutes);
+
+// ⚡ Strikes Ultra — blocage de diffusion, jamais suppression ni monétisation
+app.use('/api/strikes', strikeRoutes);
 
 // 🔍 Route de détection pour les tests
 app.use('/api/detection', detectionRoutes);
@@ -1039,7 +1105,7 @@ function setupCronJobs() {
    */
   cron.schedule('20 3 * * 1', async () => {
     try {
-      const result = await require('./economy/creatorPool').closePeriod();
+      const result = await require('./economy/creatorPool').closeLastPeriodIfNeeded();
       logger.info(`[creatorPool] clôture hebdomadaire: ${JSON.stringify(result)}`);
     } catch (error) {
       logger.error('[creatorPool] clôture hebdomadaire impossible:', error.message);
@@ -1756,6 +1822,29 @@ async function startServer() {
     // donc PolicierCongo ne tourne qu'en un exemplaire par construction.
     if (isWorker) {
       setupCronJobs();
+
+      /**
+       * Rattrapage de la clôture hebdomadaire manquée.
+       *
+       * `node-cron` ne rejoue pas une occurrence ratée : un worker arrêté le
+       * lundi à 03:20 — déploiement, `pm2 restart`, incident de dix minutes —
+       * et la semaine n'est JAMAIS clôturée, puisque la clôture suivante ne
+       * regarde que la semaine précédente. Les créateurs ne sont pas payés et
+       * rien ne le signale. On vérifie donc au démarrage.
+       *
+       * Différé d'une minute : au boot, les files d'écriture des événements
+       * finissent de se vider, et un partage figé sur des signaux incomplets
+       * ne se recalcule plus jamais. La fonction est sûre à rejouer — elle ne
+       * fait rien si la période est déjà clôturée ou antérieure à la mise en
+       * service du pot.
+       */
+      setTimeout(() => {
+        require('./economy/creatorPool')
+          .closeLastPeriodIfNeeded()
+          .then((r) => logger.info(`[creatorPool] rattrapage au démarrage: ${JSON.stringify(r)}`))
+          .catch((e) => logger.error('[creatorPool] rattrapage au démarrage impossible:', e.message));
+      }, 60_000).unref();
+
       // Montée automatique des paliers de déploiement, pour la même raison :
       // sur deux instances, un drapeau armé monterait de deux crans par
       // intervalle au lieu d'un.

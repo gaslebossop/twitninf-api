@@ -918,6 +918,7 @@ class TransactionAuthorizationService {
 
       decision = this._validateRustDecision(rustDecision, claim.row.id, requestHash);
       decision = this._applyManualTrustOverride(decision, features.prior_risk);
+      decision = await this._applyUltraTierOverride(decision, operation.userId);
       await this._persistDecision(operation.userId, decision);
     }
 
@@ -1000,6 +1001,47 @@ class TransactionAuthorizationService {
         ...(Array.isArray(decision.signals) ? decision.signals : []),
       ].slice(0, 80),
       engine_version: boundedString(`${decision.engine_version}+manual-trust`, 80),
+    };
+  }
+
+  /**
+   * Seuil relevé pour les abonnés Ultra : une transaction plus grosse que
+   * d'habitude sur ce compte (donc mise en `REVIEW`, pas un `DECLINE` — un
+   * signal de taille, pas un signal de fraude) passe. Volontairement plus
+   * étroit que `_applyManualTrustOverride` :
+   *  - jamais sur un `DECLINE` — un rejet ferme reste un rejet ferme, quel
+   *    que soit le palier ;
+   *  - jamais sur les motifs listés dans `NON_OVERRIDABLE_MANUAL_REVIEW_REASONS`
+   *    (portefeuille gelé, etc.) — mêmes garde-fous que la fenêtre de confiance ;
+   *  - le score de risque n'est PAS remis à 0 (contrairement à la confiance
+   *    manuelle) : la trace d'audit garde le score réel, seule la décision
+   *    change.
+   */
+  async _applyUltraTierOverride(decision, userId) {
+    if (decision.decision !== 'REVIEW') return decision;
+
+    const reasons = Array.isArray(decision.reasons) ? decision.reasons : [];
+    if (reasons.some((reason) => NON_OVERRIDABLE_MANUAL_REVIEW_REASONS.has(reason))) {
+      return decision;
+    }
+
+    const { User } = require('../models');
+    const { TIER } = require('../constants/subscriptionTiers');
+    const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
+    const user = await User.findByPk(userId, {
+      attributes: ['subscription_tier', 'subscription_expires_at'],
+    });
+    if (!user || user.subscription_tier !== TIER.ULTRA || !isSubscriptionActive(user)) {
+      return decision;
+    }
+
+    logger.info(`[transaction-risk] Ultra tier override applied to ${decision.authorization_id}`);
+    return {
+      ...decision,
+      decision: 'APPROVE',
+      wallet_action: 'NONE',
+      reasons: [...reasons, 'ultra_tier_override'],
+      engine_version: boundedString(`${decision.engine_version}+ultra-override`, 80),
     };
   }
 

@@ -104,6 +104,20 @@ function buildWritablePayload(body) {
   if (body.description !== undefined) payload.description = body.description || null;
   if (body.enabled !== undefined) payload.enabled = Boolean(body.enabled);
 
+  // Type d'audience. Passer un drapeau en `beta` neutralise son palier :
+  // l'evaluateur ne le consulte plus. On le remet donc explicitement a 0 pour
+  // que la ligne ne mente pas — un drapeau `beta` affichant « 25 % » ferait
+  // croire a un deploiement partiel qui n'existe pas.
+  if (body.audience !== undefined) {
+    if (!FeatureFlag.AUDIENCES.includes(body.audience)) {
+      throw new Error(`Audience inconnue : ${body.audience}`);
+    }
+    payload.audience = body.audience;
+    if (body.audience === 'beta' && body.rollout_percentage === undefined) {
+      payload.rollout_percentage = 0;
+    }
+  }
+
   if (body.rollout_percentage !== undefined) {
     const value = Number(body.rollout_percentage);
     if (!Number.isFinite(value) || value < 0 || value > 100) {
@@ -227,6 +241,9 @@ module.exports = {
             attributes: evaluator.ATTRIBUTES,
             operators: evaluator.OPERATORS,
             bucket_units: FeatureFlag.BUCKET_UNITS,
+            // Types d'audience. L'écran mobile peut ainsi proposer « palier »
+            // ou « réservé à la beta » sans coder la liste en dur.
+            audiences: evaluator.AUDIENCES,
             auto_rollout: {
               default_steps: autoRollout.DEFAULT_STEPS,
               default_interval_minutes: autoRollout.DEFAULT_INTERVAL_MINUTES,

@@ -145,6 +145,113 @@ async function runAutoMigration() {
       logger.warn('⚠️ consentement RGPD:', e.message);
     }
 
+    // Type d'audience d'un drapeau. `sync()` n'ajoute jamais une colonne a une
+    // table existante : sans ce bloc, `feature_flags.audience` n'existerait
+    // qu'en developpement, et `audience = 'beta'` serait silencieusement perdu
+    // en production — le drapeau retomberait sur son palier global.
+    try {
+      await sequelize.query(`
+        ALTER TABLE feature_flags
+          ADD COLUMN IF NOT EXISTS audience VARCHAR(16) NOT NULL DEFAULT 'rollout';
+        ALTER TABLE feature_flags DROP CONSTRAINT IF EXISTS feature_flags_audience_check;
+        ALTER TABLE feature_flags ADD CONSTRAINT feature_flags_audience_check
+          CHECK (audience IN ('rollout','beta'));
+      `);
+      logger.info('✅ Colonne feature_flags.audience vérifiée');
+    } catch (e) {
+      logger.warn('⚠️ feature_flags.audience:', e.message);
+    }
+
+    // Programme beta. Le DDL doit vivre ICI et pas seulement dans
+    // database/migrate.js, pour la meme raison que le consentement RGPD :
+    // migrate.js est un script en ligne de commande, jamais joue au demarrage.
+    //
+    // `sequelize.sync()` cree bien les deux tables a partir des modeles, mais
+    // il ne pose NI la contrainte de statut, NI les index partiels, et surtout
+    // il cree la cle etrangere `user_id` SANS `ON DELETE CASCADE` : supprimer
+    // un compte echouerait alors sur une violation de contrainte. Ce bloc
+    // rattrape les trois.
+    try {
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS beta_members (
+          user_id      UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          status       VARCHAR(16) NOT NULL DEFAULT 'pending',
+          motivation   TEXT NULL,
+          source       VARCHAR(16) NULL,
+          platform     VARCHAR(16) NULL,
+          app_version  VARCHAR(32) NULL,
+          applied_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          reviewed_at  TIMESTAMPTZ NULL,
+          reviewed_by  UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+          review_note  TEXT NULL,
+          approved_at  TIMESTAMPTZ NULL,
+          revoked_at   TIMESTAMPTZ NULL,
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+
+      // Rattrapage de la cle etrangere posee par sync() : elle n'a que
+      // ON UPDATE CASCADE, ce qui bloquerait toute suppression de compte.
+      await sequelize.query(`
+        ALTER TABLE beta_members DROP CONSTRAINT IF EXISTS beta_members_user_id_fkey;
+        ALTER TABLE beta_members ADD CONSTRAINT beta_members_user_id_fkey
+          FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE;
+      `);
+
+      await sequelize.query(`
+        ALTER TABLE beta_members DROP CONSTRAINT IF EXISTS beta_members_status_check;
+        ALTER TABLE beta_members ADD CONSTRAINT beta_members_status_check
+          CHECK (status IN ('pending','approved','rejected','revoked','left'));
+      `);
+
+      // Index PARTIELS : les deux seules requetes chaudes sont « la file » et
+      // « combien de membres ». Les index pleins que sync() posait a partir du
+      // modele couvrent les memes colonnes en indexant toutes les lignes, y
+      // compris les statuts terminaux qu'aucune requete ne balaye — on les
+      // retire, et le modele ne les declare plus.
+      await sequelize.query(`
+        DROP INDEX IF EXISTS beta_members_status;
+        DROP INDEX IF EXISTS beta_members_applied_at;
+        CREATE INDEX IF NOT EXISTS idx_beta_members_pending
+          ON beta_members (applied_at) WHERE status = 'pending';
+        CREATE INDEX IF NOT EXISTS idx_beta_members_approved
+          ON beta_members (approved_at DESC) WHERE status = 'approved';
+      `);
+
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS beta_settings (
+          id          SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+          is_open     BOOLEAN NOT NULL DEFAULT TRUE,
+          capacity    INTEGER NULL,
+          headline    VARCHAR(160) NOT NULL DEFAULT 'La beta TwitNinf',
+          pitch       TEXT NULL,
+          updated_by  UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+          updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+
+      // Rattrapages sur une table deja creee par sync(), pour qui le
+      // `CREATE TABLE IF NOT EXISTS` ci-dessus est un no-op : sync() ne pose ni
+      // le defaut de `updated_at` ni la contrainte du singleton. Sans le
+      // defaut, l'INSERT du singleton juste en dessous echoue sur une colonne
+      // NOT NULL sans valeur — en silence, puisque tout le bloc est sous
+      // `catch`.
+      await sequelize.query(`
+        ALTER TABLE beta_settings ALTER COLUMN updated_at SET DEFAULT NOW();
+        ALTER TABLE beta_settings DROP CONSTRAINT IF EXISTS beta_settings_singleton_check;
+        ALTER TABLE beta_settings ADD CONSTRAINT beta_settings_singleton_check CHECK (id = 1);
+      `);
+
+      await sequelize.query(`
+        INSERT INTO beta_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+      `);
+
+      logger.info('✅ Schéma du programme beta vérifié');
+    } catch (e) {
+      logger.warn('⚠️ programme beta:', e.message);
+    }
+
     // Étape d'abonnements de l'inscription. Une colonne dédiée plutôt qu'un
     // simple `following_count >= 3` : quelqu'un qui se désabonne ensuite ne
     // doit pas se voir reposer l'écran d'inscription des mois plus tard.

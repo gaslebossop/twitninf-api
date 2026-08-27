@@ -64,7 +64,14 @@ async function main() {
     }
 
     try {
-      await eventQuestService.grant(claim.user_id, claim.granted || {});
+      // `grant()` ne lève plus sur un octroi partiel : il retourne les kinds
+      // en échec. Dans ce cas la dette reste ouverte (pas de `settled_at`).
+      const failedKinds = await eventQuestService.grant(claim.user_id, claim.granted || {});
+      if (Array.isArray(failedKinds) && failedKinds.length > 0) {
+        console.error(`  ECHEC ${who} · ${claim.quest_id} · ${failedKinds.join(', ')}`);
+        failed += 1;
+        continue;
+      }
       await claim.update({ settled_at: new Date() });
       console.log(`  OK  ${who} · ${claim.quest_id} · ${label}`);
       done += 1;

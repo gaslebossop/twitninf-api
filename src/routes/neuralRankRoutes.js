@@ -306,13 +306,136 @@ async function fetchTweetsByIds(tweetIds, userId, experimentAssignments = []) {
     });
   }
 
+/**
+ * Empile les retweets d'un même tweet, et nomme ceux que le lecteur suit.
+ *
+ * ── Le problème ──
+ * Quand trois comptes suivis retweetent le même tweet, le recommandeur produit
+ * TROIS entrées — une par ligne de retweet. Le fil affichait donc trois fois le
+ * même contenu, chacune signée d'un nom différent. C'est la répétition qui
+ * gêne, pas le retweet.
+ *
+ * ── Ce qu'on fait ──
+ * Une seule entrée par tweet d'origine : celle que le moteur a classée le plus
+ * haut (l'ordre du tableau est le sien, donc la première rencontrée). Les
+ * autres disparaissent, et leurs auteurs viennent grossir `retweeters`.
+ *
+ * ── L'ordre des noms ──
+ * Par nombre d'abonnés décroissant. Ce n'est pas une mesure de valeur : c'est
+ * la seule qui soit à la fois stable, calculable ici, et corrélée à « le nom
+ * que le lecteur reconnaîtra ». Un tri par date mettrait en avant le dernier
+ * arrivé, qui n'est pas plus parlant.
+ *
+ * ── Ce qu'on ne fait PAS ──
+ * Nommer des comptes que le lecteur ne suit pas. « @inconnu et 400 autres ont
+ * retweeté » n'apprend rien et transforme le fil en compteur. Le nombre total
+ * de retweets est déjà dans `stats.retweets`.
+ */
+async function attachRetweeters(feed, viewerId) {
+  // 1. Repli des doublons. Un retweet sans original exploitable a déjà été
+  //    écarté plus haut, donc `originalTweet.id` est sûr ici.
+  const collapsed = [];
+  const indexByOriginal = new Map();
+
+  for (const tweet of feed) {
+    const originalId = tweet.is_retweet && tweet.originalTweet?.id
+      ? String(tweet.originalTweet.id)
+      : null;
+
+    if (!originalId) {
+      collapsed.push(tweet);
+      continue;
+    }
+
+    const seen = indexByOriginal.get(originalId);
+    if (seen === undefined) {
+      indexByOriginal.set(originalId, collapsed.length);
+      collapsed.push(tweet);
+      continue;
+    }
+    // Doublon : on garde la première entrée (la mieux classée) et on note que
+    // cet auteur-là a lui aussi retweeté. Le nom est réintroduit par la
+    // requête ci-dessous s'il est suivi ; on ne l'ajoute pas à la main pour
+    // éviter deux sources de vérité sur la liste.
+  }
+
+  const originalIds = [...indexByOriginal.keys()].filter(id => UUID_RE.test(id));
+  if (originalIds.length === 0) return collapsed;
+
+  // 2. Qui, PARMI LES COMPTES SUIVIS, a retweeté ces tweets.
+  const rows = await sequelize.query(`
+    SELECT
+      tr.tweet_id AS original_id,
+      u.id, u.username, u.full_name, u.avatar, u.verified,
+      u.verification_style, u.premium,
+      (SELECT COUNT(*) FROM user_follows ff
+        WHERE ff.following_id = u.id AND ff.status = 'active') AS followers
+    FROM tweet_retweets tr
+    JOIN users u
+      ON u.id = tr.user_id
+     AND u.is_active = true
+    JOIN user_follows f
+      ON f.following_id = tr.user_id
+     AND f.follower_id = :viewerId::uuid
+     AND f.status = 'active'
+    WHERE tr.tweet_id IN (${originalIds.map(id => `'${id}'`).join(',')})
+      -- Se voir soi-même dans « untel a retweeté » n'apprend rien : le bouton
+      -- retweet de la ligne est déjà allumé.
+      AND tr.user_id <> :viewerId::uuid
+    ORDER BY followers DESC, u.username ASC
+  `, {
+    replacements: { viewerId },
+    type: QueryTypes.SELECT,
+  });
+
+  const byOriginal = new Map();
+  for (const row of rows) {
+    const key = String(row.original_id);
+    if (!byOriginal.has(key)) byOriginal.set(key, []);
+    byOriginal.get(key).push({
+      id: String(row.id),
+      username: row.username,
+      full_name: row.full_name || row.username,
+      avatar: row.avatar || null,
+      verified: Boolean(row.verified),
+      verification_style: row.verification_style || 'default',
+      premium: Boolean(row.premium),
+    });
+  }
+
+  // 3. Attache. L'auteur de la ligne conservée passe en tête : c'est celui que
+  //    le moteur a jugé le plus pertinent pour ce lecteur, et le retirer de la
+  //    liste ferait disparaître son nom de la mention.
+  for (const [originalId, position] of indexByOriginal) {
+    const tweet = collapsed[position];
+    const others = byOriginal.get(originalId) || [];
+    const head = tweet.author;
+    const rest = others.filter(person => String(person.id) !== String(head.id));
+
+    tweet.retweeters = [
+      {
+        id: String(head.id),
+        username: head.username,
+        full_name: head.full_name,
+        avatar: head.avatar,
+        verified: Boolean(head.verified),
+        verification_style: head.verification_style || 'default',
+        premium: Boolean(head.premium),
+      },
+      ...rest,
+    ];
+  }
+
+  return collapsed;
+}
+
   // `minGap = 0` : l'espacement des fils est décidé par le recommandeur, qui
   // plafonne déjà les réponses à 25 % du feed (`MAX_REPLY_RATIO`) et connaît
   // les scores. Réappliquer un écart ici écarterait des réponses qu'il a
   // délibérément placées, sans rien savoir de ce qui a motivé leur place. Ce
   // qui reste à l'API est l'INVARIANT — aucune réponse sans son parent
   // au-dessus — parce qu'il doit tenir même quand le feed vient d'ailleurs.
-  return withThreadContext(spaceOutReplies(tweets, 0));
+  return withThreadContext(spaceOutReplies(await attachRetweeters(tweets, userId), 0));
 }
 
 /**
