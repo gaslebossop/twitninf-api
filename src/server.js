@@ -273,6 +273,13 @@ app.use(helmet({
     },
   },
   crossOriginEmbedderPolicy: false,
+  // Le défaut d'Helmet (`same-origin`) bloque le navigateur qui embarque un
+  // avatar/bannière depuis un AUTRE sous-domaine — ce que font déjà
+  // twitninf-windows, twitninf-studio et maintenant web.twitninf.duckdns.org.
+  // Ces routes sont publiques et déjà servies avec
+  // `Access-Control-Allow-Origin: *` : les rouvrir en `cross-origin` ne change
+  // rien à ce qui est déjà accessible, ça permet juste de l'afficher ailleurs.
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
 
 // Configuration CORS
