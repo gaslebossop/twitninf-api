@@ -544,6 +544,13 @@ const tweetSchema = {
     defaultValue: null,
   },
 
+  /** Renseigné uniquement quand ce tweet est le livrable approuvé d'un contrat de la marketplace Ultra — affiche le badge "partenariat rémunéré". Voir CreatorContract. */
+  sponsored_contract_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    defaultValue: null,
+  },
+
   // Métadonnées du tweet
   metadata: {
     type: DataTypes.JSONB,

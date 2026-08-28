@@ -290,6 +290,12 @@ const userSchema = {
     defaultValue: 'free'
   },
 
+  /** Prix indicatif (en NF) affiché sur la marketplace de contrats Ultra. Purement informatif : une marque peut proposer n'importe quel montant. */
+  ultra_indicative_price_nf: {
+    type: DataTypes.DECIMAL(18, 4),
+    allowNull: true,
+  },
+
   /** Fin d'abonnement payant ; null = pas d'expiration (ex. comptes historiques « premium ») */
   subscription_expires_at: {
     type: DataTypes.DATE,

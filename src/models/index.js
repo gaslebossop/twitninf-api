@@ -47,6 +47,7 @@ const DeveloperAppModule = require('./DeveloperApp');
 const OAuthCodeModule = require('./OAuthCode');
 const OAuthTokenModule = require('./OAuthToken');
 const TweetStrikeModule = require('./TweetStrike');
+const CreatorContractModule = require('./CreatorContract');
 const SessionModule = require('./Session');
 const UserLocationEventModule = require('./UserLocationEvent');
 const UserConsentRecordModule = require('./UserConsentRecord');
@@ -167,6 +168,7 @@ const DeveloperApp = DeveloperAppModule(sequelize);
 const OAuthCode = OAuthCodeModule(sequelize);
 const OAuthToken = OAuthTokenModule(sequelize);
 const TweetStrike = TweetStrikeModule(sequelize);
+const CreatorContract = CreatorContractModule(sequelize);
 const Session = SessionModule(sequelize);
 const UserLocationEvent = UserLocationEventModule(sequelize);
 const UserConsentRecord = UserConsentRecordModule(sequelize);
@@ -862,6 +864,13 @@ TweetStrike.belongsTo(User, {
   foreignKey: 'author_id',
   as: 'author'
 });
+
+// Marketplace de contrats sponsorisés (Ultra) — voir creatorContractService.js
+User.hasMany(CreatorContract, { foreignKey: 'brand_user_id', as: 'contracts_as_brand', onDelete: 'CASCADE' });
+User.hasMany(CreatorContract, { foreignKey: 'creator_user_id', as: 'contracts_as_creator', onDelete: 'CASCADE' });
+CreatorContract.belongsTo(User, { foreignKey: 'brand_user_id', as: 'brand' });
+CreatorContract.belongsTo(User, { foreignKey: 'creator_user_id', as: 'creator' });
+CreatorContract.belongsTo(Tweet, { foreignKey: 'tweet_id', as: 'tweet' });
 
 // Sessions de connexion (jetons de rafraîchissement avec rotation)
 User.hasMany(Session, {
@@ -1793,6 +1802,47 @@ async function ensureAdvertisementsTargetColumns() {
 }
 
 /**
+ * Marketplace de contrats sponsorisés (Ultra) : prix indicatif affiché sur la
+ * fiche du créateur, et référence sur le tweet publié une fois le contrat
+ * approuvé (badge "partenariat rémunéré"). Deux colonnes sur des tables
+ * existantes, donc le même garde-fou que le reste de ce fichier.
+ */
+async function ensureCreatorContractsColumns() {
+  try {
+    const [usersTable] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'users'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (usersTable && usersTable.exists) {
+      await sequelize.query(`
+        ALTER TABLE users
+          ADD COLUMN IF NOT EXISTS ultra_indicative_price_nf DECIMAL(18,4) NULL;
+      `);
+    }
+
+    const [tweetsTable] = await sequelize.query(
+      `SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'tweets'
+      ) AS exists`,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+    if (tweetsTable && tweetsTable.exists) {
+      await sequelize.query(`
+        ALTER TABLE tweets
+          ADD COLUMN IF NOT EXISTS sponsored_contract_id UUID NULL;
+      `);
+    }
+  } catch (e) {
+    logger.error('[schema] ensureCreatorContractsColumns:', e.message);
+    throw e;
+  }
+}
+
+/**
  * Suivi vues/clics du mur Explorer (voir
  * `docs/superpowers/specs/2026-08-20-explore-view-click-tracking-design.md`).
  * `view_count` reste inchangé ; ces deux colonnes ne sont lues que par
@@ -1999,6 +2049,7 @@ async function syncDatabase() {
     await ensureUsersPreferredLanguageColumn();
     await ensureScheduledTweetsTimeZoneColumn();
     await ensureAdvertisementsTargetColumns();
+    await ensureCreatorContractsColumns();
     await ensureTweetsExploreCounters();
     await ensureTweetsAdViewCount();
     await ensureBehaviorDataTweetClickAction();
@@ -2294,6 +2345,7 @@ module.exports = {
   OAuthCode,
   OAuthToken,
   TweetStrike,
+  CreatorContract,
   Session,
   UserLocationEvent,
   UserConsentRecord,

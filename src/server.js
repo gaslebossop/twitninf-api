@@ -621,6 +621,8 @@ app.use('/api/payments', paymentRoutes);
 
 app.use('/api/new-economy', newEconomyRoutes);
 
+app.use('/api/contracts', require('./routes/contractRoutes'));
+
 app.use('/api/currencies', userCurrencyRoutes);
 
 app.use('/api/casino', casinoRoutes);
