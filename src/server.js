@@ -95,6 +95,8 @@ const gAuthRoutes = require('./routes/gAuthRoutes');
 const tweetRoutes = require('./routes/tweetRoutes');
 const searchRoutes = require('./routes/searchRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const pushRoutes = require('./routes/pushRoutes');
+const twoFactorRoutes = require('./routes/twoFactorRoutes');
 const userRoutes = require('./routes/userRoutes');
 const messageRoutes = require('./routes/messageRoutes');
 const storyRoutes = require('./routes/storyRoutes');
@@ -596,6 +598,10 @@ app.use('/legal', require('./routes/legalRoutes'));
 // /start et /callback doivent rester publics (un navigateur frais, sans
 // session, y arrive par construction).
 app.use('/api/auth/g-auth', gAuthRoutes);
+// AVANT `/api/auth` : `authRoutes` pose un `router.use(authenticateToken)` à
+// mi-parcours ; monté en premier sur le préfixe parent, il répondrait 401 sur
+// `/api/auth/2fa/verify` — une route qui, par nature, n'a pas encore de jeton.
+app.use('/api/auth/2fa', twoFactorRoutes);
 app.use('/api/auth', authRoutes);
 
 app.use('/api/tweets', tweetRoutes);
@@ -603,6 +609,7 @@ app.use('/api/tweets', tweetRoutes);
 app.use('/api/search', searchRoutes);
 
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/push', pushRoutes);
 
 app.use('/api/users', userRoutes);
 
@@ -1226,6 +1233,37 @@ function setupCronJobs() {
       logger.info(`${deletedCount} notifications anciennes supprimées`);
     } catch (error) {
       logger.error('Erreur lors du nettoyage des notifications:', error);
+    }
+  });
+
+  /**
+   * Relance quotidienne adaptative — apprentissage nocturne des créneaux.
+   *
+   * 03:40 : après la purge de 03:00 et avant le réveil des utilisateurs. Le
+   * calcul lit 28 jours de `user_behavior_data` pour les seuls abonnés Web
+   * Push, il ne coûte donc presque rien tant que la base d'abonnés est petite.
+   */
+  cron.schedule('40 3 * * *', async () => {
+    try {
+      await require('./services/activityProfileService').recomputeProfiles();
+    } catch (error) {
+      logger.error('[relance] Erreur lors du recalcul des créneaux:', error);
+    }
+  });
+
+  /**
+   * Relance quotidienne adaptative — passage du planificateur.
+   *
+   * Au quart d'heure et non à l'heure pile : les créneaux appris sont des
+   * heures, et repasser quatre fois dedans permet à une relance de partir
+   * même si un tour tombe pendant un redémarrage du worker. La fonction
+   * elle-même refuse d'envoyer deux fois dans la même heure.
+   */
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await require('./services/dailyNudgeService').runScheduler();
+    } catch (error) {
+      logger.error('[relance] Erreur lors du passage du planificateur:', error);
     }
   });
 

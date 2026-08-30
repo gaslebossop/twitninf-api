@@ -130,6 +130,39 @@ class Notification extends Model {
             timeout: 5000
           });
         }
+
+        // Web Push (navigateurs) — la seule voie gratuite vers un iPhone, et
+        // la seule qui marche pour qui n'a pas installé l'app.
+        //
+        // Volontairement NON attendu, contrairement à l'appel Expo au-dessus :
+        // il y a un envoi chiffré par appareil enregistré, et faire attendre
+        // la création de la notification derrière eux rallongerait chaque
+        // like. Les erreurs sont déjà traitées dans le service.
+        try {
+          const webPushService = require('../services/webPushService');
+          if (webPushService.isConfigured()) {
+            // La conversation passe AVANT le tweet : une réponse à une story
+            // porte les deux (`tweet_id` du support, `conversation_id` du fil),
+            // et c'est le fil qu'on vient de notifier. Sans ce cas, un message
+            // retombait sur `/notifications` — le site s'ouvrait sur la liste
+            // des notifications au lieu du fil, et la bascule vers l'app
+            // native (voir `OpenInApp` côté web) n'avait aucun chemin à
+            // reconnaître.
+            const conversationId = record.content?.conversation_id;
+            let url = '/notifications';
+            if (conversationId) url = `/messages/${conversationId}`;
+            else if (record.tweet_id) url = `/tweet/${record.tweet_id}`;
+
+            webPushService.sendToUser(data.recipient_id, {
+              title: record.title || 'TwitNinf',
+              body: record.message || '',
+              url,
+              tag: `notif-${notification.id}`,
+            }).catch((error) => logger.warn(`[webpush] fan-out: ${error.message}`));
+          }
+        } catch (webPushError) {
+          logger.warn(`[webpush] service indisponible: ${webPushError.message}`);
+        }
       } catch (pushError) {
         logger.warn('Envoi push automatique échoué (non bloquant):', pushError?.message || pushError);
       }

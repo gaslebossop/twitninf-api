@@ -3767,8 +3767,13 @@ router.post('/:id/share', [
       logger.warn(`CTR tracking error: ${err.message}`);
     });
 
-    // Générer un lien shareable unique
-    const shareLink = `https://twitninf.app/tweets/${id}`;
+    // Lien vers le client WEB, seule surface ouvrable depuis n'importe où.
+    //
+    // L'ancienne valeur pointait vers `https://twitninf.app/tweets/:id` — un
+    // domaine qui n'existe pas et une route qui n'existe pas non plus : tout
+    // lien partagé depuis l'app menait à une erreur de résolution DNS. La
+    // forme correcte est celle de `twitninf-web` (`/tweet/:id`).
+    const shareLink = `${(process.env.PUBLIC_WEB_ORIGIN || 'https://twitninf.fr').replace(/\/$/, '')}/tweet/${id}`;
 
     res.json({
       success: true,

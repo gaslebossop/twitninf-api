@@ -223,6 +223,12 @@ class AuthService {
       const token = this.generateToken(user);
       const { token: refreshToken } = await this.createSession(user.id, sessionContext);
 
+      // Pas de contrôle de double authentification ici : un compte qui vient
+      // d'être créé ne peut par construction avoir aucun second facteur, et
+      // l'inscription ouvre la session tout de suite. Le contrôle est dans
+      // `login()`, le seul endroit où un compte existant présente son mot de
+      // passe.
+
       // Mettre à jour la dernière activité
       await user.updateLastActivity();
 
@@ -247,6 +253,44 @@ class AuthService {
   }
 
   // Connexion d'un utilisateur
+  /**
+   * Termine une connexion dont le second facteur vient d'être validé.
+   *
+   * Reprend exactement la fin de `login()` : mêmes portefeuilles, mêmes
+   * jetons, même forme de réponse. Deux chemins qui construisent une session
+   * différemment finiraient par diverger sur un champ que l'app attend.
+   */
+  async completeLogin(user, sessionContext = {}) {
+    await user.updateLastActivity();
+
+    try {
+      const NewEconomyService = require('./newEconomyService');
+      await NewEconomyService.ensureWalletsForUser(user.id);
+    } catch (e) {
+      logger.warn(`[economy] Portefeuilles non assurés au login (${user.id}): ${e.message}`);
+    }
+
+    const token = this.generateToken(user);
+    const { token: refreshToken } = await this.createSession(user.id, sessionContext);
+
+    logger.info(`Utilisateur connecté (2FA): ${user.username}`);
+
+    return {
+      success: true,
+      message: 'Connexion réussie',
+      data: {
+        user: {
+          ...user.getPublicProfile(),
+          is_suspended: user.is_suspended || false,
+          preferred_language: user.preferred_language || null,
+          ...getOwnerPrivateProfile(user),
+        },
+        token,
+        refreshToken,
+      },
+    };
+  }
+
   async login(credentials, sessionContext = {}) {
     try {
       // Rechercher l'utilisateur par username
@@ -265,6 +309,50 @@ class AuthService {
       const isValidPassword = await user.comparePassword(credentials.password);
       if (!isValidPassword) {
         throw new Error('Identifiants invalides');
+      }
+
+      // ── Double authentification ──────────────────────────────────────
+      //
+      // Le mot de passe est bon, mais il ne suffit plus : on rend un DÉFI et
+      // AUCUN jeton. C'est le seul endroit où la décision peut être prise —
+      // la poser côté client laisserait l'API délivrer une session complète à
+      // qui appelle `/login` directement.
+      //
+      // ⚠️ Le contrôle doit rester AVANT `createSession` et avant toute
+      // écriture liée à la connexion. Il vivait par erreur dans `register()`,
+      // et de surcroît APRÈS la génération des jetons : le second facteur
+      // n'était jamais demandé à la connexion (ni sur le web, ni sur mobile),
+      // et n'aurait de toute façon rien protégé là où il était, la session
+      // étant déjà ouverte. C'est `completeLogin()`, appelé par
+      // `/api/auth/2fa/verify`, qui monte la session une fois le code validé.
+      const twoFactorService = require('./twoFactorService');
+      if (twoFactorService.isEnabled(user)) {
+        const challenge = await twoFactorService.createChallenge(user);
+
+        // Le code e-mail part tout de suite quand c'est le seul facteur : un
+        // aller-retour de plus avant de pouvoir taper quoi que ce soit n'a
+        // aucune contrepartie.
+        if (challenge.methods.length === 1 && challenge.methods[0] === 'email' && user.email) {
+          try {
+            await twoFactorService.sendEmailCode(challenge.id, user.email);
+          } catch (error) {
+            logger.error(`[2fa] Envoi du code impossible (${user.username}): ${error.message}`);
+          }
+        }
+
+        logger.info(`[2fa] Défi émis pour ${user.username} (${challenge.methods.join(', ')})`);
+        return {
+          success: true,
+          message: 'Vérification en deux étapes requise',
+          data: {
+            twoFactorRequired: true,
+            challengeId: challenge.id,
+            methods: challenge.methods,
+            // Indice d'adresse, jamais l'adresse : il sert à reconnaître SA
+            // boîte, pas à en révéler une à qui a volé un mot de passe.
+            emailHint: user.email ? String(user.email).replace(/(.{1,2})[^@]*(@.*)/, '$1***$2') : null,
+          },
+        };
       }
 
       // Mettre à jour la dernière activité

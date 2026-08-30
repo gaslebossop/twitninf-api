@@ -201,10 +201,47 @@ function hasMobileAppTransport(req) {
   return true;
 }
 
-// Client officiel (desktop Windows ou app mobile) authentifié par un JWT valide.
+/**
+ * Transport du client web officiel (`twitninf-web`, React/Vite).
+ *
+ * ── Pourquoi il a fallu l'ajouter ──
+ * Le web était le seul client maison à ne pas être reconnu ici : tout son
+ * trafic passait donc au scoring comportemental, et les comptes qui s'en
+ * servaient se faisaient bannir en série. C'est le même symptôme que celui
+ * qui a motivé l'exemption mobile — un client de fil poll, précharge et
+ * ouvre plusieurs requêtes par écran, ce que la vélocité lit comme un
+ * pilonnage.
+ *
+ * ── Pourquoi on ne contrôle PAS le `user-agent` ──
+ * Contrairement au desktop Electron, une page web ne choisit pas son
+ * `user-agent` : le navigateur l'impose et `fetch` refuse de l'écraser. La
+ * reconnaissance repose donc sur le quadruplet d'en-têtes propriétaires, au
+ * même niveau d'exigence que le mobile — et, comme lui, elle ne vaut RIEN
+ * sans le JWT vérifié qu'`isTrustedFirstPartyClient` exige juste après.
+ */
+function hasWebAppTransport(req) {
+  const platform = String(req.headers?.['user-platform'] || '').trim().toLowerCase();
+  const ownership = String(req.headers?.['x-app-ownership'] || '').trim().toLowerCase();
+  const client = String(req.headers?.['x-twitninf-client'] || '').trim().toLowerCase();
+  const deviceId = String(req.headers?.['x-device-id'] || '').trim();
+
+  if (client !== 'twitninf-web') return false;
+  if (platform !== 'web') return false;
+  if (ownership !== 'standalone') return false;
+  // `web-<uuid>` persisté dans le localStorage du navigateur : 40 caractères.
+  if (deviceId.length < 8) return false;
+
+  return true;
+}
+
+// Client officiel (desktop Windows, app mobile ou web) authentifié par un JWT valide.
 function isTrustedFirstPartyClient(req) {
   if (isFraudBypassExcluded(req)) return false;
-  if (!hasWindowsElectronTransport(req) && !hasMobileAppTransport(req)) return false;
+  if (
+    !hasWindowsElectronTransport(req)
+    && !hasMobileAppTransport(req)
+    && !hasWebAppTransport(req)
+  ) return false;
 
   return Boolean(getVerifiedBearerUserId(req));
 }
@@ -631,6 +668,7 @@ module.exports = {
   isTrustedWindowsElectronRequest, // alias rétrocompatible
   hasWindowsElectronTransport,
   hasMobileAppTransport,
+  hasWebAppTransport,
   isAppNavigationNoise,
   isTrustedCapacityRequest,
 };

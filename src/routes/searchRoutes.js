@@ -853,14 +853,21 @@ router.get('/suggestions', [
     const { limit = 10 } = req.query;
     const userId = req.user.id;
 
-    // Suggestions basées sur les utilisateurs suivis
-    const following = await User.findAll({
+    // Suggestions basées sur les utilisateurs suivis.
+    //
+    // L'alias `following` porté par User désigne des lignes UserFollow, PAS des
+    // User : partir de `User.findAll({ include: { model: User, as: 'following' } })`
+    // fait échouer Sequelize sur « User is not associated to User! » et la route
+    // rendait 500 à chaque appel. On interroge donc la table de liaison, et on y
+    // rattache le compte suivi.
+    const follows = await UserFollow.findAll({
+      where: { follower_id: userId, status: 'active' },
       include: [{
         model: User,
         as: 'following',
         attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style', 'profile_customization']
       }],
-      where: { 'following.follower_id': userId },
+      order: [['created_at', 'DESC']],
       limit: 5
     });
 
@@ -876,9 +883,13 @@ router.get('/suggestions', [
       limit: 100
     });
 
+    // `hashtags` est nullable en base : sans ce garde, un seul tweet sans
+    // hashtag suffisait à faire tomber la route en 500 une fois la requête
+    // précédente réparée.
     const hashtagCounts = {};
     popularHashtags.forEach(tweet => {
-      tweet.hashtags.forEach(tag => {
+      const tags = Array.isArray(tweet.hashtags) ? tweet.hashtags : [];
+      tags.forEach(tag => {
         hashtagCounts[tag] = (hashtagCounts[tag] || 0) + 1;
       });
     });
@@ -892,7 +903,7 @@ router.get('/suggestions', [
       success: true,
       message: 'Suggestions de recherche récupérées avec succès',
       data: {
-        following_suggestions: following.map(f => f.following),
+        following_suggestions: follows.map(f => f.following).filter(Boolean),
         hashtag_suggestions: trendingHashtags
       }
     });

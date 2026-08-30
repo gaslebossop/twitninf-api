@@ -445,6 +445,30 @@ const userSchema = {
     type: DataTypes.BOOLEAN,
     defaultValue: false
   },
+
+  // ── Double authentification ───────────────────────────────────────────
+  // Deux drapeaux plutôt qu'un seul champ « méthode » : les deux facteurs
+  // coexistent, et couper l'e-mail ne doit pas désactiver l'application
+  // d'authentification.
+  two_factor_email_enabled: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  two_factor_totp_enabled: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  // Secret partagé de l'application d'authentification. Lisible par le
+  // serveur par nature (l'algorithme l'exige) : il n'est jamais rendu par une
+  // route après confirmation, et `getPublicProfile` ne le voit pas.
+  two_factor_totp_secret: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  two_factor_enabled_at: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
   
   // Tokens de réinitialisation
   reset_password_token: {

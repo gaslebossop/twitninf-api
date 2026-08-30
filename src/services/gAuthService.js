@@ -107,17 +107,45 @@ async function consumeState(state) {
 // URL fournie en paramètre.
 const MOBILE_REDIRECT_SCHEME_RE = /^(twitninf|exp(\+[a-z0-9._-]+)?)$/i;
 
-function isAllowedMobileRedirect(raw) {
-  if (!raw || typeof raw !== 'string' || raw.length > 512) return false;
+/**
+ * Origines du client web officiel autorisées à recevoir le retour.
+ *
+ * Le web n'a pas de schéma privé : son retour est une URL `https` ordinaire,
+ * et l'accepter largement transformerait `/start` en redirecteur ouvert
+ * livrant un jeton de session à n'importe quelle adresse. La liste est donc
+ * fermée, et le chemin doit être exactement celui du callback.
+ */
+const WEB_REDIRECT_ORIGINS = (process.env.G_AUTH_WEB_REDIRECT_ORIGINS
+  || 'https://twitninf.fr,https://www.twitninf.fr,https://web.twitninf.fr,https://web.twitninf.duckdns.org')
+  .split(',')
+  .map((o) => o.trim().replace(/\/$/, ''))
+  .filter(Boolean);
+
+/**
+ * Rend l'origine du flux — `'mobile'`, `'web'`, ou `null` si le retour est
+ * refusé. Ce n'est pas qu'un contrôle de sécurité : c'est aussi ce qui décide
+ * plus tard si une connexion G a le droit de CRÉER un compte (l'inscription
+ * n'existe que dans l'app mobile, voir `loginOrRegister`).
+ */
+function redirectOrigin(raw) {
+  if (!raw || typeof raw !== 'string' || raw.length > 512) return null;
   let url;
   try {
     url = new URL(raw);
   } catch {
-    return false;
+    return null;
   }
+
   const scheme = url.protocol.replace(/:$/, '');
-  if (!MOBILE_REDIRECT_SCHEME_RE.test(scheme)) return false;
-  return `${url.host}${url.pathname}`.includes(DEEP_LINK_HOST);
+  if (MOBILE_REDIRECT_SCHEME_RE.test(scheme)) {
+    return `${url.host}${url.pathname}`.includes(DEEP_LINK_HOST) ? 'mobile' : null;
+  }
+
+  if (scheme === 'https' && WEB_REDIRECT_ORIGINS.includes(url.origin)) {
+    return url.pathname.replace(/\/$/, '') === `/${DEEP_LINK_HOST}` ? 'web' : null;
+  }
+
+  return null;
 }
 
 function buildDeepLink(baseRedirect, params) {
@@ -156,7 +184,8 @@ function verifyLinkToken(token) {
 async function startFlow({ intent, linkToken, mobileRedirect, forceAccountPicker }) {
   assertConfigured();
 
-  if (!isAllowedMobileRedirect(mobileRedirect)) {
+  const origin = redirectOrigin(mobileRedirect);
+  if (!origin) {
     const error = new Error('mobile_redirect manquant ou non autorisé');
     error.code = 'invalid_mobile_redirect';
     throw error;
@@ -176,7 +205,7 @@ async function startFlow({ intent, linkToken, mobileRedirect, forceAccountPicker
   const codeVerifier = base64url(crypto.randomBytes(32));
   const codeChallenge = base64url(crypto.createHash('sha256').update(codeVerifier).digest());
 
-  await saveState(state, { intent, userId, codeVerifier, mobileRedirect });
+  await saveState(state, { intent, userId, codeVerifier, mobileRedirect, origin });
 
   const authorizeUrl = new URL('/oauth/authorize', ISSUER);
   authorizeUrl.searchParams.set('client_id', CLIENT_ID);
@@ -265,10 +294,20 @@ async function generateUniqueUsername(seed, transaction) {
   return `user_${Date.now().toString(36)}`.slice(0, 30);
 }
 
-async function findOrCreateAccount({ sub, email, name }, platform) {
+async function findOrCreateAccount({ sub, email, name }, platform, allowCreate = true) {
   return sequelize.transaction(async (transaction) => {
     const existing = await User.findOne({ where: { g_auth_sub: sub }, transaction });
     if (existing) return { user: existing, isNewAccount: false };
+
+    // Une connexion G sur un identifiant inconnu EST une inscription : c'est
+    // la seconde porte de création de compte, moins visible que
+    // `POST /api/auth/register`. L'accès étant sur liste blanche, elle n'est
+    // ouverte qu'à l'app mobile — ailleurs on refuse au lieu de provisionner.
+    if (!allowCreate) {
+      const error = new Error('Inscription fermée : ce compte G n’est rattaché à aucun compte TwitNinf.');
+      error.code = 'registration_closed';
+      throw error;
+    }
 
     const username = await generateUniqueUsername(name || email, transaction);
     const user = await User.create(
@@ -294,8 +333,8 @@ async function findOrCreateAccount({ sub, email, name }, platform) {
   });
 }
 
-async function loginOrRegister({ sub, email, name }, sessionContext = {}) {
-  const { user, isNewAccount } = await findOrCreateAccount({ sub, email, name }, sessionContext.platform);
+async function loginOrRegister({ sub, email, name }, sessionContext = {}, { allowCreate = true } = {}) {
+  const { user, isNewAccount } = await findOrCreateAccount({ sub, email, name }, sessionContext.platform, allowCreate);
 
   try {
     await NewEconomyService.ensureWalletsForUser(user.id);
@@ -423,6 +462,7 @@ module.exports = {
   startFlow,
   consumeState,
   buildDeepLink,
+  redirectOrigin,
   exchangeCode,
   fetchUserinfo,
   loginOrRegister,

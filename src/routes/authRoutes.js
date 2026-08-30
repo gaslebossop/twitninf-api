@@ -13,7 +13,7 @@ const {
 } = require('../middleware/authMiddleware');
 const { checkUserBanStrict, checkUserBanReadOnly } = require('../middleware/banMiddleware');
 const { ALL_KEYS: CONSENT_KEYS, CONSENT_SOURCES } = require('../config/consent');
-const { checkLogin, reportLoginOutcome } = require('../middleware/fraudMiddleware');
+const { checkLogin, reportLoginOutcome, hasMobileAppTransport } = require('../middleware/fraudMiddleware');
 
 const router = express.Router();
 
@@ -197,8 +197,33 @@ const changePasswordValidation = [
     .withMessage('Le nouveau mot de passe doit contenir au moins 8 caractères, une majuscule, une minuscule, un chiffre et un caractère spécial')
 ];
 
+/**
+ * L'accès à TwitNinf est sur liste blanche : la création de compte n'existe
+ * plus que dans l'app mobile. Le web, le desktop et les appels directs sont
+ * refusés ICI — retirer le formulaire d'un client ne ferme rien tant que la
+ * route reste ouverte.
+ *
+ * Le contrôle porte sur le triplet d'en-têtes du transport mobile
+ * (`fraudMiddleware` → `hasMobileAppTransport`). Une inscription n'a pas encore
+ * de JWT : `isTrustedFirstPartyClient`, qui en exige un, est inutilisable à cet
+ * endroit. Ces en-têtes sont donc une PORTE, pas une serrure — ils se recopient
+ * dans un `curl`. Ils ferment l'inscription au public et aux autres clients
+ * maison ; verrouiller vraiment demanderait un code d'invitation.
+ */
+function mobileAppOnlyRegistration(req, res, next) {
+  if (hasMobileAppTransport(req)) return next();
+
+  const client = String(req.headers['x-twitninf-client'] || 'inconnu');
+  logger.warn(`[register] Inscription refusée hors app mobile (client=${client}, platform=${req.headers['user-platform'] || '?'}, ip=${req.ip})`);
+  return res.status(403).json({
+    success: false,
+    code: 'registration_closed',
+    message: 'Les comptes TwitNinf sont créés sur invitation : l’inscription n’est pas ouverte ici.',
+  });
+}
+
 // Routes publiques - Version simplifiée pour test
-router.post('/register', registerValidation, (req, res, next) => {
+router.post('/register', mobileAppOnlyRegistration, registerValidation, (req, res, next) => {
   // Vérifier les erreurs de validation
   const errors = validationResult(req);
   if (!errors.isEmpty()) {

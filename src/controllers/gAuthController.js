@@ -80,9 +80,13 @@ class GAuthController {
         });
       }
 
+      // L'inscription n'existe que dans l'app mobile : un identifiant G inconnu
+      // qui arrive depuis le web se voit refuser la création de compte plutôt
+      // que provisionné en silence (voir `findOrCreateAccount`).
       const session = await gAuthService.loginOrRegister(
         { sub: profile.sub, email: profile.email, name: profile.name },
         sessionContextFrom(req),
+        { allowCreate: flow.origin !== 'web' },
       );
       return finish({
         intent: 'login',
@@ -91,6 +95,10 @@ class GAuthController {
         isNewAccount: session.isNewAccount ? 1 : 0,
       });
     } catch (error) {
+      if (error?.code === 'registration_closed') {
+        logger.warn(`[g-auth] Connexion refusée (aucun compte rattaché, origine=${flow.origin})`);
+        return finish({ intent: flow.intent, error: 'registration_closed' });
+      }
       logger.error('[g-auth] callback:', error);
       return finish({ intent: flow.intent, error: 'server_error' });
     }

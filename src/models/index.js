@@ -13,6 +13,9 @@ const TweetLike = require('./TweetLike');
 const TweetRetweet = require('./TweetRetweet');
 const TweetBookmark = require('./TweetBookmark');
 const Notification = require('./Notification');
+const WebPushSubscription = require('./WebPushSubscription');
+const UserNudgeState = require('./UserNudgeState');
+const TwoFactorRecoveryCode = require('./TwoFactorRecoveryCode');
 const UserFollow = require('./UserFollow');
 const Report = require('./Report');
 const CommunityReviewItem = require('./CommunityReviewItem');
@@ -113,6 +116,9 @@ TweetLike.initTweetLikeModel(sequelize);
 TweetRetweet.initTweetRetweetModel(sequelize);
 TweetBookmark.initTweetBookmarkModel(sequelize);
 Notification.initNotificationModel(sequelize);
+WebPushSubscription.initWebPushSubscriptionModel(sequelize);
+UserNudgeState.initUserNudgeStateModel(sequelize);
+TwoFactorRecoveryCode.initTwoFactorRecoveryCodeModel(sequelize);
 UserFollow.initUserFollowModel(sequelize);
 
 // Initialiser les nouveaux modèles comportementaux
@@ -2312,6 +2318,9 @@ module.exports = {
   TweetRetweet,
   TweetBookmark,
   Notification,
+  WebPushSubscription,
+  UserNudgeState,
+  TwoFactorRecoveryCode,
   UserFollow,
   Report: ReportModel,
   CommunityReviewItem: CommunityReviewItemModel,
