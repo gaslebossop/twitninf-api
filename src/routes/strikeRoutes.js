@@ -4,6 +4,8 @@ const { Op } = require('sequelize');
 const { Tweet, TweetStrike, User, Notification } = require('../models');
 const { authenticateToken, denySuspended, requireUltra } = require('../middleware/authMiddleware');
 const { evaluateStrikeDispute } = require('../services/geminiService');
+const rustClient = require('../services/rustRecommenderClient');
+const { STRIKE_POLICIES } = require('../config/strikePolicies');
 const logger = require('../utils/logger');
 
 const router = express.Router();
@@ -12,6 +14,20 @@ const router = express.Router();
 // jour — le strike a un vrai effet immédiat sans revue, donc il lui faut un
 // plafond, même généreux, plutôt qu'un levier sans limite.
 const MAX_ACTIVE_STRIKES_PER_DAY = 10;
+
+// Domaine d'avertissement retenu quand le client n'en qualifie aucun. Le
+// motif du strike est du texte libre : il n'y a rien à mapper dessus. On suit
+// la convention déjà posée par `CATEGORY_TO_STRIKE_POLICY` pour un
+// signalement non classé (`other` → `spam`), plutôt que d'inventer un
+// neuvième domaine côté Rust.
+const DEFAULT_STRIKE_POLICY = 'spam';
+
+// Un strike déjà porté au registre du compte l'a été POUR CE TWEET : la
+// révocation d'un recours gagné se fait par `tweet_id` (voir
+// `shadowban_revoke_strikes_for_tweet` côté Rust), donc un tweet ne porte
+// qu'un seul avertissement, même si plusieurs abonnés Ultra le strikent. Ces
+// statuts sont ceux pour lesquels l'avertissement tient toujours.
+const STANDING_STRIKE_STATUSES = ['active', 'contested', 'upheld'];
 
 const handleValidationErrors = (req, res, next) => {
   const errors = validationResult(req);
@@ -31,11 +47,12 @@ router.post('/', [
   requireUltra,
   body('tweet_id').isUUID(),
   body('reason').trim().isLength({ min: 10, max: 500 }).withMessage('Motif requis (10 à 500 caractères)'),
+  body('policy').optional({ nullable: true }).isIn(STRIKE_POLICIES),
   handleValidationErrors,
 ], async (req, res) => {
   try {
     const strikerId = req.user.id;
-    const { tweet_id: tweetId, reason } = req.body;
+    const { tweet_id: tweetId, reason, policy } = req.body;
 
     const tweet = await Tweet.findByPk(tweetId);
     if (!tweet) {
@@ -82,6 +99,39 @@ router.post('/', [
       moderation_reason: `Strike Ultra : ${reason}`,
     });
 
+    // Le strike ne pèse plus seulement sur le tweet : il pèse sur le COMPTE.
+    // Il entre au registre d'avertissements du moteur Rust — celui que lit
+    // l'écran « État du compte » — où il s'AJOUTE aux avertissements déjà
+    // actifs (le compteur du domaine monte de un) et expire seul au bout de
+    // 90 jours. Rattaché au `tweet_id` pour qu'une contestation gagnée puisse
+    // le retirer précisément, et lui seul.
+    //
+    // Sauté si le tweet en porte déjà un : la révocation se fait par tweet,
+    // donc deux abonnés Ultra strikant le même tweet ne doivent pas coûter
+    // deux avertissements à l'auteur — un seul recours les effacerait tous.
+    const alreadyStanding = await TweetStrike.count({
+      where: {
+        tweet_id: tweetId,
+        id: { [Op.ne]: strike.id },
+        status: { [Op.in]: STANDING_STRIKE_STATUSES },
+      },
+    });
+    if (alreadyStanding === 0) {
+      try {
+        await rustClient.issueStrike(
+          tweet.user_id,
+          policy || DEFAULT_STRIKE_POLICY,
+          tweetId,
+          `Strike Ultra : ${reason}`
+        );
+      } catch (strikeError) {
+        // Moteur injoignable : le blocage de diffusion, lui, est déjà posé.
+        // On ne fait pas échouer l'action pour autant, mais la perte doit se
+        // voir — sans cette ligne l'état du compte reste muet, sans erreur.
+        logger.warn(`[strikes] avertissement non porté au compte ${tweet.user_id} (strike ${strike.id}): ${strikeError.message}`);
+      }
+    }
+
     const striker = await User.findByPk(strikerId, { attributes: ['username'] });
     await Notification.createNotification({
       recipient_id: tweet.user_id,
@@ -90,6 +140,7 @@ router.post('/', [
       type: 'system',
       title: 'Un de vos tweets a été strické',
       message: `@${striker?.username || 'un abonné Ultra'} a bloqué la diffusion de ce tweet. `
+        + 'Cet avertissement compte dans l\'état de votre compte. '
         + 'Vous pouvez contester ce strike pour une revue indépendante.',
       content: { domain: 'strike', strike_id: strike.id, reason },
       priority: 'high',
@@ -169,6 +220,21 @@ router.post('/:id/contest', [
       moderation_reason: upheld ? `Strike confirmé : ${verdict.reason}` : null,
     });
     await strike.update({ status: upheld ? 'upheld' : 'reversed' });
+
+    // Recours gagné : on remet le COMPTE comme avant, pas seulement le tweet.
+    // L'avertissement porté au registre à la pose du strike est retiré, donc
+    // le compteur de l'état du compte redescend de un et le niveau de
+    // restriction se recalcule tout seul. Confirmé : il reste, c'est
+    // précisément ce que la revue vient de valider.
+    if (!upheld) {
+      try {
+        await rustClient.revokeStrike(strike.author_id, strike.tweet_id);
+      } catch (revokeError) {
+        // À signaler fort : contrairement à la pose, un échec ici laisse un
+        // avertissement injustifié sur un compte pendant 90 jours.
+        logger.error(`[strikes] avertissement NON révoqué pour ${strike.author_id} après annulation du strike ${strike.id}: ${revokeError.message}`);
+      }
+    }
 
     await Promise.all([
       Notification.createNotification({
