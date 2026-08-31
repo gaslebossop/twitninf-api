@@ -127,6 +127,7 @@ const {
   createExperiment: createAbTestExperiment,
   cancelExperiment: cancelAbTestExperiment,
   moderateAndActivateExperiment,
+  listAuthorExperiments,
 } = require('../services/tweetAbTestService');
 
 // Middleware de validation des erreurs
@@ -729,6 +730,32 @@ async (req, res) => {
  * "subscription-pricing" déjà documenté ailleurs dans le repo, retombé
  * dedans une seconde fois.
  */
+/**
+ * GET /api/tweets/ab-tests/mine
+ * Les experiences A/B de l'auteur connecte, avec le compteur de chaque
+ * variante. Lecture seule, servie a l'ecran « Studio createur ».
+ *
+ * ⚠ Declaree AVANT `/:id` : « ab-tests » serait sinon lu comme un identifiant
+ * de tweet et Postgres echouerait sur le cast UUID. Meme piege que
+ * `/bookmarks` juste en dessous, documente parce qu'on y est deja retombe
+ * deux fois.
+ */
+router.get('/ab-tests/mine', [
+  authenticateToken,
+  checkUserBanReadOnly,
+  query('limit').optional().isInt({ min: 1, max: 50 }).withMessage('La limite doit être entre 1 et 50'),
+  handleValidationErrors,
+], async (req, res) => {
+  try {
+    const limit = Number(req.query.limit) || 20;
+    const experiments = await listAuthorExperiments(req.user.id, { limit });
+    return res.json({ success: true, data: { experiments } });
+  } catch (error) {
+    logger.error('Erreur lecture des experiences A/B:', error);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
 router.get('/bookmarks', [
   authenticateToken,
   checkUserBanReadOnly,

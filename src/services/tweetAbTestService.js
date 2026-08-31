@@ -312,6 +312,114 @@ async function moderateAndActivateExperiment(experimentId, authorUsername) {
   return { active: true };
 }
 
+
+/**
+ * Les experiences d'un auteur, avec le compteur de chaque variante.
+ *
+ * Lecture seule, servie a l'ecran « Studio createur ». Une seule requete :
+ * l'ecran se rafraichit au pull-to-refresh, donc il ne doit pas couter N+1
+ * allers-retours par experience.
+ *
+ * ── Pourquoi `sufficient` et pas un simple pourcentage ───────────────────
+ *
+ * Le piege d'un ecran de test A/B, c'est d'afficher « B : 12 % · A : 8 % » sur
+ * vingt impressions et de laisser croire que B gagne. A ce volume l'ecart est
+ * du bruit : une seule interaction de plus fait basculer le classement. Un
+ * chiffre affiche sans reserve sera lu comme un resultat, et l'auteur ecrira
+ * ses prochains tweets en suivant du hasard.
+ *
+ * On renvoie donc, pour chaque variante, le compte BRUT (impressions,
+ * interactions) et un drapeau `sufficient` qui dit si le seuil de l'experience
+ * (`min_impressions_per_variant`, choisi a la creation) est atteint. Le taux
+ * n'est calcule que la ou il veut dire quelque chose ; ailleurs le client
+ * affiche « pas encore assez de vues », ce qui est la verite.
+ */
+async function listAuthorExperiments(authorId, { limit = 20 } = {}) {
+  const rows = await sequelize.query(
+    `
+    SELECT
+      e.id                            AS experiment_id,
+      e.tweet_id,
+      e.status,
+      e.strategy,
+      e.platform_scope,
+      e.min_impressions_per_variant,
+      e.winner_variant_id,
+      e.cancellation_reason,
+      e.activated_at,
+      e.completed_at,
+      e.created_at,
+      v.id                            AS variant_id,
+      v.position,
+      v.label,
+      v.content,
+      v.is_control,
+      v.moderation_status,
+      COALESCE(m.impressions, 0)      AS impressions,
+      COALESCE(m.interactions, 0)     AS interactions
+    FROM tweet_ab_experiments e
+    JOIN tweet_ab_variants v            ON v.experiment_id = e.id
+    LEFT JOIN tweet_ab_variant_metrics m ON m.variant_id = v.id
+    WHERE e.author_id = :authorId
+    ORDER BY e.created_at DESC, v.position ASC
+    `,
+    { replacements: { authorId }, type: sequelize.QueryTypes.SELECT },
+  );
+
+  const byExperiment = new Map();
+  for (const r of rows) {
+    if (!byExperiment.has(r.experiment_id)) {
+      byExperiment.set(r.experiment_id, {
+        id: r.experiment_id,
+        tweet_id: r.tweet_id,
+        status: r.status,
+        strategy: r.strategy,
+        platform_scope: r.platform_scope,
+        min_impressions_per_variant: Number(r.min_impressions_per_variant),
+        winner_variant_id: r.winner_variant_id,
+        cancellation_reason: r.cancellation_reason,
+        activated_at: r.activated_at,
+        completed_at: r.completed_at,
+        created_at: r.created_at,
+        variants: [],
+      });
+    }
+    const exp = byExperiment.get(r.experiment_id);
+    const impressions = Number(r.impressions) || 0;
+    const interactions = Number(r.interactions) || 0;
+    // Le seuil vient de l'experience elle-meme, pas d'une constante ici : il a
+    // ete choisi a la creation et c'est lui qui fait foi.
+    const sufficient = impressions >= exp.min_impressions_per_variant;
+    exp.variants.push({
+      id: r.variant_id,
+      position: r.position,
+      label: r.label,
+      content: r.content,
+      is_control: r.is_control,
+      moderation_status: r.moderation_status,
+      impressions,
+      interactions,
+      // `null` et non `0` quand le seuil n'est pas atteint : un taux absent se
+      // distingue d'un taux nul, et le client ne peut pas l'afficher par
+      // megarde.
+      engagement_rate: sufficient && impressions > 0 ? interactions / impressions : null,
+      sufficient,
+    });
+  }
+
+  const experiments = [...byExperiment.values()].slice(0, limit);
+
+  // « Assez de matiere pour comparer » se juge sur l'experience entiere : une
+  // seule variante au-dessus du seuil ne permet aucune comparaison.
+  for (const exp of experiments) {
+    exp.comparable = exp.variants.length > 1 && exp.variants.every((v) => v.sufficient);
+    exp.total_impressions = exp.variants.reduce((n, v) => n + v.impressions, 0);
+    exp.total_interactions = exp.variants.reduce((n, v) => n + v.interactions, 0);
+  }
+
+  return experiments;
+}
+
 module.exports = {
   AbTestRequestError,
   normalizeExperimentRequest,
@@ -321,4 +429,5 @@ module.exports = {
   createExperiment,
   cancelExperiment,
   moderateAndActivateExperiment,
+  listAuthorExperiments,
 };
