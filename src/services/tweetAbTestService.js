@@ -330,17 +330,26 @@ async function moderateAndActivateExperiment(experimentId, authorUsername) {
  * fois un evenement est parti », et il est domine par un ou deux lecteurs qui
  * defilent.
  *
- * Pire, `impressions` et `interactions` sont DISJOINTS : le handler Rust
- * n'incremente les impressions que si l'evenement vaut exactement `View`, tout
- * le reste (like, retweet, ouverture) partant dans `interactions`. Un rapport
- * `interactions / impressions` n'est donc pas un taux d'engagement : le
- * denominateur ne contient pas le numerateur. C'est ce qui produisait des
- * lignes du genre « 1 vue · 5 interactions », lues a juste titre comme
- * impossibles.
+ * `impressions` compte desormais une EXPOSITION par evenement recu, quel qu'il
+ * soit (correction du 2026-09-01 dans `rust-recommender/src/experiments.rs`).
+ * Avant, seul un `View` l'incrementait et tout le reste allait dans
+ * `interactions` : les deux compteurs etaient DISJOINTS, leur rapport n'etait
+ * pas un taux — le denominateur ne contenait pas le numerateur — et l'ecran
+ * affichait des lignes du genre « 1 vue · 5 interactions ».
  *
- * La portee reelle est ailleurs, et elle est deja juste : `tweet_ab_assignments`
- * a pour cle primaire `(experiment_id, user_id)`, donc UNE ligne par personne
- * servie. C'est elle qui fait le denominateur.
+ * ── Deux mesures, deux roles ────────────────────────────────────────────
+ *
+ * **Le taux** se calcule par EXPOSITION (`interactions / impressions`) : c'est
+ * la question de l'auteur, « quelle formulation fait reagir quand elle
+ * passe ».
+ *
+ * **Le seuil** se juge sur les PERSONNES (`reach`, une ligne par utilisateur
+ * dans `tweet_ab_assignments`, cle primaire `(experiment_id, user_id)`). La
+ * validite d'un test tient au nombre de lecteurs INDEPENDANTS, pas au nombre
+ * de fois qu'un tweet a repasse dans le fil du meme. Sans cette distinction,
+ * une variante franchit le seuil parce qu'un seul lecteur a fait defiler son
+ * fil vingt fois — c'est exactement ce qui s'est produit : 129 expositions
+ * pour 8 personnes.
  *
  * ── Pourquoi `sufficient` et pas un simple pourcentage ───────────────────
  *
@@ -430,13 +439,14 @@ async function listAuthorExperiments(authorId, { limit = 20 } = {}) {
       impressions,
       interactions,
       reach,
-      // Denominateur = les PERSONNES servies, jamais les evenements `View` :
-      // ceux-ci sont disjoints des interactions et gonflent au defilement.
+      // Taux par EXPOSITION. `impressions` contient desormais les
+      // interactions (toute reception compte une exposition), donc le rapport
+      // est borne par 1 et se lit comme un vrai taux.
       //
       // `null` et non `0` quand le seuil n'est pas atteint : un taux absent se
       // distingue d'un taux nul, et le client ne peut pas l'afficher par
       // megarde.
-      engagement_rate: sufficient && reach > 0 ? interactions / reach : null,
+      engagement_rate: sufficient && impressions > 0 ? interactions / impressions : null,
       sufficient,
     });
   }
