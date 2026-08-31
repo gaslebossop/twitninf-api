@@ -1588,6 +1588,21 @@ router.post('/', [
       if (creationTransaction) await creationTransaction.commit();
     } catch (creationError) {
       if (creationTransaction) await creationTransaction.rollback();
+      // Un refus d'experience A/B porte son propre statut (409 quand la
+      // capacite est prise, 400 quand la demande est mal formee). Le laisser
+      // remonter au gestionnaire generique le transformait en 500 « Erreur
+      // interne du serveur » : l'auteur voyait une panne la ou il y avait une
+      // regle, et le message qui l'expliquait n'atteignait jamais l'ecran.
+      //
+      // Les controles de `assertEligible` etaient deja traites plus haut ;
+      // ceux de `createExperiment` — capacite plateforme et par auteur — ne
+      // l'etaient pas, parce qu'ils tombent APRES le debut de la transaction.
+      if (creationError instanceof AbTestRequestError) {
+        return res.status(creationError.status).json({
+          success: false,
+          message: creationError.message,
+        });
+      }
       throw creationError;
     }
 
