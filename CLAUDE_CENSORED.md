@@ -29,6 +29,7 @@ souvent le seul fichier à ouvrir pour situer un endpoint existant.
 |---|---|---|
 | `/api/auth` | `authRoutes.js` | login/register/profil/session (voir aussi `authController.js` + `authService.js`) |
 | `/api/tweets` | `tweetRoutes.js` | tweets |
+| `/api/weekly-vote` | `weeklyVoteRoutes.js` | vote communautaire du meilleur tweet de la semaine |
 | `/api/users` | `userRoutes.js` | profils publics, follow, recherche d'utilisateurs |
 | `/api/search` | `searchRoutes.js` | recherche |
 | `/api/notifications` | `notificationRoutes.js` | notifications |

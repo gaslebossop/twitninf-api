@@ -93,6 +93,7 @@ const PriceEvolutionService = require('./services/priceEvolutionService');
 const authRoutes = require('./routes/authRoutes');
 const gAuthRoutes = require('./routes/gAuthRoutes');
 const tweetRoutes = require('./routes/tweetRoutes');
+const weeklyVoteRoutes = require('./routes/weeklyVoteRoutes');
 const searchRoutes = require('./routes/searchRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const pushRoutes = require('./routes/pushRoutes');
@@ -605,6 +606,7 @@ app.use('/api/auth/2fa', twoFactorRoutes);
 app.use('/api/auth', authRoutes);
 
 app.use('/api/tweets', tweetRoutes);
+app.use('/api/weekly-vote', weeklyVoteRoutes);
 
 app.use('/api/search', searchRoutes);
 
