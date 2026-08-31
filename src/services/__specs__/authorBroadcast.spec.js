@@ -158,3 +158,31 @@ describe('broadcastNewTweet — ce qui est écrit', () => {
     expect(created[0].sender_id).toBe('author-1');
   });
 });
+
+describe('broadcastNewTweet — le transport qui compte', () => {
+  it('envoie un Web Push à chaque destinataire', async () => {
+    // La premiere version ne reimplementait qu'Expo, qui est le transport MORT
+    // sur ce produit (1 jeton pour 3 562 comptes). Les lignes etaient ecrites
+    // en base et personne n'etait reveille.
+    const sendToUser = jest.fn().mockResolvedValue({ sent: 1, removed: 0 });
+    jest.doMock('../webPushService', () => ({
+      isConfigured: () => true,
+      sendToUser,
+      publicKey: () => 'k',
+    }));
+    jest.resetModules();
+    const svc = require('../authorBroadcastService');
+    const { models } = makeModels({ followers: ['f1', 'f2', 'f3'] });
+
+    await svc.broadcastNewTweet({ models, authorId: 'author-1', tweetId: 't9' });
+    await new Promise((r) => setImmediate(r));
+
+    expect(sendToUser).toHaveBeenCalledTimes(3);
+    const [recipient, payload] = sendToUser.mock.calls[0];
+    expect(['f1', 'f2', 'f3']).toContain(recipient);
+    // L'URL doit mener AU TWEET, pas a la liste des notifications : une
+    // notification « X a publie » qui ouvre une liste fait rater le post.
+    expect(payload.url).toBe('/tweet/t9');
+    expect(payload.title).toBe('@kospor a publié');
+  });
+});

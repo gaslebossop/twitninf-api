@@ -16,8 +16,24 @@
  * milliers d'abonnés, ce n'est pas lent, c'est une panne — la requête de
  * publication n'aurait jamais rendu la main.
  *
- * Ici, donc : `bulkCreate` pour la base (une écriture), et Expo appelé par
- * lots de 100 (sa limite documentée), hors du chemin de la réponse.
+ * Ici, donc : `bulkCreate` pour la base (une écriture), puis les DEUX
+ * transports appelés hors du chemin de la réponse.
+ *
+ * ── Les deux transports, et celui qui compte vraiment ────────────────────
+ *
+ * Contourner `createNotification` fait perdre TOUT ce qu'elle faisait —
+ * y compris le Web Push. Première version de ce service : seul Expo était
+ * réimplémenté, donc la diffusion écrivait bien ses lignes en base et ne
+ * réveillait personne.
+ *
+ * Or Expo est le transport MORT sur ce produit : 1 jeton pour 3 562 comptes
+ * (mesuré le 2026-08-31). Les notifications passent par **Web Push**, servi
+ * depuis notre propre serveur — c'est la seule voie gratuite vers un iPhone
+ * et la seule qui marche sans installer l'app. Garder Expo et oublier Web
+ * Push, c'est garder la branche vide et perdre la seule qui sert.
+ *
+ * Les deux sont donc envoyés, Web Push en premier dans le code parce que
+ * c'est lui qui atteint les gens.
  *
  * ── Ce qui borne l'abus ──────────────────────────────────────────────────
  *
@@ -54,6 +70,9 @@ const MAX_RECIPIENTS = 5000;
 
 /** Limite documentée d'un appel groupé Expo. */
 const PUSH_CHUNK = 100;
+
+/** Envois Web Push menés de front. Un chiffrement par appareil, donc borné. */
+const WEB_PUSH_WAVE = 50;
 
 /** Longueur max du message personnalisé. Aligné sur la validation de la route. */
 const MESSAGE_MAX = 140;
@@ -136,6 +155,34 @@ async function pushInChunks(tokens, title, body, data) {
 }
 
 /**
+ * Web Push vers chaque destinataire, par vagues.
+ *
+ * `sendToUser` chiffre un message par appareil enregistré : lancer les 5 000
+ * d'un coup ouvrirait autant de requêtes sortantes en parallèle. Les vagues
+ * bornent ça sans file d'attente.
+ */
+async function fanOutWebPush(recipientIds, title, body, tweetId) {
+  let webPushService;
+  try {
+    webPushService = require('./webPushService');
+  } catch (error) {
+    logger.warn(`[broadcast] webPush indisponible: ${error.message}`);
+    return;
+  }
+  if (!webPushService.isConfigured()) return;
+
+  const url = tweetId ? `/tweet/${tweetId}` : '/notifications';
+  for (let i = 0; i < recipientIds.length; i += WEB_PUSH_WAVE) {
+    const wave = recipientIds.slice(i, i + WEB_PUSH_WAVE);
+    await Promise.allSettled(
+      wave.map((id) =>
+        webPushService.sendToUser(id, { title, body, url, tag: `author-post-${tweetId}` }),
+      ),
+    );
+  }
+}
+
+/**
  * Notifie les abonnés d'un auteur qu'il vient de publier.
  *
  * Ne jette jamais : une notification ratée ne doit pas faire échouer une
@@ -199,6 +246,11 @@ async function broadcastNewTweet({ models, authorId, tweetId, message }) {
       sender_id: authorId,
     });
   }
+
+  // Web Push — le transport qui atteint réellement les gens. Un envoi chiffré
+  // par appareil enregistré, donc jamais attendu : `sendToUser` traite déjà
+  // ses propres erreurs et retire les abonnements périmés.
+  void fanOutWebPush(recipientIds, title, body, tweetId);
 
   logger.info(`[broadcast] ${recipientIds.length} abonnés notifiés pour le tweet ${tweetId}`);
   return { sent: recipientIds.length, reason: null };
