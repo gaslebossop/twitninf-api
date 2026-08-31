@@ -74,17 +74,28 @@ function normalizeExperimentRequest(raw, primaryContent) {
  * variantes aujourd'hui, et une porte ouverte sans interface derriere est une
  * porte qu'on oublie de refermer.
  */
-async function clientMayAuthor(client, userId) {
+async function clientMayAuthor(client, flagContext) {
   const normalized = String(client || '').trim().toLowerCase();
   if (normalized === WINDOWS_CLIENT) return true;
   if (normalized !== MOBILE_CLIENT) return false;
-  // Le drapeau est evalue sur `user_id`, comme cote lecture : un auteur ne
-  // gagne ni ne perd l'acces d'une session a l'autre.
-  return featureFlagService.isEnabled(AB_TEST_FLAG, { user_id: userId });
+
+  // /!\ Le contexte doit etre COMPLET, pas juste `{ user_id }`.
+  //
+  // La liste d'acces d'un drapeau accepte un identifiant OU un pseudo OU un
+  // identifiant d'appareil (`featureFlagEvaluator.listedIn`). Un contexte
+  // reduit a `user_id` ne peut donc pas reconnaitre une entree ecrite en
+  // pseudo — et c'est ainsi qu'elles sont ecrites depuis l'ecran d'admin.
+  //
+  // Le symptome est particulierement trompeur : l'app, elle, resout ses
+  // drapeaux avec le contexte complet de la requete, donc elle AFFICHE la
+  // fonctionnalite. C'est seulement a la publication que le serveur, evaluant
+  // le meme drapeau avec moins d'informations, repond non. Le testeur voit un
+  // bouton qui refuse de marcher.
+  return featureFlagService.isEnabled(AB_TEST_FLAG, flagContext || {});
 }
 
-async function assertEligible({ userId, client, parentTweetId, isPrivate }) {
-  if (!(await clientMayAuthor(client, userId))) {
+async function assertEligible({ userId, client, parentTweetId, isPrivate, flagContext }) {
+  if (!(await clientMayAuthor(client, flagContext || { user_id: userId }))) {
     throw new AbTestRequestError('La bêta A/B n’est pas encore ouverte sur ce client.', 403);
   }
   if (parentTweetId) {

@@ -33,6 +33,7 @@ jest.mock('../featureFlagService', () => ({
     mockEtat.appels.push({ key, context });
     return mockEtat.flagReponse;
   },
+  contextFromRequest: async () => ({ user_id: 'u1', username: 'gas' }),
 }));
 
 jest.mock('../../models', () => ({
@@ -55,41 +56,81 @@ beforeEach(() => {
 describe('porte d’écriture des expériences A/B', () => {
   test('Windows passe, drapeau levé ou non', async () => {
     mockEtat.flagReponse = false;
-    assert.strictEqual(await clientMayAuthor('windows-electron', 'u1'), true);
+    assert.strictEqual(await clientMayAuthor('windows-electron', { user_id: 'u1' }), true);
     mockEtat.flagReponse = true;
-    assert.strictEqual(await clientMayAuthor('windows-electron', 'u1'), true);
+    assert.strictEqual(await clientMayAuthor('windows-electron', { user_id: 'u1' }), true);
   });
 
   test('Windows n’interroge même pas le service de drapeaux', async () => {
-    await clientMayAuthor('windows-electron', 'u1');
+    await clientMayAuthor('windows-electron', { user_id: 'u1' });
     assert.strictEqual(mockEtat.appels.length, 0);
   });
 
   test('le mobile passe avec le drapeau, pas sans', async () => {
     mockEtat.flagReponse = true;
-    assert.strictEqual(await clientMayAuthor('mobile-expo', 'u1'), true);
+    assert.strictEqual(await clientMayAuthor('mobile-expo', { user_id: 'u1' }), true);
     mockEtat.flagReponse = false;
-    assert.strictEqual(await clientMayAuthor('mobile-expo', 'u1'), false);
+    assert.strictEqual(await clientMayAuthor('mobile-expo', { user_id: 'u1' }), false);
   });
 
   test('le drapeau est interrogé sur fil.abtest, pour CE lecteur', async () => {
     mockEtat.flagReponse = true;
-    await clientMayAuthor('mobile-expo', 'u-42');
+    await clientMayAuthor('mobile-expo', { user_id: 'u-42' });
     assert.strictEqual(mockEtat.appels.length, 1);
     assert.strictEqual(mockEtat.appels[0].key, 'fil.abtest');
     assert.deepStrictEqual(mockEtat.appels[0].context, { user_id: 'u-42' });
   });
 
+  /**
+   * Le defaut qui s'est reellement produit, le 2026-08-31.
+   *
+   * La liste d'acces d'un drapeau reconnait un identifiant, un PSEUDO ou un
+   * identifiant d'appareil, et l'ecran d'admin y ecrit des pseudos. La porte
+   * evaluait le drapeau avec `{ user_id }` seul : l'entree « gas » ne pouvait
+   * pas matcher.
+   *
+   * Le symptome etait trompeur au possible — l'app, qui resout ses drapeaux
+   * avec le contexte complet de la requete, AFFICHAIT la puce ; seule la
+   * publication repondait « la beta A/B n'est pas ouverte sur ce client ». Un
+   * bouton visible qui refuse de marcher.
+   *
+   * Ce test verifie que le contexte traverse la porte tel quel, pseudo compris.
+   */
+  test('le contexte traverse la porte en entier, pseudo compris', async () => {
+    mockEtat.flagReponse = true;
+    const contexte = { user_id: 'u-42', username: 'gas', device_id: 'd-7' };
+    await clientMayAuthor('mobile-expo', contexte);
+    assert.deepStrictEqual(mockEtat.appels[0].context, contexte);
+  });
+
+  test('assertEligible transmet le contexte complet qu’on lui donne', async () => {
+    mockEtat.flagReponse = true;
+    await assertEligible({
+      userId: 'u-42',
+      client: 'mobile-expo',
+      parentTweetId: null,
+      isPrivate: false,
+      flagContext: { user_id: 'u-42', username: 'gas' },
+    });
+    assert.deepStrictEqual(mockEtat.appels[0].context, { user_id: 'u-42', username: 'gas' });
+  });
+
+  test('sans contexte fourni, assertEligible retombe sur l’identifiant seul', async () => {
+    mockEtat.flagReponse = true;
+    await assertEligible({ userId: 'u-9', client: 'mobile-expo', parentTweetId: null, isPrivate: false });
+    assert.deepStrictEqual(mockEtat.appels[0].context, { user_id: 'u-9' });
+  });
+
   test('la casse de l’en-tête n’a pas à être exacte', async () => {
     mockEtat.flagReponse = true;
-    assert.strictEqual(await clientMayAuthor('MOBILE-EXPO', 'u1'), true);
-    assert.strictEqual(await clientMayAuthor('  mobile-expo  ', 'u1'), true);
+    assert.strictEqual(await clientMayAuthor('MOBILE-EXPO', { user_id: 'u1' }), true);
+    assert.strictEqual(await clientMayAuthor('  mobile-expo  ', { user_id: 'u1' }), true);
   });
 
   test('les autres clients restent dehors, drapeau levé', async () => {
     mockEtat.flagReponse = true;
     for (const client of ['twitninf-web', 'curl/8', '', undefined, null]) {
-      assert.strictEqual(await clientMayAuthor(client, 'u1'), false, String(client));
+      assert.strictEqual(await clientMayAuthor(client, { user_id: 'u1' }), false, String(client));
     }
   });
 

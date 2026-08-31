@@ -117,6 +117,7 @@ const videoRecommendationService = require('../services/videoRecommendationServi
 
 // 📊 Tracking CTR pour l'algorithme Rust
 const ctrTracker = require('../services/ctrTracker');
+const featureFlagService = require('../services/featureFlagService');
 const {
   AbTestRequestError,
   normalizeExperimentRequest,
@@ -1485,6 +1486,10 @@ router.post('/', [
           client: req.headers['x-twitninf-client'],
           parentTweetId: parent_tweet_id,
           isPrivate: is_private,
+          // Contexte COMPLET, pas `{ user_id }` : la liste d'acces du drapeau
+          // reconnait aussi les pseudos, et c'est ainsi que l'ecran d'admin
+          // les ecrit. Voir `clientMayAuthor`.
+          flagContext: await featureFlagService.contextFromRequest(req),
         });
       }
     } catch (abError) {

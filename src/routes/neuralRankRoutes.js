@@ -666,8 +666,18 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
   // Le drapeau est évalué sur `user_id` : un même lecteur reste du même côté
   // de la barrière d'une session à l'autre, sans quoi il verrait le tweet
   // changer de formulation à chaque rafraîchissement.
+  //
+  // /!\ Contexte COMPLET et non `{ user_id }` : la liste d'acces d'un drapeau
+  // reconnait un identifiant, un pseudo OU un identifiant d'appareil
+  // (`featureFlagEvaluator.listedIn`), et l'ecran d'admin y ecrit des PSEUDOS.
+  // Evalue avec le seul `user_id`, ce drapeau ignorait donc en silence tous
+  // les testeurs internes inscrits sur la liste — alors que l'app, qui resout
+  // ses drapeaux avec le contexte complet, leur affichait la fonctionnalite.
   const enableExperiments = req.headers['x-twitninf-client'] === 'windows-electron'
-    || await featureFlagService.isEnabled('fil.abtest', { user_id: userId });
+    || await featureFlagService.isEnabled(
+      'fil.abtest',
+      await featureFlagService.contextFromRequest(req),
+    );
 
   try {
     let refusedByPaidContent = false;
