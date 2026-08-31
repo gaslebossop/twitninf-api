@@ -42,21 +42,28 @@
  * notifications, et l'avantage se détruit lui-même en même temps qu'il pourrit
  * l'app. Trois bornes :
  *
- *  1. `COOLDOWN_MS` — un seul envoi par fenêtre, quel que soit le nombre de
- *     publications. Silencieux pour l'auteur : sa publication part quand même,
- *     seule la notification est sautée. Échouer bruyamment le pousserait à
- *     réessayer.
- *  2. `MAX_RECIPIENTS` — plafond dur par envoi.
- *  3. Réponses et tweets privés exclus en amont (voir l'appelant) : une
+ *  1. `MAX_RECIPIENTS` — plafond dur par envoi.
+ *  2. Réponses et tweets privés exclus en amont (voir l'appelant) : une
  *     réponse n'est pas une publication qu'on annonce.
+ *  3. L'auteur decide, publication par publication : le mode « sans notif »
+ *     est a un tap dans la compose.
+ *
+ * Il y avait une quatrieme borne — une seule diffusion par tranche de 6 h.
+ * **Retiree le 2026-08-31, apres l'avoir vue casser le produit.** Depuis que
+ * notifier est le comportement par DEFAUT, cette fenetre ne bridait plus un
+ * abus, elle annulait le cas normal : un auteur publiait, l'interface disait
+ * « NOTIF », et rien ne partait. Constate en base — deux posts a 18 minutes
+ * d'intervalle, un seul lot de notifications.
+ *
+ * Une limite silencieuse qui contredit le reglage affiche est pire que pas de
+ * limite : elle rend le produit imprevisible et impossible a deboguer de
+ * l'exterieur. Si un plafond redevient necessaire, il devra se VOIR dans la
+ * compose (le chip dirait « deja notifie »), pas se decider en silence.
  */
 
 const { Op } = require('sequelize');
 const axios = require('axios');
 const logger = require('../utils/logger');
-
-/** Une seule diffusion par tranche de 6 h, par auteur. */
-const COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Plafond d'abonnés notifiés en une fois.
@@ -112,28 +119,6 @@ function sanitizeMessage(raw) {
   const cleaned = raw.replace(/\s+/g, ' ').trim();
   if (!cleaned) return null;
   return cleaned.slice(0, MESSAGE_MAX);
-}
-
-/**
- * L'auteur a-t-il déjà diffusé dans la fenêtre courante ?
- *
- * Lu depuis les notifications elles-mêmes plutôt que depuis une colonne
- * dédiée : pas de migration, et la source est la vérité (ce qui a réellement
- * été envoyé) plutôt qu'un compteur qui peut diverger.
- */
-async function recentlyBroadcast(Notification, authorId) {
-  const since = new Date(Date.now() - COOLDOWN_MS);
-  const last = await Notification.findOne({
-    where: {
-      sender_id: authorId,
-      type: 'system',
-      created_at: { [Op.gt]: since },
-      metadata: { kind: KIND },
-    },
-    attributes: ['id'],
-    order: [['created_at', 'DESC']],
-  });
-  return !!last;
 }
 
 /** Envoi Expo par lots, hors du chemin de la réponse HTTP. */
@@ -204,10 +189,6 @@ async function broadcastNewTweet({ models, authorId, tweetId, message }) {
     return { sent: 0, reason: 'not_ultra' };
   }
 
-  if (await recentlyBroadcast(Notification, authorId)) {
-    return { sent: 0, reason: 'cooldown' };
-  }
-
   const followers = await UserFollow.findAll({
     where: { following_id: authorId, status: 'active' },
     attributes: ['follower_id'],
@@ -260,7 +241,6 @@ module.exports = {
   broadcastNewTweet,
   sanitizeMessage,
   defaultMessage,
-  COOLDOWN_MS,
   MAX_RECIPIENTS,
   MESSAGE_MAX,
   KIND,

@@ -92,11 +92,21 @@ describe('broadcastNewTweet — qui a le droit', () => {
 });
 
 describe('broadcastNewTweet — les bornes anti-abus', () => {
-  it('saute l\'envoi si une diffusion a déjà eu lieu dans la fenêtre', async () => {
+  it('notifie a CHAQUE publication, sans fenetre silencieuse', () => {
+    // Il y avait une limite d'une diffusion par 6 h. Depuis que notifier est le
+    // comportement par defaut, elle n'encadrait plus un abus : elle annulait le
+    // cas normal. L'interface affichait « NOTIF » et rien ne partait — constate
+    // en base, deux posts a 18 minutes d'intervalle, un seul lot envoye.
+    //
+    // Une limite silencieuse qui contredit le reglage affiche est pire que pas
+    // de limite : elle rend le produit imprevisible et indebogable de
+    // l'exterieur. Si un plafond redevient necessaire, il devra SE VOIR dans la
+    // compose, pas se decider en douce.
     const { models, created } = makeModels({ lastBroadcast: { id: 'n1' } });
-    const result = await broadcastNewTweet({ models, authorId: 'author-1', tweetId: 't2' });
-    expect(result).toEqual({ sent: 0, reason: 'cooldown' });
-    expect(created).toHaveLength(0);
+    return broadcastNewTweet({ models, authorId: 'author-1', tweetId: 't2' }).then((result) => {
+      expect(result.sent).toBe(2);
+      expect(created).toHaveLength(2);
+    });
   });
 
   it('plafonne le nombre de destinataires', async () => {
