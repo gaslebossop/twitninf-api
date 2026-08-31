@@ -33,6 +33,7 @@ const ContentQualityService = require('../services/contentQualityService');
 const logger = require('../utils/logger');
 const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
 const { maybeRenewSuperHearts, isSuperHeartEligible } = require('../utils/superHeartHelpers');
+const authorBroadcastService = require('../services/authorBroadcastService');
 
 /**
  * Efface l'identité et le contenu d'un tweet dont l'auteur est bloqué (dans
@@ -1403,6 +1404,12 @@ router.post('/', [
   body('spotify_track').optional().isObject().withMessage('spotify_track doit être un objet'),
   body('audio_url').optional().isString().withMessage('audio_url doit être une chaîne'),
   body('audio_duration').optional().isInt({ min: 1 }).withMessage('audio_duration doit être un entier positif'),
+  // Notification aux abonnés (Ultra). Le palier n'est PAS vérifié ici mais
+  // dans le service : un validateur qui rejetterait la requête ferait échouer
+  // la publication entière parce qu'une option accessoire n'est pas ouverte.
+  body('notify_followers').optional().isBoolean().withMessage('notify_followers doit être un booléen'),
+  body('notify_message').optional().isString().isLength({ max: 140 })
+    .withMessage('Le message de notification est limité à 140 caractères'),
   handleValidationErrors,
   // Répondre à un contenu payant non acheté : la réponse s'afficherait sous
   // un texte que son auteur n'a jamais lu, et le fil de discussion d'un tweet
@@ -1445,7 +1452,9 @@ router.post('/', [
       translation_enabled = false,
       spotify_track = null,
       audio_url = null,
-      audio_duration = null
+      audio_duration = null,
+      notify_followers = false,
+      notify_message = null
     } = req.body;
 
     const userId = req.user.id;
@@ -1969,6 +1978,35 @@ router.post('/', [
 
       // Mettre à jour la queue en temps réel pour le tweet parent (nouvelle réponse)
       await realtimeQueueService.updateRepliesRealtime(parent_tweet_id, userId);
+    }
+
+    /*
+     * Prévenir ses abonnés — avantage Ultra, décidé à l'écriture.
+     *
+     * Trois exclusions AVANT d'appeler le service, parce qu'elles tiennent au
+     * tweet et pas à l'auteur :
+     *  - une réponse n'est pas une publication qu'on annonce ;
+     *  - un tweet privé n'a pas d'audience à prévenir ;
+     *  - sans demande explicite, on ne notifie personne (le défaut est le
+     *    silence : c'est le comportement de tous les comptes aujourd'hui, et
+     *    l'option ne doit pas changer ce que fait quelqu'un qui l'ignore).
+     *
+     * Le palier, la fenêtre anti-spam et le plafond de destinataires sont
+     * revérifiés dans le service — jamais ici, et jamais depuis le client.
+     *
+     * Volontairement NON attendu et sans `throw` possible : le tweet est déjà
+     * écrit. Faire échouer une publication parce qu'une notification n'est pas
+     * partie serait perdre le contenu pour un accessoire.
+     */
+    if (notify_followers === true && !parent_tweet_id && !is_private) {
+      authorBroadcastService
+        .broadcastNewTweet({
+          models: { User, UserFollow, Notification },
+          authorId: userId,
+          tweetId: tweet.id,
+          message: notify_message,
+        })
+        .catch((error) => logger.warn(`[broadcast] échec pour ${tweet.id}: ${error?.message}`));
     }
 
     logger.info(`Nouveau tweet créé: ${tweet.id} par l'utilisateur ${userId}`);
