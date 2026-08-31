@@ -320,19 +320,38 @@ async function moderateAndActivateExperiment(experimentId, authorUsername) {
  * l'ecran se rafraichit au pull-to-refresh, donc il ne doit pas couter N+1
  * allers-retours par experience.
  *
+ * ── La portee se compte en PERSONNES, pas en evenements ─────────────────
+ *
+ * `tweet_ab_variant_metrics.impressions` compte les evenements `View` recus,
+ * sans deduplication par lecteur. Mesure en production : une variante y
+ * affichait **129 impressions pour 8 utilisateurs assignes** — la meme
+ * personne recompte a chaque fois que le tweet repasse dans son fil. Ce
+ * compteur ne dit donc pas « combien de gens l'ont vue » mais « combien de
+ * fois un evenement est parti », et il est domine par un ou deux lecteurs qui
+ * defilent.
+ *
+ * Pire, `impressions` et `interactions` sont DISJOINTS : le handler Rust
+ * n'incremente les impressions que si l'evenement vaut exactement `View`, tout
+ * le reste (like, retweet, ouverture) partant dans `interactions`. Un rapport
+ * `interactions / impressions` n'est donc pas un taux d'engagement : le
+ * denominateur ne contient pas le numerateur. C'est ce qui produisait des
+ * lignes du genre « 1 vue · 5 interactions », lues a juste titre comme
+ * impossibles.
+ *
+ * La portee reelle est ailleurs, et elle est deja juste : `tweet_ab_assignments`
+ * a pour cle primaire `(experiment_id, user_id)`, donc UNE ligne par personne
+ * servie. C'est elle qui fait le denominateur.
+ *
  * ── Pourquoi `sufficient` et pas un simple pourcentage ───────────────────
  *
  * Le piege d'un ecran de test A/B, c'est d'afficher « B : 12 % · A : 8 % » sur
- * vingt impressions et de laisser croire que B gagne. A ce volume l'ecart est
- * du bruit : une seule interaction de plus fait basculer le classement. Un
- * chiffre affiche sans reserve sera lu comme un resultat, et l'auteur ecrira
- * ses prochains tweets en suivant du hasard.
+ * vingt personnes et de laisser croire que B gagne. A ce volume l'ecart est du
+ * bruit : une seule interaction de plus fait basculer le classement. Un chiffre
+ * affiche sans reserve sera lu comme un resultat, et l'auteur ecrira ses
+ * prochains tweets en suivant du hasard.
  *
- * On renvoie donc, pour chaque variante, le compte BRUT (impressions,
- * interactions) et un drapeau `sufficient` qui dit si le seuil de l'experience
- * (`min_impressions_per_variant`, choisi a la creation) est atteint. Le taux
- * n'est calcule que la ou il veut dire quelque chose ; ailleurs le client
- * affiche « pas encore assez de vues », ce qui est la verite.
+ * Le taux n'est donc calcule que la ou il veut dire quelque chose ; ailleurs
+ * le client affiche « pas encore assez de monde », ce qui est la verite.
  */
 async function listAuthorExperiments(authorId, { limit = 20 } = {}) {
   const rows = await sequelize.query(
@@ -356,10 +375,18 @@ async function listAuthorExperiments(authorId, { limit = 20 } = {}) {
       v.is_control,
       v.moderation_status,
       COALESCE(m.impressions, 0)      AS impressions,
-      COALESCE(m.interactions, 0)     AS interactions
+      COALESCE(m.interactions, 0)     AS interactions,
+      COALESCE(a.reach, 0)            AS reach
     FROM tweet_ab_experiments e
     JOIN tweet_ab_variants v            ON v.experiment_id = e.id
     LEFT JOIN tweet_ab_variant_metrics m ON m.variant_id = v.id
+    -- Une ligne d'assignation par personne (cle primaire experiment+user) :
+    -- c'est la seule mesure de portee qui ne double pas au defilement.
+    LEFT JOIN (
+      SELECT variant_id, COUNT(*) AS reach
+      FROM tweet_ab_assignments
+      GROUP BY variant_id
+    ) a ON a.variant_id = v.id
     WHERE e.author_id = :authorId
     ORDER BY e.created_at DESC, v.position ASC
     `,
@@ -387,9 +414,12 @@ async function listAuthorExperiments(authorId, { limit = 20 } = {}) {
     const exp = byExperiment.get(r.experiment_id);
     const impressions = Number(r.impressions) || 0;
     const interactions = Number(r.interactions) || 0;
+    const reach = Number(r.reach) || 0;
     // Le seuil vient de l'experience elle-meme, pas d'une constante ici : il a
-    // ete choisi a la creation et c'est lui qui fait foi.
-    const sufficient = impressions >= exp.min_impressions_per_variant;
+    // ete choisi a la creation et c'est lui qui fait foi. Il s'applique a la
+    // PORTEE : `impressions` gonfle au defilement d'un seul lecteur et
+    // franchirait le seuil sans que personne de plus n'ait vu la variante.
+    const sufficient = reach >= exp.min_impressions_per_variant;
     exp.variants.push({
       id: r.variant_id,
       position: r.position,
@@ -399,10 +429,14 @@ async function listAuthorExperiments(authorId, { limit = 20 } = {}) {
       moderation_status: r.moderation_status,
       impressions,
       interactions,
+      reach,
+      // Denominateur = les PERSONNES servies, jamais les evenements `View` :
+      // ceux-ci sont disjoints des interactions et gonflent au defilement.
+      //
       // `null` et non `0` quand le seuil n'est pas atteint : un taux absent se
       // distingue d'un taux nul, et le client ne peut pas l'afficher par
       // megarde.
-      engagement_rate: sufficient && impressions > 0 ? interactions / impressions : null,
+      engagement_rate: sufficient && reach > 0 ? interactions / reach : null,
       sufficient,
     });
   }
@@ -413,6 +447,7 @@ async function listAuthorExperiments(authorId, { limit = 20 } = {}) {
   // seule variante au-dessus du seuil ne permet aucune comparaison.
   for (const exp of experiments) {
     exp.comparable = exp.variants.length > 1 && exp.variants.every((v) => v.sufficient);
+    exp.total_reach = exp.variants.reduce((n, v) => n + v.reach, 0);
     exp.total_impressions = exp.variants.reduce((n, v) => n + v.impressions, 0);
     exp.total_interactions = exp.variants.reduce((n, v) => n + v.interactions, 0);
   }

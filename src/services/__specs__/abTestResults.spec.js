@@ -40,6 +40,7 @@ const row = (over = {}) => ({
   moderation_status: 'approved',
   impressions: 10,
   interactions: 2,
+  reach: 10,
   ...over,
 });
 
@@ -59,28 +60,29 @@ test('regroupe les lignes plates en experiences', async () => {
 });
 
 test('aucun taux tant que le seuil n\'est pas atteint', async () => {
-  sequelize.query.mockResolvedValue([row({ impressions: 3, interactions: 1 })]);
+  sequelize.query.mockResolvedValue([row({ impressions: 3, interactions: 1, reach: 3 })]);
   const [exp] = await listAuthorExperiments('author-1');
   // `null`, pas 0 : un taux absent doit se distinguer d'un taux nul, sinon le
   // client affiche « 0 % » sur une variante qui n'a simplement pas ete vue.
   expect(exp.variants[0].engagement_rate).toBeNull();
   expect(exp.variants[0].sufficient).toBe(false);
   // Les comptes bruts restent la : ils sont vrais a n'importe quel volume.
-  expect(exp.variants[0].impressions).toBe(3);
+  expect(exp.variants[0].reach).toBe(3);
   expect(exp.variants[0].interactions).toBe(1);
 });
 
 test('le taux apparait une fois le seuil franchi', async () => {
-  sequelize.query.mockResolvedValue([row({ impressions: 10, interactions: 2 })]);
+  sequelize.query.mockResolvedValue([row({ reach: 10, interactions: 2 })]);
   const [exp] = await listAuthorExperiments('author-1');
+  // 2 interactions pour 10 PERSONNES servies.
   expect(exp.variants[0].engagement_rate).toBeCloseTo(0.2);
   expect(exp.variants[0].sufficient).toBe(true);
 });
 
 test('l\'experience n\'est comparable que si TOUTES les variantes ont le volume', async () => {
   sequelize.query.mockResolvedValue([
-    row({ impressions: 10 }),
-    row({ variant_id: 'v2', position: 1, label: 'B', impressions: 2, interactions: 1 }),
+    row({ reach: 10 }),
+    row({ variant_id: 'v2', position: 1, label: 'B', reach: 2, interactions: 1 }),
   ]);
   const [exp] = await listAuthorExperiments('author-1');
   // Une variante au-dessus du seuil ne permet aucune COMPARAISON : c'est
@@ -89,27 +91,56 @@ test('l\'experience n\'est comparable que si TOUTES les variantes ont le volume'
 });
 
 test('une variante seule n\'est jamais comparable', async () => {
-  sequelize.query.mockResolvedValue([row({ impressions: 100, interactions: 40 })]);
+  sequelize.query.mockResolvedValue([row({ reach: 100, interactions: 40 })]);
   const [exp] = await listAuthorExperiments('author-1');
   expect(exp.comparable).toBe(false);
 });
 
 test('additionne les totaux de l\'experience', async () => {
   sequelize.query.mockResolvedValue([
-    row({ impressions: 10, interactions: 2 }),
-    row({ variant_id: 'v2', position: 1, label: 'B', impressions: 8, interactions: 3 }),
+    row({ reach: 10, impressions: 10, interactions: 2 }),
+    row({ variant_id: 'v2', position: 1, label: 'B', reach: 8, impressions: 8, interactions: 3 }),
   ]);
   const [exp] = await listAuthorExperiments('author-1');
-  expect(exp.total_impressions).toBe(18);
+  expect(exp.total_reach).toBe(18);
   expect(exp.total_interactions).toBe(5);
   expect(exp.comparable).toBe(true);
 });
 
 test('le seuil vient de l\'experience, pas d\'une constante', async () => {
   sequelize.query.mockResolvedValue([
-    row({ min_impressions_per_variant: 50, impressions: 20, interactions: 5 }),
+    row({ min_impressions_per_variant: 50, reach: 20, interactions: 5 }),
   ]);
   const [exp] = await listAuthorExperiments('author-1');
   expect(exp.variants[0].sufficient).toBe(false);
   expect(exp.variants[0].engagement_rate).toBeNull();
+});
+
+test('la portee ignore le gonflement des impressions au defilement', () => {
+  // Le cas reel qui a declenche la correction : 129 evenements `View` pour
+  // 8 personnes servies. Le seuil doit se juger sur les 8, pas sur les 129 —
+  // sinon une variante « franchit » le seuil parce qu'UN lecteur a fait
+  // defiler son fil vingt fois.
+  sequelize.query.mockResolvedValue([
+    row({ impressions: 129, interactions: 7, reach: 8, min_impressions_per_variant: 20 }),
+  ]);
+  return listAuthorExperiments('author-1').then(([exp]) => {
+    expect(exp.variants[0].sufficient).toBe(false);
+    expect(exp.variants[0].engagement_rate).toBeNull();
+    expect(exp.variants[0].reach).toBe(8);
+  });
+});
+
+test('le taux se calcule sur les personnes, pas sur les evenements View', () => {
+  // `impressions` et `interactions` sont DISJOINTS cote Rust : seul un
+  // evenement `View` incremente les impressions, tout le reste va dans les
+  // interactions. `interactions / impressions` n'est donc pas un taux — le
+  // denominateur ne contient pas le numerateur, et c'est ce qui produisait
+  // « 1 vue · 5 interactions ».
+  sequelize.query.mockResolvedValue([
+    row({ impressions: 1, interactions: 5, reach: 10 }),
+  ]);
+  return listAuthorExperiments('author-1').then(([exp]) => {
+    expect(exp.variants[0].engagement_rate).toBeCloseTo(0.5);
+  });
 });
