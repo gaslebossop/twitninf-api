@@ -12,6 +12,7 @@ const Tweet = require('./Tweet');
 const TweetLike = require('./TweetLike');
 const TweetRetweet = require('./TweetRetweet');
 const TweetBookmark = require('./TweetBookmark');
+const WeeklyTweetVote = require('./WeeklyTweetVote');
 const Notification = require('./Notification');
 const WebPushSubscription = require('./WebPushSubscription');
 const UserNudgeState = require('./UserNudgeState');
@@ -115,6 +116,7 @@ Tweet.initTweetModel(sequelize);
 TweetLike.initTweetLikeModel(sequelize);
 TweetRetweet.initTweetRetweetModel(sequelize);
 TweetBookmark.initTweetBookmarkModel(sequelize);
+WeeklyTweetVote.initWeeklyTweetVoteModel(sequelize);
 Notification.initNotificationModel(sequelize);
 WebPushSubscription.initWebPushSubscriptionModel(sequelize);
 UserNudgeState.initUserNudgeStateModel(sequelize);
@@ -235,6 +237,12 @@ User.hasMany(TweetBookmark, {
   onDelete: 'CASCADE'
 });
 
+User.hasMany(WeeklyTweetVote, {
+  foreignKey: 'user_id',
+  as: 'weeklyTweetVotes',
+  onDelete: 'CASCADE'
+});
+
 User.hasMany(Notification, { 
   foreignKey: 'recipient_id', 
   as: 'receivedNotifications',
@@ -268,6 +276,12 @@ Tweet.hasMany(TweetRetweet, {
 Tweet.hasMany(TweetBookmark, {
   foreignKey: 'tweet_id',
   as: 'bookmarks',
+  onDelete: 'CASCADE'
+});
+
+Tweet.hasMany(WeeklyTweetVote, {
+  foreignKey: 'tweet_id',
+  as: 'weeklyVotes',
   onDelete: 'CASCADE'
 });
 
@@ -358,6 +372,17 @@ TweetBookmark.belongsTo(User, {
 });
 
 TweetBookmark.belongsTo(Tweet, {
+  foreignKey: 'tweet_id',
+  as: 'tweet'
+});
+
+// Associations WeeklyTweetVote
+WeeklyTweetVote.belongsTo(User, {
+  foreignKey: 'user_id',
+  as: 'user'
+});
+
+WeeklyTweetVote.belongsTo(Tweet, {
   foreignKey: 'tweet_id',
   as: 'tweet'
 });
@@ -2317,6 +2342,7 @@ module.exports = {
   TweetLike,
   TweetRetweet,
   TweetBookmark,
+  WeeklyTweetVote,
   Notification,
   WebPushSubscription,
   UserNudgeState,
