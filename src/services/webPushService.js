@@ -31,6 +31,20 @@ if (configured) {
   logger.warn('[webpush] VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY absents : Web Push désactivé.');
 }
 
+/**
+ * Durée pendant laquelle le service de poussée GARDE le message si l'appareil
+ * est injoignable — téléphone éteint, hors réseau, en avion.
+ *
+ * 4 semaines, le maximum autorisé par la spécification Web Push. Valait 24 h :
+ * une notification pour quelqu'un parti en week-end sans réseau était jetée
+ * par FCM/APNs avant son retour.
+ *
+ * Ce que le TTL ne fait PAS : il ne conserve rien chez nous. La ligne en base
+ * reste de toute façon et la personne retrouve la notification dans sa liste
+ * en ouvrant l'app — le TTL décide seulement si elle est RÉVEILLÉE.
+ */
+const TTL_SECONDS = 60 * 60 * 24 * 28;
+
 function isConfigured() {
   return configured;
 }
@@ -66,7 +80,7 @@ async function sendToUser(userId, payload) {
       await webpush.sendNotification(
         { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
         body,
-        { TTL: 60 * 60 * 24 },
+        { TTL: TTL_SECONDS },
       );
       sent += 1;
       await sub.update({ failure_count: 0, last_success_at: new Date() });
