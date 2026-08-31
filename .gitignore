@@ -31,6 +31,27 @@ src.zip
 test-*.js
 *test*.js
 *.sql
+
+# /!\ `*test*.js` est un motif de NOM, pas de dossier, et il est insensible a
+# la casse sur cette machine : il avale donc aussi les fichiers de PRODUCTION
+# dont le nom contient « Test ».
+#
+# `tweetAbTestService.js` a vecu ainsi hors du depot. Il n'a rien d'un script
+# de test : c'est le service des experiences A/B, requis sans condition par
+# `src/routes/tweetRoutes.js` — un depot fraichement clone ne demarrait donc
+# pas. Reintegre explicitement plutot qu'en assouplissant le motif, qui
+# ramenerait au passage les specs de `__specs__/`, exclues deliberement.
+!src/services/tweetAbTestService.js
+
+# Meme piege du cote des specs : `tweetAbTestGate.spec.js` etait avalee alors
+# que ses 47 voisines de `__specs__/` sont versionnees — elles n'ont
+# simplement pas « test » dans leur nom. Une suite de tests dont certains
+# fichiers manquent selon leur ORTHOGRAPHE est pire qu'une suite absente : le
+# depot passe au vert sans les executer.
+#
+# Seules les `.spec.js` sont reintegrees. Les `.test.js` de `__specs__`
+# restent exclues, comme avant.
+!src/**/__specs__/*.spec.js
 # Version publique, sans IP/SSH/secrets, lue par la routine automatisee de
 # La Forge — CLAUDE.md complet (acces VPS) reste local, jamais commite.
 !CLAUDE_CENSORED.md

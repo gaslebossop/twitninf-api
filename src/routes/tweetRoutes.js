@@ -121,6 +121,7 @@ const {
   AbTestRequestError,
   normalizeExperimentRequest,
   assertEligible: assertAbTestEligible,
+  platformScopeFor: abTestPlatformScope,
   createExperiment: createAbTestExperiment,
   cancelExperiment: cancelAbTestExperiment,
   moderateAndActivateExperiment,
@@ -1563,7 +1564,7 @@ router.post('/', [
           ...(experimentRequest ? {
             ab_test: {
               status: 'pending',
-              platform_scope: 'windows',
+              platform_scope: abTestPlatformScope(req.headers['x-twitninf-client']),
               variant_count: experimentRequest.contents.length,
             },
           } : {}),
@@ -1575,6 +1576,7 @@ router.post('/', [
           tweetId: tweet.id,
           authorId: userId,
           contents: experimentRequest.contents,
+          client: req.headers['x-twitninf-client'],
           transaction: creationTransaction,
         });
       }
