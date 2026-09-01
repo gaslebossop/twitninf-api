@@ -2,6 +2,19 @@ const authService = require('../services/authService');
 const { validationResult } = require('express-validator');
 const logger = require('../utils/logger');
 const rustClient = require('../services/rustRecommenderClient');
+const impersonationWatchService = require('../services/impersonationWatchService');
+
+/**
+ * Déclenche le contrôle anti-usurpation d'UN compte, hors du chemin critique
+ * (réponse déjà envoyée) : c'est instantané pour l'utilisateur mais n'ajoute
+ * aucune latence à sa requête, et un échec ne remonte jamais.
+ */
+function triggerImpersonationCheck(userId) {
+  if (!userId) return;
+  setImmediate(() => {
+    impersonationWatchService.checkAccountForImpersonation(userId).catch(() => {});
+  });
+}
 
 /**
  * Contexte d'appareil attaché à une session, pour que l'utilisateur puisse
@@ -41,6 +54,9 @@ class AuthController {
       }, sessionContextFrom(req));
 
       res.status(201).json(result);
+      // Un compte qui naît déjà au pseudo/à la photo d'un autre est contrôlé
+      // immédiatement, pas seulement au prochain balayage horaire.
+      triggerImpersonationCheck(result?.user?.id || result?.data?.user?.id || result?.data?.id);
     } catch (error) {
       logger.error('Erreur dans register:', error);
       
@@ -305,6 +321,15 @@ class AuthController {
       }
 
       res.status(200).json(result);
+      // Changer sa photo, son pseudo ou son nom pour ceux d'un autre est LE
+      // geste d'usurpation : on le contrôle dans la foulée.
+      if (result?.success && (updateData.avatar !== undefined
+        || updateData.username !== undefined
+        || updateData.full_name !== undefined
+        || updateData.fullName !== undefined
+        || updateData.banner !== undefined)) {
+        triggerImpersonationCheck(userId);
+      }
     } catch (error) {
       logger.error('Erreur dans updateProfile:', error);
       

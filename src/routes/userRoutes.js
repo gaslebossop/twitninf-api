@@ -1817,6 +1817,13 @@ router.post('/me/avatar', [
     logger.info(`Avatar DB URL: ${publicUrl}`);
     await user.save();
 
+    // Contrôle anti-usurpation instantané : changer sa pp pour celle d'un autre
+    // est le vecteur nº1. Hors chemin critique, jamais bloquant.
+    setImmediate(() => {
+      require('../services/impersonationWatchService')
+        .checkAccountForImpersonation(String(userId)).catch(() => {});
+    });
+
     // Frein de vélocité (1h, ×0.5) — voir authController.updateProfile pour
     // le même frein posé quand l'avatar change via l'URL brute.
     rustClient.triggerVelocityThrottle(String(userId), 'avatar_change');

@@ -13,6 +13,24 @@ const {
 const avatarFingerprint = require('./avatarFingerprint');
 const avatarEmbedding = require('./avatarEmbedding');
 const signals = require('./impersonationSignals');
+let webPushService = null;
+try { webPushService = require('./webPushService'); } catch (_) { /* push facultatif */ }
+
+// ── Sanction automatique ────────────────────────────────────────────────────
+// Au-delà de ce score, la plateforme SANCTIONNE le compte usurpateur (au lieu
+// de seulement informer la cible). Choix produit assumé : un seul signal fort
+// suffit. Réglable sans redéploiement.
+const AUTO_SANCTION_SCORE = Number(process.env.IMPERSONATION_AUTO_SANCTION_SCORE) || 0.85;
+const AUTO_SANCTION_DAYS = Number(process.env.IMPERSONATION_AUTO_SANCTION_DAYS) || 7;
+// Interrupteur d'arrêt d'urgence : à 'false', on retombe sur « informer seulement ».
+const AUTO_SANCTION_ENABLED = process.env.IMPERSONATION_AUTO_SANCTION_ENABLED !== 'false';
+// Compte(s) « créateur » prévenus par push à chaque sanction (ids séparés par
+// des virgules). À défaut, on prévient au moins la cible.
+const CREATOR_USER_IDS = String(process.env.IMPERSONATION_CREATOR_USER_IDS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+// Avatar par défaut (identique au defaultValue du modèle User) : ce qu'on
+// repose en effaçant la pp de l'usurpateur.
+const DEFAULT_AVATAR = 'https://static.vecteezy.com/system/resources/previews/009/292/244/non_2x/default-avatar-icon-of-social-media-user-vector.jpg';
 
 // Seuil de similarite cosinus DINOv2 au-dela duquel deux avatars montrent le
 // MEME sujet. Mesure sur la base reelle : usurpateur 0,957 ; paires distinctes
@@ -1358,13 +1376,251 @@ async function findSuspects(target, targetFingerprint) {
   return rows;
 }
 
+/** Push web silencieux : jamais bloquant, jamais fatal. */
+async function pushToUser(userId, payload) {
+  if (!webPushService || !userId) return;
+  try {
+    if (typeof webPushService.isConfigured === 'function' && !webPushService.isConfigured()) return;
+    await webPushService.sendToUser(String(userId), payload);
+  } catch (error) {
+    logger.warn(`[usurpation] push non envoyé à ${userId} : ${error.message}`);
+  }
+}
+
+/**
+ * Un pseudo « brûlé » unique, façon comptes scriptés : twitninfuser + chiffres.
+ * On boucle jusqu'à en trouver un libre — la collision est quasi nulle mais on
+ * ne renomme pas deux comptes pareil.
+ */
+async function generateBurnerUsername() {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const candidate = `twitninfuser${Math.floor(100000 + Math.random() * 900000)}`;
+    const taken = await User.count({ where: { username: candidate } });
+    if (!taken) return candidate;
+  }
+  // Dernier recours : suffixe temporel, unicité garantie.
+  return `twitninfuser${Date.now()}`;
+}
+
+/**
+ * SANCTIONNE un compte usurpateur : suspension de N jours, pseudo et nom
+ * remplacés par un identifiant neutre, photo et bannière remises à zéro.
+ *
+ * ── Réversible et journalisé ────────────────────────────────────────────
+ * L'état d'origine (pseudo, nom, avatar, bannière) est copié dans
+ * `suspension_meta.original` AVANT d'écrire : une sanction à tort se défait en
+ * restaurant ces valeurs. Rien n'est supprimé, tout est déplacé.
+ *
+ * ── Garde-fous : on ne frappe QUE l'usurpateur ──────────────────────────
+ * Jamais un compte vérifié, jamais un compte ANTÉRIEUR à la cible (celui qui
+ * était là avant n'usurpe pas — c'est peut-être lui la victime), jamais un
+ * compte déjà suspendu, jamais un compte de test. La direction est vérifiée
+ * ici en dur, en plus du score : une erreur de sens bannirait la victime.
+ */
+async function applyImpersonationSanction(target, suspect, { dryRun = false } = {}) {
+  const reason = `Usurpation d'identité détectée (compte proche de @${target.username}).`;
+
+  // Garde-fous durs, indépendants du score.
+  if (suspect.verified) return { sanctioned: false, skipped: 'suspect_verifie' };
+  if (suspect.is_suspended) return { sanctioned: false, skipped: 'deja_suspendu' };
+  if (suspect.is_data_test) return { sanctioned: false, skipped: 'compte_test' };
+  const suspectAt = suspect.created_at ? new Date(suspect.created_at).getTime() : null;
+  const targetAt = target.created_at ? new Date(target.created_at).getTime() : null;
+  if (suspectAt && targetAt && suspectAt <= targetAt) {
+    // Le suspect est AUSSI vieux ou plus vieux que la cible : il était là avant,
+    // on ne le sanctionne pas (ce serait potentiellement bannir la victime).
+    return { sanctioned: false, skipped: 'suspect_anterieur' };
+  }
+
+  if (dryRun) {
+    return {
+      sanctioned: true, dryRun: true,
+      would: { suspend_days: AUTO_SANCTION_DAYS, rename: true, reset_avatar: true, reset_banner: true },
+    };
+  }
+
+  const fresh = await User.findByPk(suspect.id);
+  if (!fresh || fresh.is_suspended || fresh.verified) {
+    return { sanctioned: false, skipped: 'etat_change' };
+  }
+
+  const now = new Date();
+  const until = new Date(now.getTime() + AUTO_SANCTION_DAYS * 24 * 3600 * 1000);
+  const burner = await generateBurnerUsername();
+  const original = {
+    username: fresh.username,
+    full_name: fresh.full_name,
+    avatar: fresh.avatar,
+    banner: fresh.banner,
+  };
+  const meta = {
+    ...(fresh.suspension_meta && typeof fresh.suspension_meta === 'object' ? fresh.suspension_meta : {}),
+    source: 'impersonation_auto',
+    target_id: target.id,
+    target_username: target.username,
+    at: now.toISOString(),
+    original, // état à restaurer si la sanction est levée à tort
+  };
+
+  await fresh.update({
+    is_suspended: true,
+    suspended_at: now,
+    suspended_until: until,
+    suspension_reason: reason,
+    suspension_meta: meta,
+    username: burner,
+    full_name: burner,
+    avatar: DEFAULT_AVATAR,
+    banner: null,
+  });
+
+  logger.warn(`[usurpation] SANCTION auto : @${original.username} → ${burner} (suspendu ${AUTO_SANCTION_DAYS}j, usurpait @${target.username})`);
+  return { sanctioned: true, burner, until, original };
+}
+
+/**
+ * Prévient tout le monde d'un cas d'usurpation : la cible (in-app + push) et
+ * le(s) compte(s) créateur (push). Sans effet bloquant.
+ */
+async function notifyImpersonation(target, suspect, alert, sanction) {
+  const sanctioned = Boolean(sanction && sanction.sanctioned && !sanction.dryRun);
+  // Cible : notification in-app (déjà faite par l'appelant pour le scan) + push.
+  await pushToUser(target.id, {
+    title: sanctioned ? 'Un usurpateur a été bloqué' : 'Un compte te ressemble',
+    body: sanctioned
+      ? `@${suspect.username} usurpait ton profil : compte suspendu ${AUTO_SANCTION_DAYS} j et réinitialisé.`
+      : `@${suspect.username} utilise des éléments proches de ton profil.`,
+    url: '/notifications',
+    tag: `impersonation-${suspect.id}`,
+  });
+  // Créateur(s).
+  for (const creatorId of CREATOR_USER_IDS) {
+    if (String(creatorId) === String(target.id)) continue;
+    await pushToUser(creatorId, {
+      title: sanctioned ? '🛡️ Usurpation bloquée' : '⚠️ Usurpation détectée',
+      body: `@${suspect.username} vs @${target.username} — score ${Number(alert?.score || 0).toFixed(2)}${sanctioned ? ' · sanctionné' : ''}.`,
+      url: '/notifications',
+      tag: `impersonation-admin-${suspect.id}`,
+    });
+  }
+}
+
+/**
+ * VÉRIFICATION INSTANTANÉE À L'ENVERS : un compte vient de changer sa photo,
+ * son pseudo, ou vient d'être créé — usurpe-t-il un compte protégé ?
+ *
+ * Le scan horaire part d'une CIBLE et cherche ses usurpateurs. Ici on part du
+ * SUSPECT (l'événement) et on cherche ses victimes potentielles, pour réagir
+ * dans la seconde plutôt qu'à la prochaine passe. On se limite aux deux signaux
+ * disponibles immédiatement — la photo et le pseudo — les autres (contenu,
+ * audience) demandent une accumulation que le scan horaire fera de toute façon.
+ *
+ * Appelé en tâche de fond (fire-and-forget) depuis les routes de mise à jour
+ * de profil et d'inscription : jamais dans le chemin critique d'une requête.
+ */
+async function checkAccountForImpersonation(suspectId) {
+  try {
+    const suspect = await User.findByPk(suspectId, {
+      attributes: ['id', 'username', 'full_name', 'avatar', 'bio', 'verified', 'premium',
+        'is_suspended', 'is_data_test', 'created_at'],
+    });
+    // Un compte vérifié, suspendu ou de test n'est pas un usurpateur à traiter.
+    if (!suspect || suspect.verified || suspect.is_suspended || suspect.is_data_test) return 0;
+
+    const suspectFp = await ensureFingerprint(suspect);
+    suspect._fingerprint = suspectFp;
+
+    // ── Victimes candidates ────────────────────────────────────────────────
+    const victimIds = new Set();
+    // 1) Par la photo : comptes dont l'empreinte correspond à celle du suspect.
+    if (suspectFp) {
+      for (const id of await avatarCandidateIds(suspect.id, suspectFp)) victimIds.add(String(id));
+    }
+    // 2) Par le pseudo : comptes ÉTABLIS (vérifiés ou payants) antérieurs au
+    //    suspect, dont le pseudo est proche. L'ensemble établi est petit ; on
+    //    le filtre en mémoire avec la même analyse que le score.
+    const established = await queryRead(`
+      SELECT id::text AS id, username
+      FROM users
+      WHERE id <> :sid
+        AND is_active = true AND is_suspended = false
+        AND COALESCE(is_data_test, false) = false
+        AND (verified = true OR premium = true OR subscription_tier <> 'free')
+        AND created_at < :screated
+      LIMIT 2000
+    `, {
+      replacements: { sid: String(suspect.id), screated: suspect.created_at || new Date() },
+      type: sequelize.QueryTypes.SELECT,
+    });
+    for (const row of established) {
+      if (usernameAnalysis(row.username, suspect.username).score > 0) victimIds.add(String(row.id));
+    }
+    victimIds.delete(String(suspect.id));
+    if (!victimIds.size) return 0;
+
+    // ── Évaluation de chaque victime candidate ─────────────────────────────
+    let acted = 0;
+    for (const victimId of victimIds) {
+      const target = await User.findByPk(victimId, {
+        attributes: ['id', 'username', 'full_name', 'avatar', 'bio', 'verified', 'is_data_test', 'created_at'],
+      });
+      if (!target || target.is_data_test) continue;
+      target._fingerprint = await ensureFingerprint(target);
+
+      const { score, reasons } = evaluate(target, suspect);
+      if (!reasons.length || score < IMPERSONATION_SIMILARITY_THRESHOLD) continue;
+
+      const existing = await ImpersonationAlert.findOne({
+        where: { user_id: target.id, suspect_id: suspect.id },
+      });
+      if (existing && existing.status === 'dismissed') continue;
+
+      const alert = existing
+        ? await existing.update({ score: Math.max(Number(existing.score) || 0, score), reasons })
+        : await ImpersonationAlert.create({
+          user_id: target.id, suspect_id: suspect.id, reasons, score,
+          suspect_username_at_detection: suspect.username,
+        });
+
+      let sanction = null;
+      if (AUTO_SANCTION_ENABLED && score >= AUTO_SANCTION_SCORE) {
+        sanction = await applyImpersonationSanction(target, suspect).catch((e) => {
+          logger.error('[usurpation] sanction instantanée échouée:', e.message);
+          return null;
+        });
+      }
+      if (!existing) {
+        await Notification.createNotification({
+          recipient_id: target.id, type: 'system',
+          title: sanction?.sanctioned ? 'Un usurpateur a été bloqué' : 'Un compte te ressemble',
+          message: sanction?.sanctioned
+            ? `@${suspect.username} usurpait ton profil : le compte a été suspendu et réinitialisé.`
+            : `@${suspect.username} utilise des éléments proches de ton profil.`,
+          priority: 'high',
+          content: { kind: 'impersonation_alert', alert_id: alert.id, suspect_id: suspect.id, sanctioned: Boolean(sanction?.sanctioned) },
+        }).catch(() => {});
+      }
+      await notifyImpersonation(target, suspect, alert, sanction);
+      acted += 1;
+      // Un compte sanctionné (renommé/suspendu) ne doit plus être évalué contre
+      // d'autres cibles dans la même passe : son état a changé.
+      if (sanction?.sanctioned) break;
+    }
+    if (acted) logger.info(`[usurpation] contrôle instantané @${suspect.username} : ${acted} cible(s) concernée(s)`);
+    return acted;
+  } catch (error) {
+    logger.warn(`[usurpation] contrôle instantané échoué (${suspectId}) : ${error.message}`);
+    return 0;
+  }
+}
+
 /**
  * Scanne un compte et crée les alertes manquantes.
  * @returns {Promise<number>} nombre d'alertes nouvellement créées
  */
 async function scanUser(userId) {
   const target = await User.findByPk(userId, {
-    attributes: ['id', 'username', 'full_name', 'avatar', 'bio', 'verified', 'is_data_test'],
+    attributes: ['id', 'username', 'full_name', 'avatar', 'bio', 'verified', 'is_data_test', 'created_at'],
   });
   if (!target || target.is_data_test) return 0;
 
@@ -1449,24 +1705,46 @@ async function scanUser(userId) {
     });
     created += 1;
 
+    // Sanction automatique au-delà du seuil : suspension + réinitialisation du
+    // compte usurpateur. Les garde-fous de direction (jamais la victime) sont
+    // dans applyImpersonationSanction. Jamais bloquant.
+    let sanction = null;
+    if (AUTO_SANCTION_ENABLED && score >= AUTO_SANCTION_SCORE) {
+      try {
+        sanction = await applyImpersonationSanction(target, suspect);
+        if (sanction.sanctioned && !sanction.dryRun) {
+          await alert.update({ status: 'reported' });
+        }
+      } catch (e) {
+        logger.error('[usurpation] sanction auto échouée:', e.message);
+      }
+    }
+
     try {
       await Notification.createNotification({
         recipient_id: target.id,
         type: 'system',
-        title: 'Un compte te ressemble',
-        message: `@${suspect.username} utilise des éléments proches de ton profil.`,
+        title: sanction?.sanctioned ? 'Un usurpateur a été bloqué' : 'Un compte te ressemble',
+        message: sanction?.sanctioned
+          ? `@${suspect.username} usurpait ton profil : le compte a été suspendu et réinitialisé.`
+          : `@${suspect.username} utilise des éléments proches de ton profil.`,
         priority: 'high',
         content: {
           kind: 'impersonation_alert',
           alert_id: alert.id,
           suspect_id: suspect.id,
           suspect_username: suspect.username,
+          sanctioned: Boolean(sanction?.sanctioned),
         },
       });
       await alert.update({ notified_at: new Date() });
     } catch (e) {
       logger.warn('[impersonation] Notification non envoyée:', e.message);
     }
+
+    // Push : cible + créateur(s). Hors du try in-app pour partir même si la
+    // notification en base a échoué.
+    await notifyImpersonation(target, suspect, alert, sanction);
   }
 
   return created;
@@ -1564,6 +1842,8 @@ async function markReported({ userId, alertId, reportId }) {
 module.exports = {
   backfillFingerprints,
   scanUser,
+  checkAccountForImpersonation,
+  applyImpersonationSanction,
   scanAllSubscribers,
   listFor,
   dismiss,
