@@ -41,6 +41,7 @@ const {
   TIER_PRICES_NF_FIXED,
   DEFAULT_DURATION_DAYS,
   nfAmountForEur,
+  tierRank,
 } = require('../constants/subscriptionTiers');
 const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
 const transactionAuthorizationService = require('./transactionAuthorizationService');
@@ -324,6 +325,102 @@ async function disable(userId) {
   }
 }
 
+/**
+ * Reprogramme le mandat sur un palier INFÉRIEUR ou égal — une rétrogradation
+ * différée à l'échéance.
+ *
+ * ── Pourquoi c'est aussi simple ──
+ * Le démon relit `subscription_mandates.tier` à CHAQUE prélèvement : il en
+ * déduit le prix, puis écrit ce palier dans `users.subscription_tier` au
+ * paiement confirmé. Abaisser `tier` ici suffit donc — la bascule se fera
+ * toute seule à la prochaine échéance, et le compte garde son palier courant
+ * jusque-là (sous mandat, `subscription_expires_at` vaut NULL, rien ne le
+ * rétrograde avant).
+ *
+ * ── Pourquoi seulement vers le bas ──
+ * Une MONTÉE en gamme engage un montant plus élevé : elle doit repasser par
+ * l'autorisation anti-fraude, c'est-à-dire par un achat (`enable` rouvre un
+ * mandat neuf après contrôle). On refuse donc ici tout palier au-dessus de
+ * celui qui court réellement. Aucun contrôle anti-fraude n'est nécessaire pour
+ * descendre : on n'engage jamais plus que ce qui l'était déjà.
+ */
+async function scheduleTierChange(userId, targetTier) {
+  if (!(await hasMandateTable())) {
+    throw new MandateError(
+      'Le renouvellement automatique n’est pas encore disponible.',
+      'MANDATE_UNAVAILABLE',
+      503
+    );
+  }
+  if (!RENEWABLE_TIERS.includes(targetTier)) {
+    throw new MandateError('Palier de reconduction invalide.', 'INVALID_TIER', 400);
+  }
+
+  const user = await User.findByPk(userId, {
+    attributes: ['id', 'subscription_tier', 'subscription_expires_at', 'premium'],
+  });
+  if (!user) {
+    throw new MandateError('Compte introuvable.', 'USER_NOT_FOUND', 404);
+  }
+
+  // Le palier de référence est celui qui COURT réellement sur le compte, pas
+  // `mandate.tier` (qui a pu être déjà abaissé) : on ne descend jamais en
+  // dessous, mais on autorise à remonter jusqu'à lui — c'est ainsi qu'on
+  // annule une rétrogradation déjà programmée.
+  if (tierRank(targetTier) > tierRank(user.subscription_tier)) {
+    throw new MandateError(
+      'Une montée en gamme se fait par un achat, pas par le renouvellement automatique.',
+      'UPGRADE_NOT_ALLOWED',
+      409
+    );
+  }
+
+  const dbTransaction = await sequelize.transaction();
+  try {
+    const mandate = await find(userId, dbTransaction);
+    if (!mandate) {
+      await dbTransaction.rollback();
+      throw new MandateError(
+        'Aucun renouvellement automatique à modifier.',
+        'NO_MANDATE',
+        404
+      );
+    }
+    if (mandate.state === 'DEFAULTED') {
+      await dbTransaction.rollback();
+      throw new MandateError(
+        'Un impayé est en cours sur ce compte. Contacte le support.',
+        'MANDATE_DEFAULTED',
+        409
+      );
+    }
+
+    if (mandate.tier !== targetTier) {
+      await sequelize.query(
+        `UPDATE subscription_mandates
+            SET tier = :tier, updated_at = NOW()
+          WHERE id = :id`,
+        {
+          replacements: { id: mandate.id, tier: targetTier },
+          transaction: dbTransaction,
+          type: QueryTypes.UPDATE,
+        }
+      );
+    }
+
+    await dbTransaction.commit();
+  } catch (error) {
+    if (!dbTransaction.finished) await dbTransaction.rollback();
+    throw error;
+  }
+
+  logger.info(`🔁 [Mandat] ${userId} : reconduction reprogrammée sur ${targetTier}`);
+  const user2 = await User.findByPk(userId, {
+    attributes: ['id', 'subscription_tier', 'subscription_expires_at', 'premium'],
+  });
+  return describe(user2);
+}
+
 module.exports = {
   MandateError,
   LIVE_STATES,
@@ -332,5 +429,6 @@ module.exports = {
   describe,
   enable,
   disable,
+  scheduleTierChange,
   periodPriceNf,
 };

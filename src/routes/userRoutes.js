@@ -1109,6 +1109,43 @@ router.delete('/subscription-mandate', [
 });
 
 /**
+ * PATCH /api/users/subscription-mandate
+ * Reprogramme la reconduction sur un palier inférieur (rétrogradation différée
+ * à l'échéance). Le palier courant tient jusqu'à la fin de la période payée,
+ * puis le renouvellement bascule sur le palier demandé. Rien n'est débité ici.
+ *
+ * Doit rester AVANT `router.get('/:id')` : sinon « subscription-mandate » serait
+ * capté comme un identifiant.
+ */
+router.patch('/subscription-mandate', [
+  authenticateToken,
+  denySuspended
+], async (req, res) => {
+  try {
+    // On accepte les trois paliers reconductibles, ultra compris : c'est le
+    // service qui refuse toute cible AU-DESSUS du palier courant. Accepter
+    // ultra permet à un compte Ultra d'ANNULER une rétrogradation déjà
+    // programmée en repointant la reconduction sur son palier actuel.
+    const raw = String(req.body?.tier || '').toLowerCase();
+    const tier = ['plus', 'pro', 'ultra'].includes(raw) ? raw : null;
+    if (!tier) {
+      return res.status(400).json({
+        success: false,
+        message: 'Palier invalide.',
+      });
+    }
+    const data = await subscriptionMandateService.scheduleTierChange(req.user.id, tier);
+    res.json({
+      success: true,
+      message: 'Le renouvellement passera au palier choisi à la prochaine échéance.',
+      data,
+    });
+  } catch (error) {
+    sendMandateError(res, error, 'Changement de palier impossible pour le moment.');
+  }
+});
+
+/**
  * GET /api/users/:id
  * Obtenir le profil public d'un utilisateur par son ID
  */
