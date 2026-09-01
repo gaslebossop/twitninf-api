@@ -1693,6 +1693,17 @@ async function scanUser(userId) {
       if (Number(existing.score) < score || reasonsChanged) {
         await existing.update({ score: Math.max(Number(existing.score) || 0, score), reasons });
       }
+      // Une alerte DÉJÀ ouverte mais dont le suspect n'a jamais été sanctionné
+      // (backlog d'avant la sanction auto, ou seuil relevé depuis) doit l'être
+      // maintenant. `applyImpersonationSanction` est idempotent (il ignore un
+      // compte déjà suspendu).
+      if (AUTO_SANCTION_ENABLED && score >= AUTO_SANCTION_SCORE && !suspect.is_suspended) {
+        const sanction = await applyImpersonationSanction(target, suspect).catch((e) => {
+          logger.error('[usurpation] sanction (alerte existante) échouée:', e.message);
+          return null;
+        });
+        if (sanction?.sanctioned) await notifyImpersonation(target, suspect, existing, sanction);
+      }
       continue;
     }
 
