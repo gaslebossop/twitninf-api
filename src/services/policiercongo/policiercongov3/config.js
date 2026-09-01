@@ -60,6 +60,15 @@ function loadV3Config(overrides = {}) {
     openrouterModel: process.env.POLICIERCONGO_V3_OPENROUTER_MODEL || 'deepseek/deepseek-v4-flash',
     openrouterApiKey: process.env.POLICIERCONGO_V3_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY || '',
     openrouterBaseUrl: process.env.POLICIERCONGO_V3_OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+    // Cache de prompt OpenRouter (https://openrouter.ai/docs/.../prompt-caching).
+    // Le bloc statique (persona + index d'outils + manuel, ~40 000 caractères)
+    // est renvoyé à CHAQUE tour — sans session serveur côté OpenRouter. On le
+    // pose comme préfixe stable en tête de messages : DeepSeek met en cache
+    // automatiquement, facturé au tarif « cache read » sur les tours 2+.
+    // On ajoute EN PLUS une balise `cache_control` explicite : inutile pour
+    // DeepSeek (auto) mais indispensable si le modèle est un jour basculé sur
+    // Anthropic/Gemini, et sans effet néfaste ici.
+    openrouterCacheControl: boolEnv('POLICIERCONGO_V3_OPENROUTER_CACHE_CONTROL', true),
     maxIterations: intEnv('POLICIERCONGO_V3_MAX_ITERATIONS', 18, 2, 64),
     maxToolCalls: intEnv('POLICIERCONGO_V3_MAX_TOOL_CALLS', 72, 1, 500),
     maxParallelReads: intEnv('POLICIERCONGO_V3_MAX_PARALLEL_READS', 6, 1, 20),

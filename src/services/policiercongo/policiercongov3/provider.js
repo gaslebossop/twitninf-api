@@ -242,12 +242,14 @@ class CodexProvider {
  * sans ça, la requête `fetch` continuerait après l'expiration du routeur.
  */
 class OpenRouterProvider {
-  constructor(config) {
+  constructor(config, logger = console) {
     this.name = 'openrouter';
     this.model = config.openrouterModel;
     this.apiKey = config.openrouterApiKey;
     this.baseUrl = (config.openrouterBaseUrl || 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
     this.timeoutMs = config.modelTimeoutMs;
+    this.cacheControl = config.openrouterCacheControl !== false;
+    this.logger = logger;
     this.supportsSessions = false;
   }
 
@@ -263,7 +265,19 @@ class OpenRouterProvider {
     }
     const { system, user } = normalizePromptInput(promptInput);
     const messages = [];
-    if (system) messages.push({ role: 'system', content: system });
+    if (system) {
+      // Le bloc statique passe EN TÊTE et INCHANGÉ d'un tour à l'autre : c'est
+      // le préfixe que DeepSeek met en cache automatiquement (tours 2+ au tarif
+      // « cache read »). La balise `cache_control` explicite marque la fin du
+      // préfixe cacheable — sans effet pour DeepSeek, requise pour un éventuel
+      // modèle Anthropic/Gemini. Sans elle, on renvoie une string simple.
+      messages.push({
+        role: 'system',
+        content: this.cacheControl
+          ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }]
+          : system,
+      });
+    }
     messages.push({ role: 'user', content: user });
 
     // Annulation : combine le délai interne et le signal de l'appelant.
@@ -287,7 +301,10 @@ class OpenRouterProvider {
           'HTTP-Referer': 'https://twitninf.fr',
           'X-Title': 'PolicierCongo',
         },
-        body: JSON.stringify({ model: this.model, messages }),
+        // `usage.include` : OpenRouter renvoie alors le détail des jetons, dont
+        // ceux servis depuis le cache — le seul moyen de vérifier que le
+        // préfixe statique est bien mis en cache (et donc facturé moins cher).
+        body: JSON.stringify({ model: this.model, messages, usage: { include: true } }),
         signal: controller.signal,
       });
     } catch (error) {
@@ -323,6 +340,18 @@ class OpenRouterProvider {
     const text = data?.choices?.[0]?.message?.content;
     if (!text || !String(text).trim()) {
       throw new Error('OpenRouter a renvoyé une réponse vide');
+    }
+
+    // Traçabilité du cache : combien de jetons du préfixe ont été servis
+    // depuis le cache. Un `cached > 0` sur les tours 2+ confirme que
+    // l'optimisation fonctionne ; 0 partout signale un préfixe qui varie.
+    const u = data?.usage;
+    if (u) {
+      const cached = u.prompt_tokens_details?.cached_tokens ?? u.cached_tokens ?? 0;
+      this.logger?.info?.(
+        `[pc3.openrouter] jetons prompt=${u.prompt_tokens ?? '?'} (cache=${cached}) ` +
+        `completion=${u.completion_tokens ?? '?'}`
+      );
     }
     return { text: String(text).trim(), sessionId: null };
   }
@@ -405,7 +434,7 @@ class ProviderRouter {
     this.providers = {
       codex: providers.codex || new CodexProvider(config),
       claude: providers.claude || new ClaudeProvider(config),
-      openrouter: providers.openrouter || new OpenRouterProvider(config),
+      openrouter: providers.openrouter || new OpenRouterProvider(config, logger),
       ...providers
     };
   }
