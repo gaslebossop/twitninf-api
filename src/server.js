@@ -664,6 +664,10 @@ app.use('/api/beta', betaRoutes);
 // Carte NF — présence partagée, entièrement sous drapeau `fil.cartenf`
 app.use('/api/nf-map', nfMapRoutes);
 
+// Page d'abonnement servie en WebView — aucune donnee, aucun jeton : l'app lui
+// pousse tout par postMessage. Voir `routes/subscriptionViewRoutes.js`.
+app.use('/api/subscription', require('./routes/subscriptionViewRoutes'));
+
 app.use('/api/theme-presets', themePresetRoutes);
 
 app.use('/api/progressive-recommendations', progressiveRecommendationRoutes);
