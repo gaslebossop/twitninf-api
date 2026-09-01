@@ -517,14 +517,31 @@ function evaluate(target, suspect) {
     && embeddingCosine != null
     && embeddingCosine >= EMBED_MIN_COSINE;
 
-  if (semanticAvatar || reframedAvatar) {
-    addReason(reasons, semanticAvatar ? 'same_photo_semantic' : 'same_photo_reframed');
-    score += 0.62;
-  }
-
+  /*
+   * ── Une photo distinctive partagée suffit, à elle seule, à alerter ──────
+   *
+   * On usurpe très bien avec la SEULE photo de profil, sans toucher au pseudo
+   * (ou en n'y ajoutant qu'un caractère, que le garde-fou des pseudos courts
+   * laisse passer). Le signal photo doit donc pouvoir franchir le seuil seul.
+   *
+   * Le seul garde-fou est la DISTINCTIVITÉ (`avatarDistinctive` écarte
+   * l'avatar par défaut et les images partagées par >12 comptes) : sans lui,
+   * les milliers de comptes à l'image par défaut s'alerteraient mutuellement.
+   * Et l'alerte ne fait qu'INFORMER la personne copiée — jamais sanctionner —
+   * ce qui est précisément ce qui autorise à déclencher sur ce seul signal.
+   */
   if (sameAvatar) {
+    // Copie EXACTE d'un avatar distinctif (le même fichier, à la recompression
+    // près) : le cas le plus fort et le moins ambigu. Suffit seul.
     addReason(reasons, 'same_avatar');
-    score += username.score > 0 ? 0.14 : 0.32;
+    score += 0.75;
+  } else if (semanticAvatar || reframedAvatar) {
+    addReason(reasons, semanticAvatar ? 'same_photo_semantic' : 'same_photo_reframed');
+    // Même sujet, autre photo ou autre cadre. Au-delà de 0,85 de cosinus c'est
+    // aussi sûr qu'une copie exacte → alerte seule ; dans la bande 0,60-0,85,
+    // signal fort mais qui gagne à être confirmé par un autre indice.
+    const cos = embeddingCosine == null ? (reframedAvatar ? 0.86 : EMBED_MIN_COSINE) : embeddingCosine;
+    score += cos >= 0.85 ? 0.75 : 0.62;
   }
 
   const targetBio = normalizeProfileText(target.bio);
