@@ -382,6 +382,31 @@ function contextMultiplier(target, suspect) {
   let factor = 1;
   const reasons = [];
 
+  /*
+   * ── Une convention de nommage n'est pas une campagne d'usurpation ─────
+   *
+   * Une usurpation est CIBLEE et RARE. Quand des centaines de comptes portent
+   * la meme forme de pseudo, ce n'est pas que des centaines de gens usurpent
+   * la meme personne : c'est un patron.
+   *
+   * Cas reel : `@twitninf`, le compte de la plateforme, se voyait signaler
+   * 164 comptes `twitninfuser0005`, `twitninfuser2798`… — des comptes crees
+   * par script, tous nommes pareil et tous avec l'avatar par defaut. Chaque
+   * alerte etait correcte prise isolement, et l'ensemble etait inexploitable.
+   *
+   * `_handleFamilySize` compte les comptes partageant la forme NUE du pseudo
+   * du suspect (chiffres de queue retires). Au-dela d'une vingtaine, la
+   * ressemblance ne dit plus rien sur une intention individuelle.
+   */
+  const family = Number(suspect?._handleFamilySize ?? 0);
+  if (family >= 20) {
+    factor *= 0.15;
+    reasons.push('naming_pattern');
+  } else if (family >= 8) {
+    factor *= 0.55;
+    reasons.push('naming_pattern');
+  }
+
   const targetAge = Date.parse(target?.created_at || '') || 0;
   const suspectAge = Date.parse(suspect?.created_at || '') || 0;
   if (targetAge && suspectAge) {

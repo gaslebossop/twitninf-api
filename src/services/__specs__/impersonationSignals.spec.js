@@ -183,3 +183,28 @@ describe('audience', () => {
     expect(audienceOverlap(new Set(['a', 'b']), ['a', 'b', 'c', 'd', 'e', 'f'])).toBe(0);
   });
 });
+
+describe('convention de nommage', () => {
+  test('une grande famille de pseudos identiques n\'est pas une campagne', () => {
+    // Cas reel : @twitninf se voyait signaler 164 comptes `twitninfuser0005`,
+    // `twitninfuser2798`… crees par script. Chaque alerte etait correcte prise
+    // isolement, et l'ensemble etait inexploitable — une usurpation est CIBLEE
+    // et rare.
+    const { factor, reasons } = contextMultiplier(
+      { created_at: '2026-01-01' },
+      { created_at: '2026-07-22', _handleFamilySize: 2900 },
+    );
+    expect(factor).toBeLessThan(0.2);
+    expect(reasons).toContain('naming_pattern');
+  });
+
+  test('une petite famille ne penalise pas', () => {
+    // `policiercongoo` reduit a `policiercongo` : deux comptes, pas un patron.
+    const { factor, reasons } = contextMultiplier(
+      { created_at: '2026-01-01' },
+      { created_at: '2026-08-03', _handleFamilySize: 2 },
+    );
+    expect(factor).toBe(1);
+    expect(reasons).not.toContain('naming_pattern');
+  });
+});

@@ -1014,6 +1014,41 @@ async function followerIdsOf(userIds) {
  * jour par des chemins multiples et peut deriver. Un compte qu'on s'apprete a
  * signaler merite un comptage exact.
  */
+/**
+ * Combien de comptes partagent la forme NUE du pseudo de chacun.
+ *
+ * Sert a reconnaitre une convention de nommage : `twitninfuser0005` et ses
+ * 2 900 freres se reduisent tous a `twitninfuser`. Une usurpation est ciblee
+ * et rare ; un patron partage par des centaines de comptes ne dit rien d'une
+ * intention individuelle.
+ *
+ * La reduction est faite en SQL (chiffres de queue retires) pour compter en
+ * une seule requete plutot qu'une par suspect.
+ */
+async function handleFamilySizes(userIds) {
+  const ids = [...new Set(userIds.map(String))].filter(Boolean);
+  if (!ids.length) return new Map();
+  const rows = await queryRead(`
+    WITH cibles AS (
+      SELECT id::text AS id,
+             regexp_replace(regexp_replace(lower(username), '[^a-z0-9]', '', 'g'), '[0-9]+$', '') AS bare
+      FROM users WHERE id = ANY(ARRAY[:ids]::uuid[])
+    ),
+    familles AS (
+      SELECT regexp_replace(regexp_replace(lower(username), '[^a-z0-9]', '', 'g'), '[0-9]+$', '') AS bare,
+             COUNT(*) AS n
+      FROM users
+      WHERE is_active = true AND COALESCE(is_data_test, false) = false
+      GROUP BY 1
+    )
+    SELECT c.id, COALESCE(f.n, 1) AS n
+    FROM cibles c LEFT JOIN familles f ON f.bare = c.bare
+  `, { replacements: { ids }, type: sequelize.QueryTypes.SELECT });
+  const map = new Map();
+  for (const row of rows) map.set(row.id, Number(row.n) || 1);
+  return map;
+}
+
 async function activityOf(userIds) {
   const ids = [...new Set(userIds.map(String))].filter(Boolean);
   if (!ids.length) return new Map();
@@ -1239,10 +1274,11 @@ async function scanUser(userId) {
    * chaque passage.
    */
   const suspectIds = suspects.map((suspect) => String(suspect.id));
-  const [audiences, activity, corpus] = await Promise.all([
+  const [audiences, activity, corpus, families] = await Promise.all([
     followerIdsOf([String(target.id), ...suspectIds]),
     activityOf(suspectIds),
     ensureBioCorpus(),
+    handleFamilySizes(suspectIds),
   ]);
 
   const targetAudience = audiences.get(String(target.id)) || new Set();
@@ -1254,6 +1290,7 @@ async function scanUser(userId) {
     suspect._followerCount = counts?.followers;
     suspect._bioFrequencies = corpus.frequencies;
     suspect._bioCorpusSize = corpus.size;
+    suspect._handleFamilySize = families.get(id) || 1;
   }
 
   for (const suspect of suspects) {
