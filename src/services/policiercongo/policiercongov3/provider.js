@@ -249,6 +249,8 @@ class OpenRouterProvider {
     this.baseUrl = (config.openrouterBaseUrl || 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
     this.timeoutMs = config.modelTimeoutMs;
     this.cacheControl = config.openrouterCacheControl !== false;
+    this.providerOrder = Array.isArray(config.openrouterProviderOrder) ? config.openrouterProviderOrder : [];
+    this.allowFallbacks = config.openrouterAllowFallbacks === true;
     this.logger = logger;
     this.supportsSessions = false;
   }
@@ -280,6 +282,14 @@ class OpenRouterProvider {
     }
     messages.push({ role: 'user', content: user });
 
+    const body = { model: this.model, messages, usage: { include: true } };
+    // Épinglage du fournisseur : garde toutes les requêtes sur le même cache
+    // chaud. `order` = priorité ; `allow_fallbacks:false` interdit de sortir de
+    // la liste (donc d'atterrir sur un cache vierge).
+    if (this.providerOrder.length) {
+      body.provider = { order: this.providerOrder, allow_fallbacks: this.allowFallbacks };
+    }
+
     // Annulation : combine le délai interne et le signal de l'appelant.
     const controller = new AbortController();
     if (signal) {
@@ -301,10 +311,10 @@ class OpenRouterProvider {
           'HTTP-Referer': 'https://twitninf.fr',
           'X-Title': 'PolicierCongo',
         },
-        // `usage.include` : OpenRouter renvoie alors le détail des jetons, dont
-        // ceux servis depuis le cache — le seul moyen de vérifier que le
-        // préfixe statique est bien mis en cache (et donc facturé moins cher).
-        body: JSON.stringify({ model: this.model, messages, usage: { include: true } }),
+        // `usage.include` (posé sur `body`) : OpenRouter renvoie le détail des
+        // jetons, dont ceux servis depuis le cache — le seul moyen de vérifier
+        // que le préfixe statique est bien mis en cache (et facturé moins cher).
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
     } catch (error) {
@@ -349,7 +359,8 @@ class OpenRouterProvider {
     if (u) {
       const cached = u.prompt_tokens_details?.cached_tokens ?? u.cached_tokens ?? 0;
       this.logger?.info?.(
-        `[pc3.openrouter] jetons prompt=${u.prompt_tokens ?? '?'} (cache=${cached}) ` +
+        `[pc3.openrouter] via=${data?.provider ?? '?'} ` +
+        `jetons prompt=${u.prompt_tokens ?? '?'} (cache=${cached}) ` +
         `completion=${u.completion_tokens ?? '?'}`
       );
     }

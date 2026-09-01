@@ -69,6 +69,16 @@ function loadV3Config(overrides = {}) {
     // DeepSeek (auto) mais indispensable si le modèle est un jour basculé sur
     // Anthropic/Gemini, et sans effet néfaste ici.
     openrouterCacheControl: boolEnv('POLICIERCONGO_V3_OPENROUTER_CACHE_CONTROL', true),
+    // Épinglage du fournisseur en amont — le levier nº1 du cache. Ce modèle est
+    // servi par ~17 fournisseurs OpenRouter, CHACUN avec son propre cache : sans
+    // épinglage, OpenRouter répartit les requêtes et une bonne moitié tombe sur
+    // un cache froid (cache=0). En figeant l'ordre à un seul fournisseur qui
+    // cache, chaque tour réutilise le MÊME préfixe chaud. `allow_fallbacks=false`
+    // interdit de dériver vers un fournisseur hors liste (donc vers un cache
+    // vierge). Défaut : DeepInfra (fiable, cache, peu cher) puis DigitalOcean en
+    // secours DANS la liste — jamais un tiers au hasard.
+    openrouterProviderOrder: csvEnv('POLICIERCONGO_V3_OPENROUTER_PROVIDER_ORDER', ['DeepInfra', 'DigitalOcean']),
+    openrouterAllowFallbacks: boolEnv('POLICIERCONGO_V3_OPENROUTER_ALLOW_FALLBACKS', false),
     maxIterations: intEnv('POLICIERCONGO_V3_MAX_ITERATIONS', 18, 2, 64),
     maxToolCalls: intEnv('POLICIERCONGO_V3_MAX_TOOL_CALLS', 72, 1, 500),
     maxParallelReads: intEnv('POLICIERCONGO_V3_MAX_PARALLEL_READS', 6, 1, 20),
