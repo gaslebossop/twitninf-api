@@ -43,6 +43,7 @@ function minimalBlockedUser(user) {
   };
 }
 const transactionAuthorizationService = require('../services/transactionAuthorizationService');
+const subscriptionMandateService = require('../services/subscriptionMandateService');
 // Même valeur que `follow_onboarding_minimum` renvoyé dans le profil : l'écran
 // d'inscription et la validation serveur doivent exiger le même nombre.
 const { MIN_ONBOARDING_FOLLOWS: ONBOARDING_MIN_FOLLOWS } = require('../config/onboarding');
@@ -1011,6 +1012,99 @@ router.get('/blocked', [
   } catch (error) {
     logger.error('Erreur lors de la récupération des comptes bloqués:', error);
     res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/* ── Renouvellement automatique (mandat) ────────────────────────────────── */
+
+/**
+ * ⚠ Ce bloc doit rester AVANT `GET /api/users/:id`, juste en dessous.
+ *
+ * Express sert la première route qui correspond : placé après, le GET de ce
+ * bloc était avalé par `/:id`, qui répondait « ID d'utilisateur invalide » en
+ * validant « subscription-mandate » comme un UUID. La route existait, elle
+ * n'était simplement jamais atteinte — et l'écran d'abonnement se serait
+ * contenté de masquer l'interrupteur, sans la moindre erreur visible.
+ *
+ * Ces trois routes SIGNENT et RÉSILIENT un mandat ; elles ne prélèvent jamais.
+ * Les prélèvements sont exécutés par le démon `twitninf-autorenew`, hors de
+ * l'API. Voir `services/subscriptionMandateService.js` pour l'invariant
+ * `subscription_expires_at = NULL` qui met un compte sous mandat hors
+ * d'atteinte du balayage horaire des abonnements échus.
+ */
+
+function sendMandateError(res, error, fallback) {
+  const status = Number(error?.httpStatus) || 500;
+  if (status >= 500) {
+    logger.error('❌ [Mandat] ', error);
+  }
+  return res.status(status).json({
+    success: false,
+    message: status >= 500 ? fallback : error.message,
+    code: error?.code,
+  });
+}
+
+/**
+ * GET /api/users/subscription-mandate
+ * État du renouvellement automatique du compte.
+ */
+router.get('/subscription-mandate', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id, {
+      attributes: ['id', 'subscription_tier', 'subscription_expires_at', 'premium'],
+    });
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Compte introuvable.' });
+    }
+    res.json({ success: true, data: await subscriptionMandateService.describe(user) });
+  } catch (error) {
+    sendMandateError(res, error, 'Impossible de lire le renouvellement automatique.');
+  }
+});
+
+/**
+ * POST /api/users/subscription-mandate
+ * Active la reconduction pour le palier actuellement actif.
+ */
+router.post('/subscription-mandate', [
+  authenticateToken,
+  denySuspended
+], async (req, res) => {
+  try {
+    const mandate = await subscriptionMandateService.enable(req.user.id);
+    res.json({
+      success: true,
+      message: 'Renouvellement automatique activé.',
+      data: {
+        enabled: true,
+        state: mandate?.state || 'ACTIVE',
+        tier: mandate?.tier || null,
+        next_charge_at: mandate?.next_charge_at || null,
+      },
+    });
+  } catch (error) {
+    sendMandateError(res, error, 'Activation impossible pour le moment.');
+  }
+});
+
+/**
+ * DELETE /api/users/subscription-mandate
+ * Résilie la reconduction. La période déjà payée s'écoule normalement.
+ */
+router.delete('/subscription-mandate', [
+  authenticateToken,
+  denySuspended
+], async (req, res) => {
+  try {
+    const { expiresAt } = await subscriptionMandateService.disable(req.user.id);
+    res.json({
+      success: true,
+      message: 'Renouvellement automatique désactivé.',
+      data: { enabled: false, subscription_expires_at: expiresAt },
+    });
+  } catch (error) {
+    sendMandateError(res, error, 'Désactivation impossible pour le moment.');
   }
 });
 
