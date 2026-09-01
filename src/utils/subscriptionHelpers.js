@@ -53,6 +53,25 @@ function isSubscriptionActive(user) {
 }
 
 /**
+ * Compte Ultra, abonnement encore actif.
+ *
+ * Pendant de `isProOrAbove` : celui-là répond « au moins Pro » pour les
+ * avantages qu'Ultra HÉRITE, celui-ci répond « exactement le palier du haut »
+ * pour ce qu'Ultra est SEUL à obtenir. Source unique du test, plutôt que
+ * `tier === 'ultra'` recopié dans chaque service qui relève un plafond — un
+ * seul de ces sites oubliant l'expiration, et un Ultra périmé garderait ses
+ * plafonds jusqu'à son prochain passage par `maybeExpireSubscription`.
+ *
+ * Prend un OBJET utilisateur déjà chargé, jamais un identifiant : les
+ * appelants qui n'ont qu'un id relisent la ligne eux-mêmes (voir
+ * `resolveTweetCharLimit`), parce qu'eux seuls savent s'ils sont dans une
+ * transaction.
+ */
+function isUltraActive(user) {
+  return !!user && user.subscription_tier === TIER.ULTRA && isSubscriptionActive(user);
+}
+
+/**
  * Calcule la nouvelle date de fin : prolonge depuis la fin actuelle si encore active, sinon depuis maintenant.
  *
  * Le repli est `DEFAULT_DURATION_DAYS`, jamais une durée plus généreuse : une
@@ -149,6 +168,7 @@ module.exports = {
   maybeExpireSubscription,
   expireDueSubscriptions,
   isSubscriptionActive,
+  isUltraActive,
   computeNewExpiry,
   normalizePurchasableTier,
   tierRank,

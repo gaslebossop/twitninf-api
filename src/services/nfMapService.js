@@ -28,6 +28,7 @@
  */
 
 const { QueryTypes } = require('sequelize');
+const { isUltraRequest } = require('../utils/ultraGate');
 
 const SHARING_MODES = ['ghost', 'city', 'precise'];
 
@@ -70,6 +71,14 @@ const CITY_GRID_DEGREES = 0.05;
 /** Rectangle maximal servi en une fois, pour ne pas aspirer la carte entière. */
 const MAX_VIEWPORT_DEGREES = 12;
 const MAX_RESULTS = 200;
+/**
+ * Ultra voit la carte en grand : un rectangle continental et 500 points.
+ *
+ * La borne est une protection de charge, pas une règle de produit — d'où le
+ * fait qu'elle puisse s'ouvrir pour un palier sans rien changer d'autre.
+ */
+const MAX_VIEWPORT_DEGREES_ULTRA = 40;
+const MAX_RESULTS_ULTRA = 500;
 
 function roundToGrid(value, grid) {
   return Math.round(value / grid) * grid;
@@ -299,7 +308,13 @@ async function nearby(sequelize, viewerId, bounds) {
   // Rectangle borné : demander le monde entier reviendrait à télécharger la
   // position de tous ceux qui partagent, ce qui n'est pas une carte mais une
   // extraction.
-  if (north - south > MAX_VIEWPORT_DEGREES || Math.abs(east - west) > MAX_VIEWPORT_DEGREES) {
+  // Les deux bornes s'ouvrent pour un Ultra : ce sont des protections de
+  // charge, pas des règles de produit.
+  const isUltra = await isUltraRequest({ id: viewerId });
+  const maxSpan = isUltra ? MAX_VIEWPORT_DEGREES_ULTRA : MAX_VIEWPORT_DEGREES;
+  const maxResults = isUltra ? MAX_RESULTS_ULTRA : MAX_RESULTS;
+
+  if (north - south > maxSpan || Math.abs(east - west) > maxSpan) {
     throw new Error('Zone trop large');
   }
 
@@ -370,7 +385,7 @@ async function nearby(sequelize, viewerId, bounds) {
           )
         )
       ORDER BY p.shared_at DESC
-      LIMIT ${MAX_RESULTS}`,
+      LIMIT ${maxResults}`,
     { replacements: { viewerId, north, south, east, west }, type: QueryTypes.SELECT }
   );
 }
@@ -517,7 +532,9 @@ module.exports = {
   PRESENCE_TTL_HOURS,
   CITY_GRID_DEGREES,
   MAX_VIEWPORT_DEGREES,
+  MAX_VIEWPORT_DEGREES_ULTRA,
   MAX_RESULTS,
+  MAX_RESULTS_ULTRA,
   positionForMode,
   connections,
   invite,

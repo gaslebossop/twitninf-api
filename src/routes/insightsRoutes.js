@@ -7,6 +7,7 @@ const impersonation = require('../services/impersonationWatchService');
 const radar = require('../services/creatorRadarService');
 const earnings = require('../services/creatorEarningsService');
 const { resolveTimeZone } = require('../utils/timezone');
+const { isUltraRequest } = require('../utils/ultraGate');
 const logger = require('../utils/logger');
 
 /**
@@ -65,7 +66,7 @@ router.get('/earnings', [
 
 // ── Visiteurs de profil ────────────────────────────────────────────────────
 
-/** GET /api/insights/visitors — qui est passé sur ton profil (7 jours). */
+/** GET /api/insights/visitors — qui est passé sur ton profil (7 jours, 30 pour Ultra). */
 router.get('/visitors', [
   authenticateToken,
   requirePremium,
@@ -73,7 +74,8 @@ router.get('/visitors', [
   handleValidationErrors,
 ], async (req, res) => {
   try {
-    const data = await profileViews.listFor(req.user.id, { days: req.query.days });
+    const maxDays = profileViews.maxWindowDaysFor(await isUltraRequest(req.user));
+    const data = await profileViews.listFor(req.user.id, { days: req.query.days, maxDays });
     res.json({ success: true, data });
   } catch (error) {
     logger.error('[insights] Visiteurs:', error);
@@ -84,8 +86,9 @@ router.get('/visitors', [
 /** GET /api/insights/visitors/count — pastille, sans charger la liste. */
 router.get('/visitors/count', authenticateToken, requirePremium, async (req, res) => {
   try {
-    const count = await profileViews.countFor(req.user.id);
-    res.json({ success: true, data: { count, window_days: profileViews.PROFILE_VIEW_WINDOW_DAYS } });
+    const maxDays = profileViews.maxWindowDaysFor(await isUltraRequest(req.user));
+    const count = await profileViews.countFor(req.user.id, { maxDays });
+    res.json({ success: true, data: { count, window_days: maxDays } });
   } catch (error) {
     logger.error('[insights] Compteur de visiteurs:', error);
     res.status(500).json({ success: false, message: 'Compteur indisponible.' });

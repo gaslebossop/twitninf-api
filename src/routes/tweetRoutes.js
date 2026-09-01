@@ -34,6 +34,7 @@ const logger = require('../utils/logger');
 const { maybeExpireSubscription } = require('../utils/subscriptionHelpers');
 const { maybeRenewSuperHearts, isSuperHeartEligible } = require('../utils/superHeartHelpers');
 const authorBroadcastService = require('../services/authorBroadcastService');
+const { isUltraRequest, ultraLimit } = require('../utils/ultraGate');
 
 /**
  * Efface l'identité et le contenu d'un tweet dont l'auteur est bloqué (dans
@@ -64,9 +65,18 @@ function deidentifyIfBlocked(tweetLike, blockedAuthorIds) {
  * d'origine n'atteint jamais le disque, donc aucun nettoyage à faire si
  * l'envoi échoue en cours de route.
  */
+/**
+ * ⚠ La borne passée à multer est celle du palier le PLUS PERMISSIF.
+ *
+ * `limits` est figé à la construction du routeur : multer ne connaît pas
+ * encore l'utilisateur quand il décide d'accepter ou non les octets. Le
+ * plafond réel du palier est donc appliqué APRÈS réception, par
+ * `assertUploadWithinTier` — un fichier de 40 Mo envoyé par un compte gratuit
+ * est reçu en mémoire puis refusé, jamais écrit sur le disque.
+ */
 const imageUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: tweetImageService.MAX_UPLOAD_BYTES, files: 1 },
+  limits: { fileSize: tweetImageService.MAX_UPLOAD_BYTES_ULTRA, files: 1 },
   fileFilter: (req, file, cb) => {
     if (!tweetImageService.isAcceptedMimetype(file.mimetype)) {
       return cb(new Error('Format d\'image non pris en charge'));
@@ -75,10 +85,34 @@ const imageUpload = multer({
   },
 });
 
+/**
+ * Refuse un fichier trop lourd POUR SON PALIER, après réception par multer.
+ *
+ * @returns {Promise<boolean>} true si la requête a déjà reçu sa réponse d'erreur.
+ */
+async function rejectIfOverTierUploadLimit(req, res) {
+  const size = req.file?.buffer?.length || 0;
+  const cap = await ultraLimit(
+    req.user,
+    tweetImageService.MAX_UPLOAD_BYTES_ULTRA,
+    tweetImageService.MAX_UPLOAD_BYTES,
+  );
+  if (size > cap) {
+    res.status(413).json({
+      success: false,
+      message: `Fichier trop lourd : ${Math.round(cap / (1024 * 1024))} Mo maximum pour ton palier.`,
+    });
+    return true;
+  }
+  return false;
+}
+
 /** Même logique que `imageUpload`, pour les messages vocaux joints à un tweet. */
 const audioUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: tweetAudioService.MAX_UPLOAD_BYTES, files: 1 },
+  // Le vocal garde une borne unique : 8 Mo couvrent déjà 5 minutes à débit
+  // voix, donc le palier n'a rien à ouvrir ici.
   fileFilter: (req, file, cb) => {
     if (!tweetAudioService.isAcceptedMimetype(file.mimetype)) {
       return cb(new Error('Format audio non pris en charge'));
@@ -1372,8 +1406,13 @@ router.post(
       if (!req.file) {
         return res.status(400).json({ success: false, message: 'Fichier manquant (champ "image")' });
       }
+      // Multer a accepté jusqu'au plafond Ultra : c'est ici que le palier réel
+      // s'applique, avant toute écriture sur le disque.
+      if (await rejectIfOverTierUploadLimit(req, res)) return undefined;
 
-      const url = await tweetImageService.storeUploadedImage(req.file.buffer, req.user.id);
+      const url = await tweetImageService.storeUploadedImage(req.file.buffer, req.user.id, {
+        isUltra: await isUltraRequest(req.user),
+      });
       return res.status(201).json({ success: true, data: { url } });
     } catch (error) {
       logger.error('Erreur upload image de tweet:', error);
@@ -1396,7 +1435,9 @@ router.post(
       }
 
       const url = await tweetAudioService.storeUploadedAudio(req.file.buffer, req.user.id, req.file.mimetype);
-      const duration = tweetAudioService.sanitizeAudioDuration(req.body?.duration);
+      const duration = tweetAudioService.sanitizeAudioDuration(req.body?.duration, {
+        isUltra: await isUltraRequest(req.user),
+      });
       return res.status(201).json({ success: true, data: { url, duration } });
     } catch (error) {
       logger.error('Erreur upload message vocal de tweet:', error);
@@ -1416,7 +1457,13 @@ router.post('/', [
   // porte une. Sans cette exception, publier une photo obligerait à écrire
   // quelque chose par-dessus.
   body('content').trim().custom(async (value, meta) => {
-    const images = tweetImageService.sanitizeMediaUrls(meta.req.body?.media_urls);
+    const images = tweetImageService.sanitizeMediaUrls(meta.req.body?.media_urls, {
+      maxImages: await ultraLimit(
+        meta.req.user,
+        tweetImageService.MAX_IMAGES_PER_TWEET_ULTRA,
+        tweetImageService.MAX_IMAGES_PER_TWEET,
+      ),
+    });
     const audio = tweetAudioService.sanitizeAudioUrl(meta.req.body?.audio_url);
     if (!value && images.length === 0 && !audio) {
       throw new Error('Le contenu ne peut pas être vide');
@@ -1435,8 +1482,10 @@ router.post('/', [
   // dans le service : un validateur qui rejetterait la requête ferait échouer
   // la publication entière parce qu'une option accessoire n'est pas ouverte.
   body('notify_followers').optional().isBoolean().withMessage('notify_followers doit être un booléen'),
-  body('notify_message').optional().isString().isLength({ max: 140 })
-    .withMessage('Le message de notification est limité à 140 caractères'),
+  // La borne vient du service qui l'applique — la recopier ici en dur, c'est
+  // la voir diverger au premier changement.
+  body('notify_message').optional().isString().isLength({ max: authorBroadcastService.MESSAGE_MAX })
+    .withMessage(`Le message de notification est limité à ${authorBroadcastService.MESSAGE_MAX} caractères`),
   handleValidationErrors,
   // Répondre à un contenu payant non acheté : la réponse s'afficherait sous
   // un texte que son auteur n'a jamais lu, et le fil de discussion d'un tweet
@@ -1494,7 +1543,9 @@ router.post('/', [
     // Même raisonnement que pour `media_urls` : seule une URL émise par
     // cette API (via `POST /api/tweets/audio`) entre dans `audio_url`.
     const sanitizedAudioUrl = tweetAudioService.sanitizeAudioUrl(audio_url);
-    const sanitizedAudioDuration = sanitizedAudioUrl ? tweetAudioService.sanitizeAudioDuration(audio_duration) : null;
+    const sanitizedAudioDuration = sanitizedAudioUrl
+      ? tweetAudioService.sanitizeAudioDuration(audio_duration, { isUltra: await isUltraRequest(req.user) })
+      : null;
 
     /**
      * « Traduction (bêta) » : option Pro uniquement. Le palier est revérifié
@@ -1515,7 +1566,9 @@ router.post('/', [
     }
     let experimentRequest = null;
     try {
-      experimentRequest = normalizeExperimentRequest(ab_test, content);
+      experimentRequest = normalizeExperimentRequest(ab_test, content, {
+        isUltra: await isUltraRequest(req.user),
+      });
       if (experimentRequest) {
         await assertAbTestEligible({
           userId,
@@ -1586,7 +1639,13 @@ router.post('/', [
         // URL arbitraire ferait charger un serveur tiers à chaque affichage du
         // tweet, ce qui livrerait l'IP et l'heure de lecture de tous ceux qui
         // le croisent. Voir `services/tweetImageService`.
-        media_urls: tweetImageService.sanitizeMediaUrls(media_urls),
+        media_urls: tweetImageService.sanitizeMediaUrls(media_urls, {
+          maxImages: await ultraLimit(
+            req.user,
+            tweetImageService.MAX_IMAGES_PER_TWEET_ULTRA,
+            tweetImageService.MAX_IMAGES_PER_TWEET,
+          ),
+        }),
         is_private,
         is_sensitive,
         location,

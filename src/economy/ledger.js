@@ -12,6 +12,7 @@ const {
   MIN_TRANSFER_TWC,
   P2P_TRANSFER_FEE_RATE,
   P2P_TRANSFER_FEE_RATE_SUBSCRIBER,
+  P2P_TRANSFER_FEE_RATE_ULTRA,
   MINING_BASE_REWARD_TWC,
   MINING_DAILY_WIN_LIMIT,
   MINING_DILUTION_PER_BASE_REWARD,
@@ -21,7 +22,7 @@ const {
   EXCHANGE_PRICE_MAX_MULTIPLIER
 } = require('./constants');
 const { roundTWC, roundPrice, toAmount, assertPositive } = require('./money');
-const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
+const { isSubscriptionActive, isUltraActive } = require('../utils/subscriptionHelpers');
 const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 const CASINO_RISK_EXEMPTION = Symbol('casino-risk-exemption');
 
@@ -399,12 +400,18 @@ class EconomyLedger {
   /**
    * Taux de commission applicable à l'expéditeur d'un virement.
    *
-   * Un abonnement actif (Plus ou Pro) divise la commission par deux. Le taux
-   * est résolu ICI, à l'écriture, et jamais lu depuis le client : c'est de
-   * l'argent, la remise doit être prouvée côté serveur au moment du débit.
+   * Trois taux, du plus bas au plus haut : Ultra ne paie rien, un abonnement
+   * actif (Plus ou Pro) divise la commission par deux, tout le reste paie le
+   * plein tarif. Le taux est résolu ICI, à l'écriture, et jamais lu depuis le
+   * client : c'est de l'argent, la remise doit être prouvée côté serveur au
+   * moment du débit.
+   *
+   * L'ordre des tests compte : `isUltraActive` d'abord, parce qu'un compte
+   * Ultra satisfait aussi `isSubscriptionActive` et repartirait sinon avec la
+   * remise du palier en dessous.
    *
    * L'abonnement expiré retombe sur le taux plein sans traitement particulier —
-   * `isSubscriptionActive` compare la date d'expiration à maintenant.
+   * les deux prédicats comparent la date d'expiration à maintenant.
    */
   static async p2pFeeRateFor(userId, dbTransaction = null) {
     try {
@@ -412,6 +419,7 @@ class EconomyLedger {
         attributes: ['id', 'subscription_tier', 'subscription_expires_at'],
         transaction: dbTransaction
       });
+      if (isUltraActive(user)) return P2P_TRANSFER_FEE_RATE_ULTRA;
       return isSubscriptionActive(user) ? P2P_TRANSFER_FEE_RATE_SUBSCRIBER : P2P_TRANSFER_FEE_RATE;
     } catch (error) {
       // Un palier illisible ne doit pas faire échouer le virement : on retombe

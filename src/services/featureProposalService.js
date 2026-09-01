@@ -1,4 +1,5 @@
 const { Op } = require('sequelize');
+const { ultraLimit } = require('../utils/ultraGate');
 const EconomyLedger = require('../economy/ledger');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
 const logger = require('../utils/logger');
@@ -30,6 +31,15 @@ const AREAS = ['feed', 'profil', 'messages', 'economie', 'carte', 'video', 'autr
  * limite se libère à chaque décision.
  */
 const MAX_OPEN_PER_AUTHOR = 3;
+/**
+ * Ultra en tient 10.
+ *
+ * La contrainte d'attention reste : dix idées ouvertes, c'est encore un
+ * nombre qu'un humain relit. Ce qui change, c'est qu'un gros compte qui
+ * remonte réellement des manques de produit n'a plus à en fermer une pour en
+ * ouvrir une autre.
+ */
+const MAX_OPEN_PER_AUTHOR_ULTRA = 10;
 
 const OPEN_STATUSES = ['received', 'reviewing', 'accepted'];
 
@@ -78,11 +88,12 @@ async function create(models, authorId, { title, body, area }) {
     where: { author_id: authorId, status: { [Op.in]: OPEN_STATUSES } }
   });
 
-  if (open >= MAX_OPEN_PER_AUTHOR) {
+  const maxOpen = await ultraLimit({ id: authorId }, MAX_OPEN_PER_AUTHOR_ULTRA, MAX_OPEN_PER_AUTHOR);
+  if (open >= maxOpen) {
     return {
       success: false,
       reason: 'too_many_open',
-      message: `Tu as déjà ${MAX_OPEN_PER_AUTHOR} idées en cours. Attends une réponse avant d'en proposer une autre.`
+      message: `Tu as déjà ${maxOpen} idées en cours. Attends une réponse avant d'en proposer une autre.`
     };
   }
 
@@ -256,6 +267,7 @@ async function decide(models, sequelize, staffId, proposalId, { status, rewardNf
 module.exports = {
   AREAS,
   MAX_OPEN_PER_AUTHOR,
+  MAX_OPEN_PER_AUTHOR_ULTRA,
   create,
   stats,
   listMine,

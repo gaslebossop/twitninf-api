@@ -9,7 +9,7 @@ const router = express.Router();
 // Chaque message coûte un vrai appel modèle payant : un plafond en mémoire,
 // même simple, borne le coût d'un compte qui bouclerait ou serait scripté —
 // même patron que `userRateLimit` dans `authMiddleware.js`.
-const MAX_MESSAGES_PER_DAY = 60;
+const MAX_MESSAGES_PER_DAY = 200;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 const usage = new Map();
 

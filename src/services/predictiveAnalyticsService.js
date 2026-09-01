@@ -38,6 +38,22 @@ const RELIABLE_SAMPLE = 20;
 /** Fenêtre d'historique par défaut — assez large pour lisser, assez courte pour rester actuelle. */
 const DEFAULT_HISTORY_DAYS = 120;
 /**
+ * Profondeur d'historique MAXIMALE consultable, par palier.
+ *
+ * `DEFAULT_HISTORY_DAYS` n'était qu'un défaut : la route laissait déjà
+ * demander 365 jours à n'importe quel abonné Pro. C'est désormais une vraie
+ * borne — un an d'historique pour Ultra, quatre mois pour les autres. Un an,
+ * c'est ce qui permet de voir une saisonnalité ; en dessous, on ne voit qu'une
+ * tendance.
+ */
+const MAX_HISTORY_DAYS = 120;
+const MAX_HISTORY_DAYS_ULTRA = 365;
+
+/** Borne applicable, à passer aux fonctions qui acceptent `historyDays`. */
+function maxHistoryDaysFor(isUltra) {
+  return isUltra ? MAX_HISTORY_DAYS_ULTRA : MAX_HISTORY_DAYS;
+}
+/**
  * Force du rétrécissement. Avec K = 5, un facteur mesuré sur 5 tweets de chaque
  * côté ne compte qu'à moitié ; il faut une vingtaine de tweets pour qu'il
  * s'exprime pleinement.
@@ -809,6 +825,9 @@ module.exports = {
   describe,
   shrunkMultiplier,
   MIN_TWEETS_FOR_PREDICTION,
+  maxHistoryDaysFor,
+  MAX_HISTORY_DAYS,
+  MAX_HISTORY_DAYS_ULTRA,
   fetchAuthorContext,
   fetchAudienceActivity,
 };

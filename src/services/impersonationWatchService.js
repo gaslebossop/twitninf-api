@@ -8,10 +8,12 @@ const { queryRead } = require('../database/readReplica');
 const {
   IMPERSONATION_SIMILARITY_THRESHOLD,
   IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS,
+  IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS_ULTRA,
 } = require('../constants/premiumMarket');
 const avatarFingerprint = require('./avatarFingerprint');
 const signals = require('./impersonationSignals');
 const logger = require('../utils/logger');
+const { ultraLimit } = require('../utils/ultraGate');
 
 const INVISIBLE_CHARACTERS = /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/gu;
 const COMBINING_MARKS = /\p{Mark}/gu;
@@ -1105,7 +1107,13 @@ async function ensureBioCorpus() {
 
 /** Suspects plausibles pour un compte, sans balayer toute la table `users`. */
 async function findSuspects(target, targetFingerprint) {
-  const since = new Date(Date.now() - IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS * 86400000);
+  // Fenêtre résolue d'après le palier de la CIBLE : c'est elle qu'on protège.
+  const scanDays = await ultraLimit(
+    { id: target.id },
+    IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS_ULTRA,
+    IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS,
+  );
+  const since = new Date(Date.now() - scanDays * 86400000);
   const normalized = normalizeLookalike(target.username);
   if (!normalized) return [];
 

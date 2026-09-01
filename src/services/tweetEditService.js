@@ -1,9 +1,10 @@
 const { TweetEdit, Tweet, User } = require('../models');
 const { sequelize } = require('../database/index');
-const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
+const { isSubscriptionActive, isUltraActive } = require('../utils/subscriptionHelpers');
 const {
   TWEET_EDIT_WINDOW_MS,
   TWEET_EDIT_MAX_REVISIONS,
+  TWEET_EDIT_MAX_REVISIONS_ULTRA,
 } = require('../constants/premiumMarket');
 
 /**
@@ -21,6 +22,12 @@ const {
  * - dans les 30 minutes suivant la publication ;
  * - historique public écrit avant la modification.
  *
+ * Un compte Ultra obtient DEUX FOIS plus de révisions, et rien d'autre : la
+ * fenêtre de 30 minutes ne s'achète pas. Elle protège ceux qui ont retweeté un
+ * texte précis, alors que le compteur de révisions ne protège personne
+ * (l'historique est public) — il empêche seulement un tweet de devenir une
+ * ardoise.
+ *
  * Le staff passe outre les deux premières (`asStaff`) : retirer une donnée
  * personnelle d'un tweet ancien est une obligation, pas un avantage payant.
  */
@@ -31,6 +38,11 @@ class TweetEditError extends Error {
     this.name = 'TweetEditError';
     this.code = code;
   }
+}
+
+/** Révisions autorisées sur un tweet, selon le palier de son auteur. */
+function maxRevisionsFor(author) {
+  return isUltraActive(author) ? TWEET_EDIT_MAX_REVISIONS_ULTRA : TWEET_EDIT_MAX_REVISIONS;
 }
 
 /** Millisecondes restantes pour modifier ; 0 si la fenêtre est fermée. */
@@ -86,18 +98,19 @@ async function editabilityFor(tweet, user) {
   const revisions = await TweetEdit.count({ where: { tweet_id: tweet.id } });
   const remaining = remainingWindowMs(tweet);
   const subscribed = isSubscriptionActive(user);
+  const maxRevisions = maxRevisionsFor(user);
 
   let reason = null;
   if (!subscribed) reason = 'subscription_required';
   else if (remaining <= 0) reason = 'window_closed';
-  else if (revisions >= TWEET_EDIT_MAX_REVISIONS) reason = 'max_revisions';
+  else if (revisions >= maxRevisions) reason = 'max_revisions';
 
   return {
     can_edit: reason === null,
     reason,
     remaining_ms: remaining,
     revisions_used: revisions,
-    max_revisions: TWEET_EDIT_MAX_REVISIONS,
+    max_revisions: maxRevisions,
     window_ms: TWEET_EDIT_WINDOW_MS,
   };
 }
@@ -123,7 +136,7 @@ async function applyEdit({ tweetId, editorId, newContent, asStaff = false }) {
     if (!next.trim()) throw new TweetEditError('Le contenu ne peut pas être vide', 'empty');
     if (previous === next) {
       // Rien à écrire : une révision identique polluerait l'historique et
-      // consommerait un des cinq crédits pour rien.
+      // consommerait une des révisions pour rien.
       return { tweet, revision: null, unchanged: true };
     }
 
@@ -144,10 +157,11 @@ async function applyEdit({ tweetId, editorId, newContent, asStaff = false }) {
           'window_closed',
         );
       }
+      const maxRevisions = maxRevisionsFor(author);
       const used = await TweetEdit.count({ where: { tweet_id: tweet.id }, transaction: t });
-      if (used >= TWEET_EDIT_MAX_REVISIONS) {
+      if (used >= maxRevisions) {
         throw new TweetEditError(
-          `Ce tweet a déjà été modifié ${TWEET_EDIT_MAX_REVISIONS} fois.`,
+          `Ce tweet a déjà été modifié ${maxRevisions} fois.`,
           'max_revisions',
         );
       }
@@ -182,4 +196,6 @@ module.exports = {
   remainingWindowMs,
   TWEET_EDIT_WINDOW_MS,
   TWEET_EDIT_MAX_REVISIONS,
+  TWEET_EDIT_MAX_REVISIONS_ULTRA,
+  maxRevisionsFor,
 };

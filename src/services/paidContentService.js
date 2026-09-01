@@ -13,11 +13,14 @@ const { getPlatformCurrency } = require('../economy/platformCurrency');
 const { spendWithAutoConversion, planPayment } = require('../economy/multiCurrencyPayment');
 const {
   PLATFORM_CONTENT_FEE_RATE,
+  PLATFORM_CONTENT_FEE_RATE_ULTRA,
   PAID_CONTENT_MIN_PRICE_TWC,
   PAID_CONTENT_MAX_PRICE_TWC,
+  PAID_CONTENT_MAX_PRICE_TWC_ULTRA,
   PAID_CONTENT_PRICE_EDIT_WINDOW_MS,
 } = require('../constants/premiumMarket');
 const logger = require('../utils/logger');
+const { ultraLimit } = require('../utils/ultraGate');
 
 /**
  * Contenu payant à l'unité.
@@ -89,13 +92,13 @@ function buildPreview(lock, rawContent) {
   return scrambleText(text);
 }
 
-function normalizePrice(raw) {
+function normalizePrice(raw, maxPrice = PAID_CONTENT_MAX_PRICE_TWC) {
   const price = roundTWC(raw);
   if (!Number.isFinite(price) || price < PAID_CONTENT_MIN_PRICE_TWC) {
     throw new Error(`Prix minimum : ${PAID_CONTENT_MIN_PRICE_TWC} NF`);
   }
-  if (price > PAID_CONTENT_MAX_PRICE_TWC) {
-    throw new Error(`Prix maximum : ${PAID_CONTENT_MAX_PRICE_TWC} NF`);
+  if (price > maxPrice) {
+    throw new Error(`Prix maximum : ${maxPrice} NF`);
   }
   return price;
 }
@@ -130,10 +133,29 @@ async function assertOwnership(contentType, contentId, creatorId) {
   return { raw: story.caption };
 }
 
+/**
+ * Commission applicable à un créateur : 20 % pour un Ultra, 30 % sinon.
+ *
+ * Résolue au moment où le verrou est POSÉ, puis figée dessus
+ * (`platform_fee_rate`) et relue telle quelle à chaque achat. Une vente déjà
+ * en ligne ne change donc pas de commission parce que l'auteur s'est abonné —
+ * ou désabonné — entre-temps, et un acheteur n'a jamais à se demander quel
+ * taux s'appliquait le jour où il a payé.
+ */
+async function contentFeeRateFor(creatorId) {
+  return ultraLimit({ id: creatorId }, PLATFORM_CONTENT_FEE_RATE_ULTRA, PLATFORM_CONTENT_FEE_RATE);
+}
+
 /** Pose (ou remet à jour) un verrou payant. Réservé au palier Pro par la route. */
 async function lockContent({ creatorId, contentType, contentId, priceTwc, previewText }) {
-  const price = normalizePrice(priceTwc);
+  const maxPrice = await ultraLimit(
+    { id: creatorId },
+    PAID_CONTENT_MAX_PRICE_TWC_ULTRA,
+    PAID_CONTENT_MAX_PRICE_TWC,
+  );
+  const price = normalizePrice(priceTwc, maxPrice);
   await assertOwnership(contentType, contentId, creatorId);
+  const feeRate = await contentFeeRateFor(creatorId);
 
   const currency = await getPlatformCurrency();
   if (!currency) throw new Error('Monnaie indisponible');
@@ -161,13 +183,14 @@ async function lockContent({ creatorId, contentType, contentId, priceTwc, previe
     }
 
     // Le nouveau prix ne vaut que pour les PROCHAINS acheteurs : les achats
-    // déjà encaissés portent leur propre montant.
+    // déjà encaissés portent leur propre montant. Idem pour la commission —
+    // elle est re-figée ici parce que le prix change, pas rétroactivement.
     await existing.update({
       price_twc: price,
       preview_text: previewText || existing.preview_text,
       is_active: true,
       unlocked_at: null,
-      platform_fee_rate: PLATFORM_CONTENT_FEE_RATE,
+      platform_fee_rate: feeRate,
     });
     return existing;
   }
@@ -179,7 +202,7 @@ async function lockContent({ creatorId, contentType, contentId, priceTwc, previe
     currency_id: currency.id,
     price_twc: price,
     preview_text: previewText || null,
-    platform_fee_rate: PLATFORM_CONTENT_FEE_RATE,
+    platform_fee_rate: feeRate,
   });
 }
 
@@ -544,6 +567,8 @@ async function creatorDashboard(creatorId, { limit = 50 } = {}) {
     limit: Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100),
   });
 
+  const feeRate = await contentFeeRateFor(creatorId);
+
   const totals = locks.reduce((acc, l) => {
     acc.gross = roundTWC(acc.gross + toAmount(l.gross_twc));
     acc.net = roundTWC(acc.net + toAmount(l.net_twc));
@@ -552,7 +577,7 @@ async function creatorDashboard(creatorId, { limit = 50 } = {}) {
   }, { gross: 0, net: 0, sales: 0 });
 
   return {
-    fee_rate: PLATFORM_CONTENT_FEE_RATE,
+    fee_rate: feeRate,
     totals: { ...totals, platform_fee: roundTWC(totals.gross - totals.net) },
     items: locks.map((l) => ({
       id: l.id,
@@ -650,5 +675,7 @@ module.exports = {
   purchaseHistory,
   publicLockPayload,
   priceEditRemainingMs,
+  contentFeeRateFor,
   PLATFORM_CONTENT_FEE_RATE,
+  PLATFORM_CONTENT_FEE_RATE_ULTRA,
 };

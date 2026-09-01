@@ -22,6 +22,14 @@ const TWEET_AUDIO_DIR = path.join(__dirname, '../public/audio');
 
 /** Un message vocal reste bref : pas de quoi héberger un podcast. */
 const MAX_DURATION_SECONDS = 120;
+/**
+ * Vocal d'un compte Ultra : cinq minutes.
+ *
+ * La borne sert au COMPTEUR d'affichage et au garde-fou de taille, pas a la
+ * qualite : `MAX_UPLOAD_BYTES` reste la vraie limite dure. Cinq minutes tient
+ * encore largement dans les 8 Mo a debit voix.
+ */
+const MAX_DURATION_SECONDS_ULTRA = 300;
 
 /** ~1 Mo/minute en AAC/M4A à débit voix : largement assez pour 2 minutes. */
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
@@ -93,15 +101,17 @@ function sanitizeAudioUrl(audioUrl) {
  * @param {unknown} duration
  * @returns {number|null}
  */
-function sanitizeAudioDuration(duration) {
+function sanitizeAudioDuration(duration, { isUltra = false } = {}) {
   const parsed = Number(duration);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  return Math.min(Math.round(parsed), MAX_DURATION_SECONDS);
+  const cap = isUltra ? MAX_DURATION_SECONDS_ULTRA : MAX_DURATION_SECONDS;
+  return Math.min(Math.round(parsed), cap);
 }
 
 module.exports = {
   TWEET_AUDIO_DIR,
   MAX_DURATION_SECONDS,
+  MAX_DURATION_SECONDS_ULTRA,
   MAX_UPLOAD_BYTES,
   isAcceptedMimetype,
   storeUploadedAudio,

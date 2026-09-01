@@ -50,6 +50,15 @@ const CERTIFIED_NAME_EFFECT = 'certified';
 const PROFILE_EFFECTS = ['none', 'sparkles', 'embers', 'bubbles', 'snow'];
 /** Titre libre affiché sous le pseudo — court, sinon il concurrence la bio. */
 const PROFILE_TITLE_MAX = 40;
+/**
+ * Ultra : 60 caractères de titre.
+ *
+ * La borne existe pour que le titre ne concurrence pas la bio. Vingt
+ * caractères de plus laissent tenir un intitulé réel (« Réalisateur &
+ * directeur de la photographie ») sans pour autant ouvrir un second champ
+ * de bio.
+ */
+const PROFILE_TITLE_MAX_ULTRA = 60;
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
 /**
@@ -176,7 +185,8 @@ function sanitizeCustomization(input, tier, { verified = false, existing = null 
     output.name_size = isProOrAbove(tier) ? source.name_size : 'normal';
   }
   if (paid && typeof source.profile_title === 'string') {
-    const title = source.profile_title.trim().replace(/\s+/g, ' ').slice(0, PROFILE_TITLE_MAX);
+    const titleMax = tier === TIER.ULTRA ? PROFILE_TITLE_MAX_ULTRA : PROFILE_TITLE_MAX;
+    const title = source.profile_title.trim().replace(/\s+/g, ' ').slice(0, titleMax);
     if (title) {
       // Un titre réservé ne s'écrit pas : il se gagne. On garde alors le titre
       // précédent plutôt que de vider le champ — perdre son titre parce qu'on

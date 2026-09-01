@@ -29,9 +29,19 @@ const logger = require('../utils/logger');
 const EconomyLedger = require('../economy/ledger');
 const EconomyMetrics = require('../economy/metrics');
 const { roundTWC } = require('../economy/money');
+const { ultraLimit } = require('../utils/ultraGate');
 
 /** Durée maximale d'un concours. Au-delà, plus personne ne s'en souvient. */
 const MAX_DURATION_DAYS = 30;
+/**
+ * Ultra peut tenir un concours sur un trimestre.
+ *
+ * L'argument « plus personne ne s'en souvient » vaut pour un compte dont les
+ * abonnés ne voient passer qu'un tweet de temps en temps. Un gros créateur
+ * relance le sien à chaque publication : la mémoire du concours est entretenue
+ * par sa fréquence, pas par sa durée.
+ */
+const MAX_DURATION_DAYS_ULTRA = 90;
 /** Durée minimale : le temps que le tweet soit vu par autre chose qu'un bot. */
 const MIN_DURATION_MINUTES = 10;
 
@@ -91,7 +101,7 @@ async function listUsableCurrencies(userId) {
  * `currency_id` sans le résoudre laisserait créer un concours dont la
  * cagnotte ne pourrait jamais être versée.
  */
-async function normalizeCreatePayload(body = {}) {
+async function normalizeCreatePayload(body = {}, authorId = null) {
   const Contest = require('../models/Contest');
   const { VirtualCurrency } = require('../models');
 
@@ -131,9 +141,14 @@ async function normalizeCreatePayload(body = {}) {
       'ENDS_AT_TOO_SOON'
     );
   }
-  if (endsAt.getTime() > now + MAX_DURATION_DAYS * 86_400_000) {
+  // Sans auteur connu (appel interne), on retombe sur la durée commune : une
+  // borne se relève sur preuve de palier, jamais par défaut.
+  const maxDurationDays = authorId
+    ? await ultraLimit({ id: authorId }, MAX_DURATION_DAYS_ULTRA, MAX_DURATION_DAYS)
+    : MAX_DURATION_DAYS;
+  if (endsAt.getTime() > now + maxDurationDays * 86_400_000) {
     throw new ContestValidationError(
-      `Un concours ne peut pas durer plus de ${MAX_DURATION_DAYS} jours.`,
+      `Un concours ne peut pas durer plus de ${maxDurationDays} jours.`,
       'ENDS_AT_TOO_FAR'
     );
   }
@@ -559,6 +574,7 @@ module.exports = {
   drawContest,
   drawDueContests,
   MAX_DURATION_DAYS,
+  MAX_DURATION_DAYS_ULTRA,
   MIN_DURATION_MINUTES,
   MIN_PRIZE,
 };

@@ -7,6 +7,7 @@ const trendRadar = require('../services/trendRadarService');
 const tweetGenerator = require('../services/customTweetGenerationService');
 const codex = require('../services/codexTextClient');
 const { resolveTweetCharLimit, TWEET_MAX_CHARS_SUBSCRIBER } = require('../utils/tweetLimits');
+const { isUltraRequest } = require('../utils/ultraGate');
 const logger = require('../utils/logger');
 
 /**
@@ -79,7 +80,11 @@ router.post('/generator', authenticateToken, requirePremium, async (req, res) =>
  */
 router.get('/profile', authenticateToken, requirePro, async (req, res) => {
   try {
-    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 120, 30), 365);
+    // La profondeur demandée est bornée par le PALIER : un an pour Ultra,
+    // quatre mois sinon. Le `365` était auparavant en dur ici, si bien que
+    // n'importe quel abonné Pro pouvait déjà demander l'année complète.
+    const maxDays = predictive.maxHistoryDaysFor(await isUltraRequest(req.user));
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 120, 30), maxDays);
     const profile = await predictive.getCreatorProfile(req.user.id, { historyDays: days });
     res.json({ success: true, data: profile });
   } catch (error) {

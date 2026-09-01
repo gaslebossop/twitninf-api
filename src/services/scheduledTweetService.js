@@ -5,7 +5,9 @@ const { processPendingTweet } = require('./geminiService');
 const { resolveTweetCharLimit } = require('../utils/tweetLimits');
 const {
   SCHEDULE_MAX_HORIZON_DAYS,
+  SCHEDULE_MAX_HORIZON_DAYS_ULTRA,
   SCHEDULE_MAX_PENDING,
+  SCHEDULE_MAX_PENDING_ULTRA,
   SCHEDULE_MIN_LEAD_MS,
 } = require('../constants/premiumMarket');
 const {
@@ -15,6 +17,7 @@ const {
   isValidTimeZone,
 } = require('../utils/timezone');
 const logger = require('../utils/logger');
+const { isUltraRequest } = require('../utils/ultraGate');
 
 /**
  * Publications programmées — avantage abonné.
@@ -119,6 +122,22 @@ async function resolveBestTime(userId, from, timeZone = DEFAULT_TIME_ZONE) {
   return from;
 }
 
+/**
+ * Bornes de programmation applicables à un compte.
+ *
+ * Exporté parce que la route les ANNONCE au client (`/schedule/limits`) et que
+ * le service les APPLIQUE : deux valeurs résolues séparément finiraient par
+ * diverger, et l'app afficherait une file de 200 places qu'un refus serveur
+ * démentirait à la 51e.
+ */
+async function scheduleLimitsFor(userId) {
+  const ultra = await isUltraRequest({ id: userId });
+  return {
+    horizonDays: ultra ? SCHEDULE_MAX_HORIZON_DAYS_ULTRA : SCHEDULE_MAX_HORIZON_DAYS,
+    maxPending: ultra ? SCHEDULE_MAX_PENDING_ULTRA : SCHEDULE_MAX_PENDING,
+  };
+}
+
 /** Programme une publication. Le palier est vérifié par la route. */
 async function schedule({
   userId,
@@ -142,10 +161,15 @@ async function schedule({
   if (when.getTime() < Date.now() - 60 * 1000) {
     throw new ScheduleError('Cette date est déjà passée', 'past_date');
   }
-  const horizon = Date.now() + SCHEDULE_MAX_HORIZON_DAYS * 86400000;
+  // Les deux bornes suivantes dépendent du palier : un Ultra programme six
+  // mois à l'avance et garde 200 tweets en file. Le test est fait ICI, à
+  // l'écriture, et jamais d'après ce que le client annonce.
+  const { horizonDays, maxPending } = await scheduleLimitsFor(userId);
+
+  const horizon = Date.now() + horizonDays * 86400000;
   if (when.getTime() > horizon) {
     throw new ScheduleError(
-      `Tu ne peux pas programmer au-delà de ${SCHEDULE_MAX_HORIZON_DAYS} jours`,
+      `Tu ne peux pas programmer au-delà de ${horizonDays} jours`,
       'too_far',
     );
   }
@@ -153,9 +177,9 @@ async function schedule({
   const pending = await ScheduledTweet.count({
     where: { user_id: userId, status: { [Op.in]: ['pending', 'publishing'] } },
   });
-  if (pending >= SCHEDULE_MAX_PENDING) {
+  if (pending >= maxPending) {
     throw new ScheduleError(
-      `Ta file est pleine (${SCHEDULE_MAX_PENDING} publications en attente)`,
+      `Ta file est pleine (${maxPending} publications en attente)`,
       'queue_full',
     );
   }
@@ -424,6 +448,7 @@ function stopWorker() {
 module.exports = {
   ScheduleError,
   schedule,
+  scheduleLimitsFor,
   listFor,
   update,
   cancel,

@@ -3,11 +3,20 @@ const { sequelize, User, UserFollow } = require('../models');
 const { evaluateTweetForRecommendations } = require('./geminiService');
 const featureFlagService = require('./featureFlagService');
 const logger = require('../utils/logger');
+const { ultraLimit } = require('../utils/ultraGate');
 
 const MIN_FOLLOWERS = 11; // « plus de 10 »
 const MIN_VARIANTS = 2;
 const MAX_VARIANTS = 4;
 const MAX_CONTENT_LENGTH = 600;
+/**
+ * Ultra teste six versions, et jusqu'a 1 000 caracteres chacune.
+ *
+ * La longueur suit la limite de tweet du palier : tester des variantes plus
+ * courtes que ce qu'on a le droit de publier n'aurait aucun sens.
+ */
+const MAX_VARIANTS_ULTRA = 6;
+const MAX_CONTENT_LENGTH_ULTRA = 1000;
 const WINDOWS_CLIENT = 'windows-electron';
 const MOBILE_CLIENT = 'mobile-expo';
 
@@ -24,6 +33,18 @@ const TARGET_TOTAL_IMPRESSIONS = 16;
 const MIN_IMPRESSIONS_FLOOR = 4;
 const MAX_CONCURRENT_EXPERIMENTS = 2;
 
+/**
+ * Expériences simultanées par AUTEUR — à ne pas confondre avec le plafond
+ * plateforme ci-dessus.
+ *
+ * Ultra en obtient deux au lieu d'une. Le plafond plateforme, lui, ne bouge
+ * PAS : le trafic reste fragmenté en deux expériences au maximum, quel que
+ * soit le palier. Ce qui change pour un Ultra, c'est qu'il peut occuper les
+ * deux places au lieu d'une seule — pas que le fil supporte plus de tests.
+ */
+const MAX_EXPERIMENTS_PER_AUTHOR = 1;
+const MAX_EXPERIMENTS_PER_AUTHOR_ULTRA = 2;
+
 class AbTestRequestError extends Error {
   constructor(message, status = 400) {
     super(message);
@@ -32,7 +53,9 @@ class AbTestRequestError extends Error {
   }
 }
 
-function normalizeExperimentRequest(raw, primaryContent) {
+function normalizeExperimentRequest(raw, primaryContent, { isUltra = false } = {}) {
+  const maxVariants = isUltra ? MAX_VARIANTS_ULTRA : MAX_VARIANTS;
+  const maxContentLength = isUltra ? MAX_CONTENT_LENGTH_ULTRA : MAX_CONTENT_LENGTH;
   if (raw == null) return null;
   if (!raw || typeof raw !== 'object' || !Array.isArray(raw.variants)) {
     throw new AbTestRequestError('Le format de l’expérience A/B est invalide.');
@@ -43,14 +66,14 @@ function normalizeExperimentRequest(raw, primaryContent) {
     ...raw.variants.map(value => String(value || '').trim()),
   ];
 
-  if (contents.length < MIN_VARIANTS || contents.length > MAX_VARIANTS) {
-    throw new AbTestRequestError(`Une expérience A/B doit contenir entre ${MIN_VARIANTS} et ${MAX_VARIANTS} versions.`);
+  if (contents.length < MIN_VARIANTS || contents.length > maxVariants) {
+    throw new AbTestRequestError(`Une expérience A/B doit contenir entre ${MIN_VARIANTS} et ${maxVariants} versions.`);
   }
   if (contents.some(value => !value)) {
     throw new AbTestRequestError('Toutes les versions de l’expérience doivent être remplies.');
   }
-  if (contents.some(value => value.length > MAX_CONTENT_LENGTH)) {
-    throw new AbTestRequestError(`Chaque version est limitée à ${MAX_CONTENT_LENGTH} caractères.`);
+  if (contents.some(value => value.length > maxContentLength)) {
+    throw new AbTestRequestError(`Chaque version est limitée à ${maxContentLength} caractères.`);
   }
   if (new Set(contents).size !== contents.length) {
     throw new AbTestRequestError('Les versions de l’expérience doivent être différentes.');
@@ -152,9 +175,17 @@ async function createExperiment({ tweetId, authorId, contents, client, transacti
     transaction,
   });
   const capacity = capacityRows?.[0] || {};
-  if (Number(capacity.author_count || 0) >= 1) {
+  const maxPerAuthor = await ultraLimit(
+    { id: authorId },
+    MAX_EXPERIMENTS_PER_AUTHOR_ULTRA,
+    MAX_EXPERIMENTS_PER_AUTHOR,
+    transaction,
+  );
+  if (Number(capacity.author_count || 0) >= maxPerAuthor) {
     throw new AbTestRequestError(
-      'Attendez la fin de votre expérience A/B actuelle avant d’en lancer une autre.',
+      maxPerAuthor > 1
+        ? 'Vos deux expériences A/B sont déjà en cours. Attendez la fin de l’une d’elles.'
+        : 'Attendez la fin de votre expérience A/B actuelle avant d’en lancer une autre.',
       409,
     );
   }

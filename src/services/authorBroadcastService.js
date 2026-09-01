@@ -81,8 +81,14 @@ const PUSH_CHUNK = 100;
 /** Envois Web Push menés de front. Un chiffrement par appareil, donc borné. */
 const WEB_PUSH_WAVE = 50;
 
-/** Longueur max du message personnalisé. Aligné sur la validation de la route. */
-const MESSAGE_MAX = 140;
+/**
+ * Longueur max du message personnalisé. Aligné sur la validation de la route.
+ *
+ * 280 : la longueur d'un tweet libre. Le message de diffusion est la seule
+ * phrase que l'auteur écrit POUR la notification plutôt que pour le fil, et la
+ * couper à 140 l'obligeait à résumer un résumé.
+ */
+const MESSAGE_MAX = 280;
 
 /**
  * `type` réutilise `system` et se distingue par `metadata.kind`.

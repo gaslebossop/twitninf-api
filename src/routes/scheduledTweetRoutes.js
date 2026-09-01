@@ -8,10 +8,6 @@ const {
 } = require('../middleware/authMiddleware');
 const scheduler = require('../services/scheduledTweetService');
 const { resolveTimeZone } = require('../utils/timezone');
-const {
-  SCHEDULE_MAX_HORIZON_DAYS,
-  SCHEDULE_MAX_PENDING,
-} = require('../constants/premiumMarket');
 const logger = require('../utils/logger');
 
 /**
@@ -43,13 +39,21 @@ function fail(res, error, fallback) {
   return res.status(500).json({ success: false, message: fallback });
 }
 
-/** GET /api/scheduled-tweets/config — bornes de la file, pour l'écran. */
-router.get('/config', authenticateToken, (req, res) => {
+/**
+ * GET /api/scheduled-tweets/config — bornes de la file, pour l'écran.
+ *
+ * Les bornes viennent du SERVICE, pas des constantes : elles dépendent du
+ * palier, et c'est le service qui les applique. Annoncer ici une valeur
+ * résolue autrement, c'est promettre une file que le refus d'écriture
+ * démentira.
+ */
+router.get('/config', authenticateToken, async (req, res) => {
+  const { horizonDays, maxPending } = await scheduler.scheduleLimitsFor(req.user.id);
   res.json({
     success: true,
     data: {
-      max_horizon_days: SCHEDULE_MAX_HORIZON_DAYS,
-      max_pending: SCHEDULE_MAX_PENDING,
+      max_horizon_days: horizonDays,
+      max_pending: maxPending,
       modes: ['exact', 'best_time'],
     },
   });

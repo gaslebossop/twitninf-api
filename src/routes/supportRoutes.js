@@ -13,6 +13,7 @@ const {
   sequelize,
 } = require('../models');
 const { TIER, isProOrAbove } = require('../constants/subscriptionTiers');
+const { ultraLimit } = require('../utils/ultraGate');
 const { maybeExpireSubscription, isSubscriptionActive } = require('../utils/subscriptionHelpers');
 const logger = require('../utils/logger');
 
@@ -27,15 +28,38 @@ const logger = require('../utils/logger');
  * retournerait de toute façon en signalements publics.
  *
  * La différence réelle, et elle est nette :
+ *  - Ultra : priorité `high`, jusqu'à 20 tickets ouverts ;
  *  - Pro   : priorité `high` (tête de file du staff), jusqu'à 5 tickets ouverts ;
  *  - autre : priorité `normal`, 1 seul ticket ouvert à la fois.
  */
 
-/** Tickets simultanément ouverts, selon le palier. */
+/**
+ * Tickets simultanément ouverts, selon le palier.
+ *
+ * Le plafond Ultra est haut parce qu'un gros compte a plusieurs dossiers en
+ * cours à la fois (paiement, modération, API) et qu'il n'a aucune raison de
+ * les empiler dans un seul fil. Il reste un plafond : 20 tickets ouverts, ce
+ * n'est plus un utilisateur en difficulté, c'est une rafale.
+ */
+const MAX_OPEN_TICKETS_ULTRA = 20;
 const MAX_OPEN_TICKETS_PRO = 5;
 const MAX_OPEN_TICKETS_STANDARD = 1;
+
+/** Plafond applicable, du palier le plus haut au plus bas. */
+function maxOpenTicketsFor(tier) {
+  if (tier === TIER.ULTRA) return MAX_OPEN_TICKETS_ULTRA;
+  return isProOrAbove(tier) ? MAX_OPEN_TICKETS_PRO : MAX_OPEN_TICKETS_STANDARD;
+}
 /** Anti-rafale : un fil de support n'est pas une messagerie instantanée. */
 const MAX_MESSAGES_PER_TICKET = 100;
+/**
+ * Ultra : 300 messages avant qu'un fil ne doive être scindé.
+ *
+ * Un dossier de gros compte (litige de paiement, contestation, incident API)
+ * tient rarement en cent échanges, et le faire recommencer dans un nouveau
+ * ticket fait perdre au staff tout le contexte déjà établi.
+ */
+const MAX_MESSAGES_PER_TICKET_ULTRA = 300;
 
 const OPEN_STATUSES = ['open', 'pending', 'answered'];
 
@@ -159,7 +183,7 @@ router.post('/tickets', authenticateToken, async (req, res) => {
 
     const { tier } = await resolveTier(req.user.id);
     const isPro = isProOrAbove(tier);
-    const maxOpen = isPro ? MAX_OPEN_TICKETS_PRO : MAX_OPEN_TICKETS_STANDARD;
+    const maxOpen = maxOpenTicketsFor(tier);
 
     const openCount = await SupportTicket.count({
       where: { user_id: req.user.id, status: { [Op.in]: OPEN_STATUSES } },
@@ -356,7 +380,8 @@ router.post('/tickets/:id/messages', authenticateToken, async (req, res) => {
     }
 
     const messageCount = await SupportTicketMessage.count({ where: { ticket_id: ticket.id } });
-    if (messageCount >= MAX_MESSAGES_PER_TICKET) {
+    const maxMessages = await ultraLimit(req.user, MAX_MESSAGES_PER_TICKET_ULTRA, MAX_MESSAGES_PER_TICKET);
+    if (messageCount >= maxMessages) {
       return res.status(429).json({
         success: false,
         message: 'Ce fil est trop long. Ouvre un nouveau ticket pour la suite.',
@@ -482,7 +507,7 @@ router.get('/summary', authenticateToken, async (req, res) => {
         openTickets: open,
         priority: isPro ? 'high' : 'normal',
         slaHours: slaHoursFor(isPro ? 'high' : 'normal'),
-        maxOpenTickets: isPro ? MAX_OPEN_TICKETS_PRO : MAX_OPEN_TICKETS_STANDARD,
+        maxOpenTickets: maxOpenTicketsFor(tier),
         isPro,
         isStaff,
         staffRole: isStaff ? user.role : null,

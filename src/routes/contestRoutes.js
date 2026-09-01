@@ -28,7 +28,7 @@ router.post('/', authenticateToken, async (req, res) => {
 
     let payload;
     try {
-      payload = await contestService.normalizeCreatePayload(req.body);
+      payload = await contestService.normalizeCreatePayload(req.body, req.user.id);
     } catch (error) {
       if (error instanceof contestService.ContestValidationError) {
         return res.status(error.status).json({ success: false, message: error.message, code: error.code });

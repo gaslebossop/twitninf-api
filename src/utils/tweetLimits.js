@@ -1,12 +1,13 @@
 const { User } = require('../models');
-const { isSubscriptionActive } = require('./subscriptionHelpers');
+const { isSubscriptionActive, isUltraActive } = require('./subscriptionHelpers');
 const logger = require('./logger');
 
 /**
  * Longueur maximale d'un tweet, par profil de compte.
  *
- * Trois régimes, du plus large au plus étroit :
+ * Quatre régimes, du plus large au plus étroit :
  *  - compte certifié : aucune limite (comportement historique, inchangé) ;
+ *  - abonné Ultra : 2 500 caractères ;
  *  - abonné actif (Plus ou Pro) : 1 000 caractères — l'avantage payant ;
  *  - tout le reste : 600, le garde-fou serveur qui existait déjà.
  *
@@ -16,6 +17,7 @@ const logger = require('./logger');
  * et resserrer ce plafond casserait les clients qui s'appuient dessus
  * aujourd'hui (dont l'app Windows).
  */
+const TWEET_MAX_CHARS_ULTRA = 2500;
 const TWEET_MAX_CHARS_SUBSCRIBER = 1000;
 const TWEET_MAX_CHARS_DEFAULT = 600;
 
@@ -38,6 +40,9 @@ async function resolveTweetCharLimit(tokenUser) {
     const user = await User.findByPk(tokenUser.id, {
       attributes: ['id', 'subscription_tier', 'subscription_expires_at']
     });
+    // Ultra d'abord : il satisfait aussi `isSubscriptionActive` et repartirait
+    // sinon avec la limite du palier en dessous.
+    if (isUltraActive(user)) return TWEET_MAX_CHARS_ULTRA;
     return isSubscriptionActive(user) ? TWEET_MAX_CHARS_SUBSCRIBER : TWEET_MAX_CHARS_DEFAULT;
   } catch (error) {
     // Un palier illisible ne doit pas offrir l'avantage payant : on retombe
@@ -60,6 +65,7 @@ async function assertTweetLength(value, { req }) {
 }
 
 module.exports = {
+  TWEET_MAX_CHARS_ULTRA,
   TWEET_MAX_CHARS_SUBSCRIBER,
   TWEET_MAX_CHARS_DEFAULT,
   resolveTweetCharLimit,

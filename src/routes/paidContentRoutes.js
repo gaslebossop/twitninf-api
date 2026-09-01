@@ -7,13 +7,14 @@ const {
   denySuspended,
 } = require('../middleware/authMiddleware');
 const paidContent = require('../services/paidContentService');
+const { ultraLimit } = require('../utils/ultraGate');
 const { InsufficientFundsError } = require('../economy/multiCurrencyPayment');
 const transactionAuthorizationService = require('../services/transactionAuthorizationService');
 const { PaidContent, ContentPurchase } = require('../models');
 const {
   PAID_CONTENT_MIN_PRICE_TWC,
   PAID_CONTENT_MAX_PRICE_TWC,
-  PLATFORM_CONTENT_FEE_RATE,
+  PAID_CONTENT_MAX_PRICE_TWC_ULTRA,
   PAID_CONTENT_PRICE_EDIT_WINDOW_MS,
 } = require('../constants/premiumMarket');
 const logger = require('../utils/logger');
@@ -90,15 +91,22 @@ function fail(res, error, fallback) {
   return res.status(500).json({ success: false, message: fallback });
 }
 
-/** GET /api/paid-content/config — bornes et commission, pour l'écran de vente. */
-router.get('/config', authenticateToken, (req, res) => {
+/**
+ * GET /api/paid-content/config — bornes et commission, pour l'écran de vente.
+ *
+ * La commission dépend du palier de celui qui demande (20 % pour un Ultra) et
+ * vient donc du service, qui est aussi celui qui la fige sur le verrou.
+ */
+router.get('/config', authenticateToken, async (req, res) => {
+  const feeRate = await paidContent.contentFeeRateFor(req.user.id);
+  const maxPrice = await ultraLimit(req.user, PAID_CONTENT_MAX_PRICE_TWC_ULTRA, PAID_CONTENT_MAX_PRICE_TWC);
   res.json({
     success: true,
     data: {
       min_price_twc: PAID_CONTENT_MIN_PRICE_TWC,
-      max_price_twc: PAID_CONTENT_MAX_PRICE_TWC,
-      platform_fee_rate: PLATFORM_CONTENT_FEE_RATE,
-      creator_share_rate: 1 - PLATFORM_CONTENT_FEE_RATE,
+      max_price_twc: maxPrice,
+      platform_fee_rate: feeRate,
+      creator_share_rate: 1 - feeRate,
       // Délai pendant lequel le prix reste ajustable après la mise en vente.
       price_edit_window_ms: PAID_CONTENT_PRICE_EDIT_WINDOW_MS,
     },

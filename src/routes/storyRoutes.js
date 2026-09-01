@@ -21,11 +21,29 @@ const { authenticateToken, denySuspended } = require('../middleware/authMiddlewa
 const { toDecodableBuffer } = require('../services/heifDecoder');
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
 const logger = require('../utils/logger');
+const { isUltraRequest, ultraLimit } = require('../utils/ultraGate');
 
 const STORY_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * Stories d'un compte Ultra : 48 heures à l'affiche, et 30 secondes de vidéo
+ * au lieu de 15.
+ *
+ * Les deux valeurs sont écrites SUR LA LIGNE au moment de la publication
+ * (`expires_at`, `duration_ms`), jamais recalculées à la lecture : aucune
+ * requête de fil n'a à connaître le palier de l'auteur, et une story publiée
+ * sous Ultra garde ses 48 heures même si l'abonnement s'arrête entre-temps —
+ * ce qui a été publié l'a été aux conditions du moment.
+ */
+const STORY_TTL_MS_ULTRA = 48 * 60 * 60 * 1000;
+const VIDEO_DURATION_MS_ULTRA = 30000;
 /** Durée de conservation après expiration : l'archive dans laquelle on pioche
  *  pour créer une « une ». Au-delà, une story non épinglée est purgée. */
 const ARCHIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+/** Ultra : un trimestre d'archive dans laquelle piocher pour ses « unes ». */
+const ARCHIVE_WINDOW_MS_ULTRA = 90 * 24 * 60 * 60 * 1000;
+/** Légende d'une story. Ultra en écrit près du double. */
+const CAPTION_MAX = 280;
+const CAPTION_MAX_ULTRA = 500;
 const IMAGE_DURATION_MS = 5000;
 const VIDEO_DURATION_MS = 15000;
 const STORIES_DIR = path.join(__dirname, '../public/stories');
@@ -302,12 +320,13 @@ router.get('/user/:userId', authenticateToken, async (req, res) => {
 
 /**
  * GET /api/stories/archive
- * Mes stories des 30 derniers jours, expirées comprises : c'est la réserve
- * dans laquelle on pioche pour composer une « une ».
+ * Mes stories récentes, expirées comprises : c'est la réserve dans laquelle
+ * on pioche pour composer une « une ». 30 jours, 90 pour un Ultra.
  */
 router.get('/archive', authenticateToken, async (req, res) => {
   try {
-    const since = new Date(Date.now() - ARCHIVE_WINDOW_MS);
+    const window = await ultraLimit(req.user, ARCHIVE_WINDOW_MS_ULTRA, ARCHIVE_WINDOW_MS);
+    const since = new Date(Date.now() - window);
     const stories = await Story.findAll({
       where: { user_id: req.user.id, created_at: { [Op.gt]: since } },
       order: [['created_at', 'DESC']],
@@ -549,7 +568,11 @@ router.post('/', [authenticateToken, denySuspended, upload.single('media')], asy
     }
 
     const mediaUrl = buildStaticMediaPublicUrl('stories', filename);
-    const caption = typeof req.body?.caption === 'string' ? req.body.caption.trim().slice(0, 280) : null;
+    const isUltra = await isUltraRequest(req.user);
+    const captionMax = isUltra ? CAPTION_MAX_ULTRA : CAPTION_MAX;
+    const caption = typeof req.body?.caption === 'string'
+      ? req.body.caption.trim().slice(0, captionMax)
+      : null;
 
     const story = await Story.create({
       user_id: userId,
@@ -557,8 +580,10 @@ router.post('/', [authenticateToken, denySuspended, upload.single('media')], asy
       media_type: isVideo ? 'video' : 'image',
       thumbnail_url: isVideo ? null : mediaUrl,
       caption: caption || null,
-      duration_ms: isVideo ? VIDEO_DURATION_MS : IMAGE_DURATION_MS,
-      expires_at: new Date(Date.now() + STORY_TTL_MS)
+      duration_ms: isVideo
+        ? (isUltra ? VIDEO_DURATION_MS_ULTRA : VIDEO_DURATION_MS)
+        : IMAGE_DURATION_MS,
+      expires_at: new Date(Date.now() + (isUltra ? STORY_TTL_MS_ULTRA : STORY_TTL_MS))
     });
 
     const author = await User.findByPk(userId, { attributes: AUTHOR_ATTRIBUTES });
@@ -769,7 +794,12 @@ router.delete('/:storyId', authenticateToken, async (req, res) => {
  */
 async function purgeExpiredStories() {
   try {
+    // Deux échéances, parce que l'archive n'a pas la même profondeur selon le
+    // palier de l'AUTEUR. Purger tout à 30 jours viderait la réserve qu'un
+    // Ultra a le droit de relire pendant 90 — l'avantage n'aurait alors
+    // aucune existence réelle, juste une ligne d'argumentaire.
     const cutoff = new Date(Date.now() - ARCHIVE_WINDOW_MS);
+    const ultraCutoff = new Date(Date.now() - ARCHIVE_WINDOW_MS_ULTRA);
 
     // AUDIT R3-10 (2026-08-19) : la table des épinglages ne fait QUE croître
     // (une story épinglée n'est jamais supprimée) et était chargée en
@@ -780,10 +810,26 @@ async function purgeExpiredStories() {
     // EXISTS` transforme ça en anti-jointure indexée, de taille constante.
     const expired = await Story.findAll({
       where: {
-        expires_at: { [Op.lt]: cutoff },
         id: {
           [Op.notIn]: literal('(SELECT story_id FROM story_highlight_items)')
-        }
+        },
+        [Op.or]: [
+          // Au-delà de la fenêtre la plus longue, plus personne n'y a droit.
+          { expires_at: { [Op.lt]: ultraCutoff } },
+          // Entre les deux : on ne supprime que ce qui n'appartient pas à un
+          // Ultra ENCORE abonné. Le sous-select rejoue `isUltraActive` en SQL
+          // — la purge tourne sans requête HTTP, elle n'a pas de `req.user`.
+          {
+            expires_at: { [Op.lt]: cutoff },
+            user_id: {
+              [Op.notIn]: literal(
+                `(SELECT id FROM users
+                   WHERE subscription_tier = 'ultra'
+                     AND (subscription_expires_at IS NULL OR subscription_expires_at > NOW()))`
+              )
+            }
+          }
+        ]
       },
       paranoid: false,
       limit: 500

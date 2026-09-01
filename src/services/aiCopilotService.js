@@ -14,24 +14,35 @@
  */
 
 const codex = require('./codexTextClient');
+const { isUltraRequest } = require('../utils/ultraGate');
+const { TWEET_MAX_CHARS_ULTRA } = require('../utils/tweetLimits');
 
 /** Au-delà, ce n'est plus une aide à l'écriture mais un générateur de contenu. */
 const MAX_CALLS_PER_WINDOW = 12;
+/** Ultra écrit plus, et reformule plus : cinq fois la cadence. */
+const MAX_CALLS_PER_WINDOW_ULTRA = 60;
 const RATE_WINDOW_MS = 5 * 60 * 1000;
 /** Le co-pilote travaille sur un brouillon, pas sur un roman. */
 const MAX_INPUT_CHARS = 1200;
+/**
+ * Le brouillon d'un Ultra peut faire `TWEET_MAX_CHARS_ULTRA` : un plafond
+ * d'entrée plus bas que la longueur de tweet qu'on lui vend rendrait le
+ * co-pilote inutilisable pile sur les textes où il sert le plus. La marge
+ * au-dessus laisse la place à un brouillon qu'on compte justement raccourcir.
+ */
+const MAX_INPUT_CHARS_ULTRA = TWEET_MAX_CHARS_ULTRA + 500;
 
 /** userId -> { count, resetAt }. En mémoire : un redémarrage remet à zéro, sans gravité. */
 const rateState = new Map();
 
-function checkRate(userId) {
+function checkRate(userId, maxCalls = MAX_CALLS_PER_WINDOW) {
   const now = Date.now();
   const entry = rateState.get(userId);
   if (!entry || now > entry.resetAt) {
     rateState.set(userId, { count: 1, resetAt: now + RATE_WINDOW_MS });
-    return { allowed: true, remaining: MAX_CALLS_PER_WINDOW - 1 };
+    return { allowed: true, remaining: maxCalls - 1 };
   }
-  if (entry.count >= MAX_CALLS_PER_WINDOW) {
+  if (entry.count >= maxCalls) {
     return {
       allowed: false,
       remaining: 0,
@@ -39,7 +50,22 @@ function checkRate(userId) {
     };
   }
   entry.count += 1;
-  return { allowed: true, remaining: MAX_CALLS_PER_WINDOW - entry.count };
+  return { allowed: true, remaining: maxCalls - entry.count };
+}
+
+/**
+ * Cadence et taille d'entrée du co-pilote, selon le palier.
+ *
+ * Les deux bougent ENSEMBLE : relever la cadence sans la taille laisserait un
+ * Ultra faire soixante appels sur un brouillon qu'il ne peut de toute façon
+ * pas soumettre en entier.
+ */
+async function copilotLimitsFor(userId) {
+  const ultra = await isUltraRequest({ id: userId });
+  return {
+    maxCalls: ultra ? MAX_CALLS_PER_WINDOW_ULTRA : MAX_CALLS_PER_WINDOW,
+    maxInputChars: ultra ? MAX_INPUT_CHARS_ULTRA : MAX_INPUT_CHARS,
+  };
 }
 
 const { generateText, parseJsonLoose } = codex;
@@ -115,7 +141,8 @@ async function suggest({ userId, content, mode = 'rewrite', maxChars = 1000 }) {
   if (!text) {
     return { success: false, error: 'empty_content', message: 'Écris quelque chose d\'abord.' };
   }
-  if (text.length > MAX_INPUT_CHARS) {
+  const limits = await copilotLimitsFor(userId);
+  if (text.length > limits.maxInputChars) {
     return { success: false, error: 'content_too_long', message: 'Brouillon trop long pour le co-pilote.' };
   }
 
@@ -124,7 +151,7 @@ async function suggest({ userId, content, mode = 'rewrite', maxChars = 1000 }) {
     return { success: false, error: 'unknown_mode', message: 'Mode de suggestion inconnu.' };
   }
 
-  const rate = checkRate(userId);
+  const rate = checkRate(userId, limits.maxCalls);
   if (!rate.allowed) {
     return {
       success: false,
@@ -193,11 +220,12 @@ async function review({ userId, content }) {
   if (!text) {
     return { success: false, error: 'empty_content', message: 'Écris quelque chose d\'abord.' };
   }
-  if (text.length > MAX_INPUT_CHARS) {
+  const limits = await copilotLimitsFor(userId);
+  if (text.length > limits.maxInputChars) {
     return { success: false, error: 'content_too_long', message: 'Brouillon trop long pour le co-pilote.' };
   }
 
-  const rate = checkRate(userId);
+  const rate = checkRate(userId, limits.maxCalls);
   if (!rate.allowed) {
     return {
       success: false,

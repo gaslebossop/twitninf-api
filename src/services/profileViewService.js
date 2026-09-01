@@ -5,6 +5,7 @@ const { isSubscriptionActive } = require('../utils/subscriptionHelpers');
 const {
   PROFILE_VIEW_RETENTION_DAYS,
   PROFILE_VIEW_WINDOW_DAYS,
+  PROFILE_VIEW_WINDOW_DAYS_ULTRA,
 } = require('../constants/premiumMarket');
 const logger = require('../utils/logger');
 
@@ -110,14 +111,33 @@ async function record({ profileId, viewerId }) {
 }
 
 /**
- * Visiteurs des sept derniers jours.
+ * Profondeur d'historique consultable, par palier : 7 jours, 30 pour Ultra.
+ *
+ * Ce n'est PAS un plafond de rétention — les visites sont gardées
+ * `PROFILE_VIEW_RETENTION_DAYS` pour tout le monde, et rien de plus n'est
+ * collecté. L'avantage Ultra est de pouvoir lire jusqu'au bout de ce qui
+ * existe déjà.
+ */
+function maxWindowDaysFor(isUltra) {
+  return isUltra ? PROFILE_VIEW_WINDOW_DAYS_ULTRA : PROFILE_VIEW_WINDOW_DAYS;
+}
+
+/**
+ * Visiteurs récents.
  *
  * Les visiteurs discrets sont comptés dans le total mais jamais nommés :
  * l'abonné voit « 12 visiteurs, dont 3 en navigation discrète », ce qui est
  * honnête sans trahir personne.
+ *
+ * `maxDays` est la borne du PALIER, résolue par l'appelant (qui seul connaît
+ * l'abonné) ; `days` n'est qu'une demande du client. La borne était auparavant
+ * un `30` en dur ici, si bien que n'importe quel abonné pouvait demander
+ * `?days=30` et obtenir le mois complet : les sept jours annoncés n'étaient
+ * qu'une valeur par défaut, jamais une limite.
  */
-async function listFor(profileId, { days = PROFILE_VIEW_WINDOW_DAYS } = {}) {
-  const window = Math.min(Math.max(parseInt(days, 10) || PROFILE_VIEW_WINDOW_DAYS, 1), 30);
+async function listFor(profileId, { days, maxDays = PROFILE_VIEW_WINDOW_DAYS } = {}) {
+  const cap = Math.min(Math.max(parseInt(maxDays, 10) || PROFILE_VIEW_WINDOW_DAYS, 1), PROFILE_VIEW_WINDOW_DAYS_ULTRA);
+  const window = Math.min(Math.max(parseInt(days, 10) || cap, 1), cap);
   const since = dayKey(new Date(Date.now() - window * 86400000));
 
   const rows = await ProfileView.findAll({
@@ -167,8 +187,9 @@ async function listFor(profileId, { days = PROFILE_VIEW_WINDOW_DAYS } = {}) {
 }
 
 /** Compteur seul — pour la pastille, sans charger la liste. */
-async function countFor(profileId, { days = PROFILE_VIEW_WINDOW_DAYS } = {}) {
-  const window = Math.min(Math.max(parseInt(days, 10) || PROFILE_VIEW_WINDOW_DAYS, 1), 30);
+async function countFor(profileId, { days, maxDays = PROFILE_VIEW_WINDOW_DAYS } = {}) {
+  const cap = Math.min(Math.max(parseInt(maxDays, 10) || PROFILE_VIEW_WINDOW_DAYS, 1), PROFILE_VIEW_WINDOW_DAYS_ULTRA);
+  const window = Math.min(Math.max(parseInt(days, 10) || cap, 1), cap);
   const since = dayKey(new Date(Date.now() - window * 86400000));
   const [row] = await sequelize.query(`
     SELECT COUNT(DISTINCT viewer_id)::int AS visitors
@@ -200,4 +221,6 @@ module.exports = {
   setIncognito,
   purgeOld,
   PROFILE_VIEW_WINDOW_DAYS,
+  PROFILE_VIEW_WINDOW_DAYS_ULTRA,
+  maxWindowDaysFor,
 };

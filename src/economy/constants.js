@@ -46,6 +46,23 @@ const P2P_TRANSFER_FEE_RATE = 0.20;
 const P2P_TRANSFER_FEE_RATE_SUBSCRIBER = 0.10;
 
 /**
+ * Virements sans commission — palier Ultra.
+ *
+ * Zéro, et pas « très bas » : un taux résiduel n'aurait pas d'argument
+ * (« presque gratuit » ne se vend pas), et il obligerait quand même à écrire
+ * la ligne de frais au grand livre pour un montant dérisoire.
+ *
+ * L'abus tient tout seul par l'arithmétique : Ultra coûte 300 NF pour
+ * `DEFAULT_DURATION_DAYS`, donc la gratuité ne devient rentable qu'au-delà de
+ * 3 000 NF virés sur la période (300 / 0,10, le taux abonné qu'on remplace).
+ * Personne n'achète le palier le plus cher pour déplacer moins que ça, et
+ * au-dessus le compte est de toute façon dans le champ de l'anti-fraude, que
+ * cet avantage ne désarme PAS : la gratuité porte sur la commission, jamais
+ * sur l'autorisation du virement (voir `transactionAuthorizationService`).
+ */
+const P2P_TRANSFER_FEE_RATE_ULTRA = 0;
+
+/**
  * Minage (app Windows) : preuve de travail partagée entre tous les mineurs
  * (premier arrivé, premier servi), seule source de création monétaire non
  * adossée à un achat réel. Récompense = base × 4^(difficulté − 4).
@@ -137,6 +154,7 @@ module.exports = {
   MIN_REWARD_TWC,
   P2P_TRANSFER_FEE_RATE,
   P2P_TRANSFER_FEE_RATE_SUBSCRIBER,
+  P2P_TRANSFER_FEE_RATE_ULTRA,
   MINING_BASE_REWARD_TWC,
   MINING_DAILY_WIN_LIMIT,
   MINING_DILUTION_PER_BASE_REWARD,

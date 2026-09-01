@@ -42,6 +42,8 @@ fs.mkdirSync(TWEET_IMAGES_DIR, { recursive: true });
 
 /** Même plafond que le modèle `Tweet` (`media_urls` : 4 maximum). */
 const MAX_IMAGES_PER_TWEET = 4;
+/** Ultra : deux rangees de quatre au lieu d'une. */
+const MAX_IMAGES_PER_TWEET_ULTRA = 8;
 
 /**
  * Assez grand pour rester net sur un écran de téléphone à densité 3x affiché
@@ -49,8 +51,27 @@ const MAX_IMAGES_PER_TWEET = 4;
  */
 const MAX_DIMENSION = 1600;
 const JPEG_QUALITY = 90;
+/**
+ * Ultra : 2 560 px de côté et une compression plus douce.
+ *
+ * C'est le seul avantage de la liste qui se voit sur l'écran de QUELQU'UN
+ * D'AUTRE — un lecteur qui zoome sur la photo d'un Ultra voit réellement plus
+ * de détail. Le coût est du disque, pas du calcul : `sharp` recompresse de
+ * toute façon.
+ */
+const MAX_DIMENSION_ULTRA = 2560;
+const JPEG_QUALITY_ULTRA = 95;
 
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+/**
+ * Ultra televerse jusqu'a 50 Mo par fichier.
+ *
+ * La borne protege le disque et la duree de traitement, pas la mise en page :
+ * l'image est de toute facon recompressee apres reception. La monter pour le
+ * palier qui publie le plus de photos brutes (donc de sorties d'appareil) est
+ * le seul endroit ou elle gene reellement.
+ */
+const MAX_UPLOAD_BYTES_ULTRA = 50 * 1024 * 1024;
 
 /** Formats acceptés à l'entrée. Tout ressort en JPEG. */
 const ACCEPTED_MIME = /^image\/(jpe?g|png|webp|heic|heif|gif)$/i;
@@ -67,7 +88,9 @@ function isAcceptedMimetype(mimetype) {
  *
  * @returns {Promise<string>} URL publique absolue à stocker dans `media_urls`.
  */
-async function storeUploadedImage(buffer, userId) {
+async function storeUploadedImage(buffer, userId, { isUltra = false } = {}) {
+  const dimension = isUltra ? MAX_DIMENSION_ULTRA : MAX_DIMENSION;
+  const quality = isUltra ? JPEG_QUALITY_ULTRA : JPEG_QUALITY;
   const filename = `tweet-${userId}-${Date.now()}-${uuidv4().slice(0, 8)}.jpg`;
   const outputPath = path.join(TWEET_IMAGES_DIR, filename);
 
@@ -78,8 +101,8 @@ async function storeUploadedImage(buffer, userId) {
 
   await sharp(decodable)
     .rotate()
-    .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true })
-    .jpeg({ quality: JPEG_QUALITY, mozjpeg: true })
+    .resize(dimension, dimension, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality, mozjpeg: true })
     .toFile(outputPath);
 
   return buildStaticMediaPublicUrl('tweets', filename);
@@ -95,9 +118,10 @@ async function storeUploadedImage(buffer, userId) {
  * servirait qu'à chercher la limite.
  *
  * @param {unknown} mediaUrls Ce que le client a envoyé.
- * @returns {string[]} URLs retenues, au plus `MAX_IMAGES_PER_TWEET`.
+ * @param {{maxImages?: number}} [options] Plafond du palier de l'auteur.
+ * @returns {string[]} URLs retenues, au plus `maxImages`.
  */
-function sanitizeMediaUrls(mediaUrls) {
+function sanitizeMediaUrls(mediaUrls, { maxImages = MAX_IMAGES_PER_TWEET } = {}) {
   if (!Array.isArray(mediaUrls)) return [];
 
   const prefix = `${getPublicMediaOrigin().replace(/\/$/, '')}/static/tweets/`;
@@ -109,14 +133,17 @@ function sanitizeMediaUrls(mediaUrls) {
     // Un `..` dans le nom de fichier remonterait hors du dossier servi.
     .filter((url) => !url.slice(prefix.length).includes('/'))
     .filter((url) => !url.includes('..'))
-    .slice(0, MAX_IMAGES_PER_TWEET);
+    .slice(0, maxImages);
 }
 
 module.exports = {
   TWEET_IMAGES_DIR,
   MAX_IMAGES_PER_TWEET,
+  MAX_IMAGES_PER_TWEET_ULTRA,
   MAX_UPLOAD_BYTES,
+  MAX_UPLOAD_BYTES_ULTRA,
   MAX_DIMENSION,
+  MAX_DIMENSION_ULTRA,
   isAcceptedMimetype,
   storeUploadedImage,
   sanitizeMediaUrls,

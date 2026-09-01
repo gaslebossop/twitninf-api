@@ -13,9 +13,13 @@ const {
   USERNAME_MAX_PRICE_TWC,
   USERNAME_RESERVATION_PRICE_TWC,
   USERNAME_RESERVATION_DAYS,
+  USERNAME_RESERVATION_DAYS_ULTRA,
   USERNAME_RESERVATION_MAX_PER_USER,
+  USERNAME_RESERVATION_MAX_PER_USER_ULTRA,
   PLATFORM_USERNAME_FEE_RATE,
+  PLATFORM_USERNAME_FEE_RATE_ULTRA,
 } = require('../constants/premiumMarket');
+const { isUltraRequest } = require('../utils/ultraGate');
 const logger = require('../utils/logger');
 
 /**
@@ -69,18 +73,29 @@ function fail(res, error, fallback) {
   return res.status(500).json({ success: false, message: fallback });
 }
 
-/** GET /api/username-market/config */
-router.get('/config', authenticateToken, (req, res) => {
+/**
+ * GET /api/username-market/config
+ *
+ * Deux valeurs dépendent du palier de CELUI QUI DEMANDE : le nombre de
+ * réservations simultanées et la commission de vente. L'écran affiche
+ * « tu gardes 80 % » à un Ultra et « 70 % » aux autres — les deux sont
+ * ensuite re-résolues à l'écriture, cette route ne fait qu'annoncer.
+ */
+router.get('/config', authenticateToken, async (req, res) => {
+  const ultra = await isUltraRequest(req.user);
+  const feeRate = ultra ? PLATFORM_USERNAME_FEE_RATE_ULTRA : PLATFORM_USERNAME_FEE_RATE;
   res.json({
     success: true,
     data: {
       min_price_twc: USERNAME_MIN_PRICE_TWC,
       max_price_twc: USERNAME_MAX_PRICE_TWC,
       reservation_price_twc: USERNAME_RESERVATION_PRICE_TWC,
-      reservation_days: USERNAME_RESERVATION_DAYS,
-      reservation_max_per_user: USERNAME_RESERVATION_MAX_PER_USER,
-      platform_fee_rate: PLATFORM_USERNAME_FEE_RATE,
-      seller_share_rate: 1 - PLATFORM_USERNAME_FEE_RATE,
+      reservation_days: ultra ? USERNAME_RESERVATION_DAYS_ULTRA : USERNAME_RESERVATION_DAYS,
+      reservation_max_per_user: ultra
+        ? USERNAME_RESERVATION_MAX_PER_USER_ULTRA
+        : USERNAME_RESERVATION_MAX_PER_USER,
+      platform_fee_rate: feeRate,
+      seller_share_rate: 1 - feeRate,
     },
   });
 });

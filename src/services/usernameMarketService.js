@@ -11,13 +11,18 @@ const { EconomyLedger, roundTWC, toAmount } = require('../economy');
 const { getPlatformCurrency } = require('../economy/platformCurrency');
 const {
   PLATFORM_USERNAME_FEE_RATE,
+  PLATFORM_USERNAME_FEE_RATE_ULTRA,
   USERNAME_MIN_PRICE_TWC,
   USERNAME_MAX_PRICE_TWC,
   USERNAME_RESERVATION_PRICE_TWC,
   USERNAME_RESERVATION_DAYS,
+  USERNAME_RESERVATION_DAYS_ULTRA,
   USERNAME_RESERVATION_MAX_PER_USER,
+  USERNAME_RESERVATION_MAX_PER_USER_ULTRA,
 } = require('../constants/premiumMarket');
 const logger = require('../utils/logger');
+const { ultraLimit, isUltraRequest } = require('../utils/ultraGate');
+const { isUltraActive } = require('../utils/subscriptionHelpers');
 
 /**
  * Marché des noms d'utilisateur : réserver, vendre, acheter.
@@ -156,9 +161,22 @@ async function reserve({ userId, username }) {
       },
       transaction: t,
     });
-    if (active >= USERNAME_RESERVATION_MAX_PER_USER) {
+    // Le plafond dépend du palier : 20 réservations simultanées pour un
+    // Ultra, 5 pour les autres. Relu dans la MÊME transaction que le comptage,
+    // sinon deux réservations concurrentes pourraient chacune voir la place
+    // que l'autre est en train de prendre.
+    // Un seul test de palier pour les deux bornes qui en dependent : combien
+    // de pseudos tenus en reserve, et combien de temps chacun.
+    const ultra = await isUltraRequest({ id: userId }, t);
+    const maxReservations = ultra
+      ? USERNAME_RESERVATION_MAX_PER_USER_ULTRA
+      : USERNAME_RESERVATION_MAX_PER_USER;
+    const reservationDays = ultra
+      ? USERNAME_RESERVATION_DAYS_ULTRA
+      : USERNAME_RESERVATION_DAYS;
+    if (active >= maxReservations) {
       throw new UsernameMarketError(
-        `Tu as déjà ${USERNAME_RESERVATION_MAX_PER_USER} pseudos réservés.`,
+        `Tu as déjà ${maxReservations} pseudos réservés.`,
         'limit_reached',
       );
     }
@@ -186,7 +204,7 @@ async function reserve({ userId, username }) {
       origin: 'purchase',
       price_twc: USERNAME_RESERVATION_PRICE_TWC,
       spend_transaction_id: spend?.tx?.id || null,
-      expires_at: new Date(Date.now() + USERNAME_RESERVATION_DAYS * 86400000),
+      expires_at: new Date(Date.now() + reservationDays * 86400000),
     }, { transaction: t });
   });
 }
@@ -392,7 +410,13 @@ async function buyListing({ buyerId, listingId }) {
     }
 
     const price = toAmount(listing.price_twc);
-    const fee = roundTWC(price * PLATFORM_USERNAME_FEE_RATE);
+    // La commission est prélevée sur ce que touche le VENDEUR : c'est donc son
+    // palier à lui qui la fixe, pas celui de l'acheteur. `seller` est déjà
+    // verrouillé et chargé en entier ci-dessus — pas de requête de plus.
+    const feeRate = isUltraActive(seller)
+      ? PLATFORM_USERNAME_FEE_RATE_ULTRA
+      : PLATFORM_USERNAME_FEE_RATE;
+    const fee = roundTWC(price * feeRate);
     const net = roundTWC(price - fee);
 
     const spend = await EconomyLedger.spendToTreasury(
@@ -461,7 +485,7 @@ async function buyListing({ buyerId, listingId }) {
       price_twc: price,
       platform_fee_twc: fee,
       seller_net_twc: net,
-      platform_fee_rate: PLATFORM_USERNAME_FEE_RATE,
+      platform_fee_rate: feeRate,
       spend_transaction_id: spend?.tx?.id || null,
       payout_transaction_id: payoutTxId,
     }, { transaction: t });
@@ -575,10 +599,14 @@ async function myMarket(userId) {
     UsernameSale.findAll({ where: { seller_id: userId }, order: [['created_at', 'DESC']], limit: 20 }),
   ]);
 
+  // Ces trois valeurs sont ce que l'écran AFFICHE ; elles doivent donc être
+  // celles que l'écriture appliquera, pas les valeurs communes.
+  const ultra = await isUltraRequest({ id: userId });
+
   return {
-    fee_rate: PLATFORM_USERNAME_FEE_RATE,
+    fee_rate: ultra ? PLATFORM_USERNAME_FEE_RATE_ULTRA : PLATFORM_USERNAME_FEE_RATE,
     reservation_price_twc: USERNAME_RESERVATION_PRICE_TWC,
-    reservation_days: USERNAME_RESERVATION_DAYS,
+    reservation_days: ultra ? USERNAME_RESERVATION_DAYS_ULTRA : USERNAME_RESERVATION_DAYS,
     listings: listings.map((l) => ({
       id: l.id,
       username: l.username,

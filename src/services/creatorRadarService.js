@@ -3,10 +3,12 @@ const { sequelize } = require('../database/index');
 const { queryRead } = require('../database/readReplica');
 const {
   VELOCITY_ALERT_MULTIPLIER,
+  VELOCITY_ALERT_MULTIPLIER_ULTRA,
   VELOCITY_ALERT_MIN_ENGAGEMENTS,
   VELOCITY_ALERT_MAX_TWEET_AGE_MS,
 } = require('../constants/premiumMarket');
 const logger = require('../utils/logger');
+const { ultraLimit } = require('../utils/ultraGate');
 
 /**
  * Deux avantages abonné qui partagent le même matériau — la vitesse.
@@ -474,7 +476,14 @@ async function scanVelocity({ limit = 300 } = {}) {
       // Les deux termes sont des engagements sur une même durée de vie :
       // le rapport est enfin homogène.
       const ratio = Number(row.engagements) / baseline;
-      if (ratio < VELOCITY_ALERT_MULTIPLIER) continue;
+      // Seuil résolu PAR AUTEUR : un Ultra est prévenu au double, les autres
+      // au triple. Le balayage traite plusieurs auteurs dans la même passe.
+      const threshold = await ultraLimit(
+        { id: row.user_id },
+        VELOCITY_ALERT_MULTIPLIER_ULTRA,
+        VELOCITY_ALERT_MULTIPLIER,
+      );
+      if (ratio < threshold) continue;
 
       await TweetVelocityAlert.create({
         tweet_id: row.id,
