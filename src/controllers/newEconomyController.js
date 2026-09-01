@@ -146,7 +146,7 @@ class NewEconomyController {
         message: 'Dépense effectuée avec succès'
       });
     } catch (error) {
-      logger.error('Erreur lors de la dépense:', error);
+      logger.caught('Erreur lors de la dépense:', error);
       if (sendRiskError(res, error)) return;
       res.status(500).json({
         success: false,

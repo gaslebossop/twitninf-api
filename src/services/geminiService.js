@@ -138,10 +138,10 @@ async function evaluateTweetForRecommendations({ content, authorUsername, isRepl
       // Nettoyage du texte pour extraire le JSON
       text = text.trim();
       
-      // LOG COMPLET DE LA RÉPONSE GEMINI
-      logger.info(`🔍 RÉPONSE COMPLÈTE GEMINI pour tweet "${content.substring(0, 50)}..." :`);
-      logger.info(`📝 Texte brut: ${text}`);
-      logger.info(`📏 Longueur du texte: ${text.length}`);
+      // Trace détaillée en `debug` seulement : en `info`, elle recopiait le
+      // contenu de CHAQUE tweet évalué dans les logs — verbeux et inutile en
+      // exploitation normale.
+      logger.debug(`Évaluation tweet "${content.substring(0, 50)}..." → ${text.length} car.`);
       
       // Vérifier si le texte contient des caractères JSON
       if (!text.includes('{') || !text.includes('}')) {

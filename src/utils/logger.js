@@ -45,4 +45,23 @@ const logger = winston.createLogger({
   exitOnError: false
 });
 
+/**
+ * Journalise une erreur ATTRAPÉE au bon niveau. Une condition métier ATTENDUE
+ * — anti-fraude 409 (« transaction déjà exécutée », « en cours de vérification »,
+ * rejeu), ou toute erreur porteuse d'un statut 4xx — part en `warn`, pas en
+ * `error` : elle est déjà renvoyée au client sous forme de 4xx propre et n'a
+ * rien à faire dans le flux d'erreurs serveur, qu'elle noyait (des centaines
+ * d'entrées « ❌ … déjà été exécutée »). Une vraie panne (5xx, exception
+ * inattendue) reste en `error`, avec sa pile.
+ */
+logger.caught = function caught(prefix, error) {
+  const status = error?.httpStatus ?? error?.status;
+  const expected = error?.name === 'TransactionRiskError' || (status >= 400 && status < 500);
+  if (expected) {
+    logger.warn(`${prefix} (attendu): ${error?.message || error}`);
+  } else {
+    logger.error(prefix, error);
+  }
+};
+
 module.exports = logger;

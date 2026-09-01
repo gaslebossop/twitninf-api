@@ -276,7 +276,7 @@ async function handleSubscriptionPurchase(req, res, explicitTier) {
         transaction
       );
     } catch (spendError) {
-      logger.error('❌ [SUB] Erreur transaction NF:', spendError);
+      logger.caught('❌ [SUB] Erreur transaction NF:', spendError);
       await transaction.rollback();
       const isRiskError = transactionAuthorizationService.constructor.isRiskError(spendError);
       return res.status(isRiskError ? spendError.httpStatus : 500).json({
@@ -435,7 +435,7 @@ async function handleUltraPurchase(req, res) {
         userId, currencyId, price, 'subscription_purchase', itemId, description, transaction
       );
     } catch (spendError) {
-      logger.error('❌ [SUB] Erreur transaction NF (Ultra):', spendError);
+      logger.caught('❌ [SUB] Erreur transaction NF (Ultra):', spendError);
       await transaction.rollback();
       const isRiskError = transactionAuthorizationService.constructor.isRiskError(spendError);
       return res.status(isRiskError ? spendError.httpStatus : 500).json({

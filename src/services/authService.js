@@ -186,7 +186,11 @@ class AuthService {
     try {
       return jwt.verify(token, config.jwt.secret);
     } catch (error) {
-      logger.error('Erreur de vérification du token:', error);
+      // Un jeton invalide ou expiré est une condition CLIENT (jeton périmé,
+      // tronqué, forgé), pas une erreur serveur : la journaliser en `error`
+      // avec sa pile noyait le flux d'erreurs (des centaines d'entrées). En
+      // `warn`, sans pile, avec juste le motif.
+      logger.warn(`Jeton refusé (${error.name}: ${error.message})`);
       return null;
     }
   }

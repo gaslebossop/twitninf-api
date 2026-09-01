@@ -235,7 +235,7 @@ class NewEconomyService {
       };
     } catch (error) {
       if (shouldCommit) await dbTransaction.rollback();
-      logger.error('Erreur dépense TWC:', error);
+      logger.caught('Erreur dépense TWC:', error);
       throw error;
     }
   }

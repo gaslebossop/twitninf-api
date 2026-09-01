@@ -426,7 +426,7 @@ class AdService {
         );
         logger.info(`💰 ${advertisement.cost_per_impression} NF débités pour l'impression de la publicité ${advertisementId}`);
       } catch (paymentError) {
-        logger.error('❌ Erreur lors du paiement de l\'impression:', paymentError);
+        logger.caught('❌ Erreur lors du paiement de l\'impression:', paymentError);
         // Ne pas faire échouer l'impression si le paiement échoue
       }
 
@@ -482,7 +482,7 @@ class AdService {
         );
         logger.info(`💰 ${advertisement.cost_per_click} NF débités pour le clic de la publicité ${advertisementId}`);
       } catch (paymentError) {
-        logger.error('❌ Erreur lors du paiement du clic:', paymentError);
+        logger.caught('❌ Erreur lors du paiement du clic:', paymentError);
         // Ne pas faire échouer le clic si le paiement échoue
       }
 
@@ -541,7 +541,7 @@ class AdService {
           );
           logger.info(`💰 ${advertisement.cost_per_engagement} NF débités pour l'engagement ${engagementType} de la publicité ${advertisementId}`);
         } catch (paymentError) {
-          logger.error('❌ Erreur lors du paiement de l\'engagement:', paymentError);
+          logger.caught('❌ Erreur lors du paiement de l\'engagement:', paymentError);
           // Ne pas faire échouer l'engagement si le paiement échoue
         }
       }
