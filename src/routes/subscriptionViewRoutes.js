@@ -81,7 +81,21 @@ router.get('/view', (req, res) => {
 
   res.set('Content-Security-Policy', CSP);
   res.set('X-Content-Type-Options', 'nosniff');
-  res.set('Cache-Control', 'public, max-age=300');
+  /*
+   * `no-cache` : revalidation a CHAQUE ouverture.
+   *
+   * Ce fichier ne pese rien (moins d'un kilo-octet) et son seul role est de
+   * DESIGNER les fichiers haches. Mais ces fichiers-la sont en cache pour un
+   * an : un `index.html` perime pointe donc indefiniment vers un bundle
+   * perime, et fige la page entiere. Constate en conditions reelles — une
+   * correction deployee sur les deux VPS, et l'appareil affichait toujours la
+   * version d'avant.
+   *
+   * `no-cache` ne veut pas dire « ne pas garder » mais « ne pas servir sans
+   * demander » : la reponse 304 coute quelques octets, et c'est le prix pour
+   * qu'un deploiement soit visible tout de suite.
+   */
+  res.set('Cache-Control', 'no-cache');
   return res.sendFile(INDEX_FILE);
 });
 
