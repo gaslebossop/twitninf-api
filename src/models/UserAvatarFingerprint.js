@@ -98,6 +98,22 @@ const userAvatarFingerprintSchema = {
       allowNull: true,
     },
 
+    /**
+     * Vecteur SEMANTIQUE DINOv2 (384-D, normalise L2), en base64 des octets
+     * Float32 (~2 Ko). C'est lui qui attrape le MEME sujet rephotographie ou
+     * remis dans un autre cadre — la ou la pyramide dHash decroche (distance de
+     * Hamming >= 12). Compare par similarite cosinus (= produit scalaire, les
+     * vecteurs etant normalises). Voir `avatarEmbedding.js`.
+     *
+     * Colonne ajoutee par DDL explicite sur les deux VPS : `syncDatabase()`
+     * tourne en `alter: false` et n'ajoute jamais une colonne (voir la note
+     * DDL du service). `null` tant que non calcule (migration douce).
+     */
+    embedding: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+
     /** L'image existe mais n'a pas pu etre lue. Evite de la retenter sans fin. */
     unreadable: {
       type: DataTypes.BOOLEAN,

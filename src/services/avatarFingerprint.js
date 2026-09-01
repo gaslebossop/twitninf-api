@@ -425,6 +425,7 @@ function likelyCroppedCopy(a, b) {
 
 module.exports = {
   fingerprintAvatar,
+  readImageBuffer,
   bandsOf,
   pyramidDistance,
   sameSubject,

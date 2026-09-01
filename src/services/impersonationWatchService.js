@@ -11,7 +11,14 @@ const {
   IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS_ULTRA,
 } = require('../constants/premiumMarket');
 const avatarFingerprint = require('./avatarFingerprint');
+const avatarEmbedding = require('./avatarEmbedding');
 const signals = require('./impersonationSignals');
+
+// Seuil de similarite cosinus DINOv2 au-dela duquel deux avatars montrent le
+// MEME sujet. Mesure sur la base reelle : usurpateur 0,957 ; paires distinctes
+// <= 0,29. Un seuil a 0,60 laisse une marge enorme des deux cotes. Reglable
+// pour recalibrer quand la base grossit, sans redeploiement.
+const EMBED_MIN_COSINE = Number(process.env.IMPERSONATION_EMBED_MIN_COSINE) || 0.6;
 const logger = require('../utils/logger');
 const { ultraLimit } = require('../utils/ultraGate');
 
@@ -487,8 +494,31 @@ function evaluate(target, suspect) {
   const reframedAvatar = !sameAvatar
     && avatarDistinctive
     && avatarFingerprint.sameSubject(target._fingerprint, suspect._fingerprint);
-  if (reframedAvatar) {
-    addReason(reasons, 'same_photo_reframed');
+
+  /*
+   * ── Le MEME sujet, vu par un modele semantique (DINOv2) ────────────────
+   *
+   * La conjonction pyramide+couleur ci-dessus attrape le cas ou la scene est
+   * quasi identique. Elle reste fragile (calibree sur 8 photos) et AVEUGLE des
+   * qu'un vecteur seul separe. Le vecteur DINOv2, lui, reconnait le meme sujet
+   * meme sous un cadrage, un fond ou une pose franchement differents — c'est
+   * le signal le plus puissant du lot. Mesure : usurpateur 0,957 de cosinus
+   * contre la cible, paires distinctes <= 0,29.
+   *
+   * Il pese autant que le recadrage (0,62) : reprendre le sujet d'un compte
+   * demande de l'avoir ou de refaire sa mise en scene, jamais un hasard. On ne
+   * cumule pas avec `reframedAvatar` — c'est la meme preuve, vue deux fois.
+   */
+  const embeddingCosine = avatarDistinctive
+    ? avatarEmbedding.cosineSimilarity(target._fingerprint?.embedding, suspect._fingerprint?.embedding)
+    : null;
+  const semanticAvatar = !sameAvatar
+    && avatarDistinctive
+    && embeddingCosine != null
+    && embeddingCosine >= EMBED_MIN_COSINE;
+
+  if (semanticAvatar || reframedAvatar) {
+    addReason(reasons, semanticAvatar ? 'same_photo_semantic' : 'same_photo_reframed');
     score += 0.62;
   }
 
@@ -727,6 +757,10 @@ function evaluate(target, suspect) {
       same_avatar_by: sameAvatar ? (samePixels ? 'pixels' : 'url') : null,
       cropped_avatar: croppedAvatar,
       same_photo_reframed: reframedAvatar,
+      same_photo_semantic: semanticAvatar,
+      // Trace la valeur mesurée : indispensable pour recalibrer EMBED_MIN_COSINE
+      // quand la base grossit (l'échantillon actuel est petit).
+      avatar_embed_cosine: embeddingCosine == null ? null : Math.round(embeddingCosine * 1e3) / 1e3,
       bio_similarity: Math.round(bioSimilarity * 1000) / 1000,
       display_name_similarity: Math.round(displaySimilarity * 1000) / 1000,
       content_similarity: Math.round(contentSimilarity * 1000) / 1000,
@@ -758,17 +792,38 @@ async function ensureFingerprint(user) {
 
   const existing = await UserAvatarFingerprint.findByPk(user.id);
   if (existing && existing.avatar_url === avatarUrl) {
-    return existing.unreadable
-      ? null
-      : {
-        dhash: existing.dhash,
-        ahash: existing.ahash,
-        pyramid: existing.pyramid || (existing.dhash ? [existing.dhash] : []),
-        color: existing.color,
-      };
+    if (existing.unreadable) return null;
+    let embedding = avatarEmbedding.deserializeEmbedding(existing.embedding);
+    // Migration douce : l'empreinte perceptuelle existe déjà mais le vecteur
+    // sémantique n'a pas encore été calculé (ligne antérieure à DINOv2). On le
+    // calcule une fois et on complète la ligne, sans tout recalculer.
+    if (!embedding) {
+      embedding = await avatarEmbedding.embedAvatar(avatarUrl);
+      if (embedding) {
+        try {
+          await UserAvatarFingerprint.update(
+            { embedding: avatarEmbedding.serializeEmbedding(embedding) },
+            { where: { user_id: user.id } }
+          );
+        } catch (error) {
+          logger.warn(`[usurpation] embedding non enregistré pour ${user.id} : ${error.message}`);
+        }
+      }
+    }
+    return {
+      dhash: existing.dhash,
+      ahash: existing.ahash,
+      pyramid: existing.pyramid || (existing.dhash ? [existing.dhash] : []),
+      color: existing.color,
+      embedding,
+    };
   }
 
   const computed = await avatarFingerprint.fingerprintAvatar(avatarUrl);
+  // Vecteur sémantique en parallèle de l'empreinte perceptuelle. Indépendant :
+  // une image lisible par l'un peut échouer sur l'autre, chacun rend `null`
+  // sans interrompre la veille.
+  const embedding = await avatarEmbedding.embedAvatar(avatarUrl);
   const row = {
     user_id: user.id,
     avatar_url: avatarUrl,
@@ -777,6 +832,10 @@ async function ensureFingerprint(user) {
     pyramid: computed?.pyramid || null,
     bands: computed?.bands || null,
     color: computed?.color || null,
+    embedding: avatarEmbedding.serializeEmbedding(embedding),
+    // `unreadable` ne vaut que pour l'empreinte perceptuelle : c'est elle qui
+    // pilote la préselection par bandes. Un avatar sans dHash mais avec vecteur
+    // reste comparable sémantiquement.
     unreadable: !computed,
     computed_at: new Date(),
   };
@@ -787,7 +846,8 @@ async function ensureFingerprint(user) {
     // on s'en sert quand même pour ce passage-ci.
     logger.warn(`[usurpation] empreinte non enregistrée pour ${user.id} : ${error.message}`);
   }
-  return computed;
+  if (!computed && !embedding) return null;
+  return { ...(computed || {}), embedding };
 }
 
 /**
@@ -806,6 +866,9 @@ async function ensureFingerprint(user) {
  * table pour rien.
  */
 async function backfillFingerprints({ limit = 300 } = {}) {
+  // On (re)visite les comptes à vraie photo dont l'empreinte manque OU dont le
+  // vecteur sémantique n'a pas encore été calculé (migration DINOv2 des lignes
+  // antérieures). `ensureFingerprint` complète l'un ou l'autre au passage.
   const rows = await queryRead(`
     SELECT u.id::text AS id, u.avatar
     FROM users u
@@ -814,7 +877,7 @@ async function backfillFingerprints({ limit = 300 } = {}) {
     WHERE u.is_active = true
       AND COALESCE(u.is_data_test, false) = false
       AND u.avatar LIKE '%/static/avatars/%'
-      AND f.user_id IS NULL
+      AND (f.user_id IS NULL OR (f.embedding IS NULL AND f.unreadable = false))
     ORDER BY u.updated_at DESC
     LIMIT :limit
   `, { replacements: { limit }, type: sequelize.QueryTypes.SELECT });
@@ -869,13 +932,16 @@ async function avatarCandidateIds(targetId, fingerprint) {
    * plus haut.
    */
   const MAX_FINGERPRINTS = 5000;
+  // `dhash IS NOT NULL OR embedding IS NOT NULL` : un compte trouvable
+  // UNIQUEMENT par son vecteur sémantique (photo reprise dans un tout autre
+  // cadre, dHash inexploitable) doit quand même entrer dans le vivier.
   const rows = await queryRead(`
-    SELECT f.user_id::text AS user_id, f.pyramid, f.dhash, f.ahash, f.color
+    SELECT f.user_id::text AS user_id, f.pyramid, f.dhash, f.ahash, f.color, f.embedding
     FROM user_avatar_fingerprints f
     JOIN users u ON u.id = f.user_id
     WHERE f.user_id <> :targetId
       AND f.unreadable = false
-      AND f.dhash IS NOT NULL
+      AND (f.dhash IS NOT NULL OR f.embedding IS NOT NULL)
       AND u.is_active = true
       AND u.is_suspended = false
     LIMIT :max
@@ -884,6 +950,7 @@ async function avatarCandidateIds(targetId, fingerprint) {
     type: sequelize.QueryTypes.SELECT,
   });
 
+  const targetEmbedding = fingerprint?.embedding || null;
   const matches = [];
   for (const row of rows) {
     const other = {
@@ -892,7 +959,11 @@ async function avatarCandidateIds(targetId, fingerprint) {
       pyramid: row.pyramid || (row.dhash ? [row.dhash] : []),
       color: row.color,
     };
-    if (avatarFingerprint.sameImage(fingerprint, other)
+    const otherEmbedding = avatarEmbedding.deserializeEmbedding(row.embedding);
+    const semanticMatch = targetEmbedding && otherEmbedding
+      && (avatarEmbedding.cosineSimilarity(targetEmbedding, otherEmbedding) || 0) >= EMBED_MIN_COSINE;
+    if (semanticMatch
+      || avatarFingerprint.sameImage(fingerprint, other)
       || avatarFingerprint.sameSubject(fingerprint, other)) {
       matches.push(String(row.user_id));
     }
