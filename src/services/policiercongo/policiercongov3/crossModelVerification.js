@@ -26,6 +26,14 @@ const { redact, clip, safeJson } = require('./utils');
 function otherProviderName(primaryName) {
   if (primaryName === 'codex') return 'claude';
   if (primaryName === 'claude') return 'codex';
+  // OpenRouter (deepseek) comme agent : le second avis d'une action
+  // destructrice doit venir d'un modèle DISTINCT. Claude est toujours
+  // instancié (voir ProviderRouter) et reste dispo via ~/.claude sur le VPS ;
+  // il tient donc le rôle de vérificateur, même si openrouter est le seul
+  // provider de `providerOrder`. Sans clé/compte Claude valide, la
+  // vérification échoue — et une action destructrice non vérifiée est
+  // refusée par défaut (fail-closed), c'est voulu.
+  if (primaryName === 'openrouter') return 'claude';
   return null;
 }
 

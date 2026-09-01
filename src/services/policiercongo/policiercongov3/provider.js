@@ -228,6 +228,110 @@ class CodexProvider {
   }
 }
 
+/**
+ * Provider OpenRouter — API HTTP compatible OpenAI (`/chat/completions`).
+ *
+ * Différence structurante avec Claude et Codex : **aucune session serveur**.
+ * OpenRouter ne persiste pas le fil, donc `supportsSessions = false` et il n'y
+ * a pas de `resume()` : AgentLoop reconstruit le prompt complet à chaque tour
+ * (`buildFull`) et l'envoie tel quel. Plus de jetons par tour qu'avec la
+ * reprise de session, mais le comportement reste correct.
+ *
+ * Le contrôle du délai est fait ici (AbortController lié au timeout ET au
+ * signal d'annulation de l'appelant) en plus du `withTimeout` du routeur :
+ * sans ça, la requête `fetch` continuerait après l'expiration du routeur.
+ */
+class OpenRouterProvider {
+  constructor(config) {
+    this.name = 'openrouter';
+    this.model = config.openrouterModel;
+    this.apiKey = config.openrouterApiKey;
+    this.baseUrl = (config.openrouterBaseUrl || 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
+    this.timeoutMs = config.modelTimeoutMs;
+    this.supportsSessions = false;
+  }
+
+  async generate(promptInput, options = {}) {
+    return this._run(promptInput, options);
+  }
+
+  async _run(promptInput, { signal } = {}) {
+    if (!this.apiKey) {
+      // Message reconnu comme définitif (voir ERREURS_DEFINITIVES) : pas de
+      // retry inutile sur une clé absente.
+      throw new Error('invalid api key: POLICIERCONGO_V3_OPENROUTER_API_KEY absent');
+    }
+    const { system, user } = normalizePromptInput(promptInput);
+    const messages = [];
+    if (system) messages.push({ role: 'system', content: system });
+    messages.push({ role: 'user', content: user });
+
+    // Annulation : combine le délai interne et le signal de l'appelant.
+    const controller = new AbortController();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    const deadline = setTimeout(() => controller.abort(), this.timeoutMs);
+    deadline.unref?.();
+
+    let response;
+    try {
+      response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+          // En-têtes de classement OpenRouter, facultatifs et sans effet
+          // fonctionnel — ils identifient l'appelant dans le tableau de bord.
+          'HTTP-Referer': 'https://twitninf.fr',
+          'X-Title': 'PolicierCongo',
+        },
+        body: JSON.stringify({ model: this.model, messages }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      // Un abort déclenché par le signal de l'appelant doit remonter comme
+      // annulation (le routeur ne le réessaie pas) ; un abort dû au délai
+      // interne devient un timeout reconnu comme définitif.
+      if (error?.name === 'AbortError') {
+        if (signal?.aborted) { const e = new Error('Génération openrouter annulée'); e.name = 'AbortError'; throw e; }
+        throw new Error(`Timeout modèle openrouter après ${this.timeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(deadline);
+    }
+
+    const raw = await response.text();
+    if (!response.ok) {
+      // On garde le statut ET le corps : estDefinitive() y repère 401/402/429,
+      // quota, crédits insuffisants… pour couper le retry quand il est vain.
+      throw new Error(`OpenRouter HTTP ${response.status}: ${clip(raw, 2000)}`);
+    }
+
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (_) {
+      throw new Error(`Réponse OpenRouter illisible (JSON invalide): ${clip(raw, 500)}`);
+    }
+    // OpenRouter renvoie parfois un objet `error` avec un statut 200.
+    if (data?.error) {
+      throw new Error(`OpenRouter: ${clip(data.error.message || safeJsonProvider(data.error), 2000)}`);
+    }
+    const text = data?.choices?.[0]?.message?.content;
+    if (!text || !String(text).trim()) {
+      throw new Error('OpenRouter a renvoyé une réponse vide');
+    }
+    return { text: String(text).trim(), sessionId: null };
+  }
+}
+
+function safeJsonProvider(value) {
+  try { return JSON.stringify(value); } catch (_) { return String(value); }
+}
+
 /** Lit l'événement `thread.started` du flux JSONL de `codex exec --json`. */
 function extractThreadId(stdout) {
   for (const line of stdout.split('\n')) {
@@ -282,7 +386,8 @@ const ERREURS_DEFINITIVES = [
   /quota/i,
   /credit balance/i,
   /insufficient.*(credit|fund)/i,
-  /(401|403|unauthorized|forbidden)/i,
+  /\b(401|402|403|429)\b/,
+  /(unauthorized|forbidden)/i,
   /invalid api key/i,
   /authentication/i,
   /not logged in|please run .?claude login/i
@@ -300,6 +405,7 @@ class ProviderRouter {
     this.providers = {
       codex: providers.codex || new CodexProvider(config),
       claude: providers.claude || new ClaudeProvider(config),
+      openrouter: providers.openrouter || new OpenRouterProvider(config),
       ...providers
     };
   }
@@ -382,4 +488,4 @@ class ProviderRouter {
   }
 }
 
-module.exports = { ProviderRouter, CodexProvider, ClaudeProvider, collectClaudeText, extractThreadId, normalizePromptInput, flattenPrompt, estDefinitive };
+module.exports = { ProviderRouter, CodexProvider, ClaudeProvider, OpenRouterProvider, collectClaudeText, extractThreadId, normalizePromptInput, flattenPrompt, estDefinitive };

@@ -83,8 +83,12 @@ class PolicierCongoV3Runtime {
     }
     this.initialized = true;
     const primaryProvider = this.config.providerOrder[0] || 'codex';
-    const primaryModel = primaryProvider === 'claude' ? this.config.claudeModel : this.config.codexModel;
-    const primaryEffort = primaryProvider === 'claude' ? this.config.claudeReasoningEffort : this.config.codexReasoningEffort;
+    const primaryModelByProvider = {
+      claude: [this.config.claudeModel, this.config.claudeReasoningEffort],
+      codex: [this.config.codexModel, this.config.codexReasoningEffort],
+      openrouter: [this.config.openrouterModel, 'n/a'],
+    };
+    const [primaryModel, primaryEffort] = primaryModelByProvider[primaryProvider] || primaryModelByProvider.codex;
     this.logger.info?.(`[pc3] V3 prêt — ${primaryProvider}:${primaryModel}/${primaryEffort}, dryRun=${this.config.dryRun}`);
     return this;
   }
@@ -166,8 +170,12 @@ class PolicierCongoV3Runtime {
     // modèle/effort codex même quand c'est claudeModel/claudeReasoningEffort
     // qui tourne réellement — même logique que le log de initialize().
     const primaryProvider = this.config.providerOrder[0] || 'codex';
-    const primaryModel = primaryProvider === 'claude' ? this.config.claudeModel : this.config.codexModel;
-    const primaryEffort = primaryProvider === 'claude' ? this.config.claudeReasoningEffort : this.config.codexReasoningEffort;
+    const primaryModelByProvider = {
+      claude: [this.config.claudeModel, this.config.claudeReasoningEffort],
+      codex: [this.config.codexModel, this.config.codexReasoningEffort],
+      openrouter: [this.config.openrouterModel, 'n/a'],
+    };
+    const [primaryModel, primaryEffort] = primaryModelByProvider[primaryProvider] || primaryModelByProvider.codex;
     return { version: '3.0.0', enabled: this.config.enabled, dry_run: this.config.dryRun,
       provider_order: this.config.providerOrder, model: primaryModel, reasoning_effort: primaryEffort,
       max_iterations: this.config.maxIterations, max_tool_calls: this.config.maxToolCalls,

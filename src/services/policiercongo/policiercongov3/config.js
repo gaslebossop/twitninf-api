@@ -54,6 +54,12 @@ function loadV3Config(overrides = {}) {
     claudeReasoningEffort: effortEnv('POLICIERCONGO_V3_CLAUDE_REASONING_EFFORT', 'xhigh'),
     codexModel: process.env.POLICIERCONGO_V3_CODEX_MODEL || 'gpt-5.5',
     codexReasoningEffort: process.env.POLICIERCONGO_V3_CODEX_REASONING_EFFORT || 'medium',
+    // OpenRouter : API compatible OpenAI, SANS session serveur — chaque tour
+    // renvoie le prompt complet (supportsSessions=false côté provider). La clé
+    // vit dans le .env du VPS, jamais dans le dépôt.
+    openrouterModel: process.env.POLICIERCONGO_V3_OPENROUTER_MODEL || 'deepseek/deepseek-v4-flash',
+    openrouterApiKey: process.env.POLICIERCONGO_V3_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY || '',
+    openrouterBaseUrl: process.env.POLICIERCONGO_V3_OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
     maxIterations: intEnv('POLICIERCONGO_V3_MAX_ITERATIONS', 18, 2, 64),
     maxToolCalls: intEnv('POLICIERCONGO_V3_MAX_TOOL_CALLS', 72, 1, 500),
     maxParallelReads: intEnv('POLICIERCONGO_V3_MAX_PARALLEL_READS', 6, 1, 20),
