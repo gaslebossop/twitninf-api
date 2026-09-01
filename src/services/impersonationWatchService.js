@@ -365,6 +365,22 @@ function usernameAnalysis(targetUsername, suspectUsername) {
     || [...IMPERSONATION_AFFIXES].some((token) => affix === `le${token}` || affix === `mon${token}`)
   );
   const allowedEdits = target.length >= 11 ? 2 : 1;
+  // Ajout d'un ou deux caractères À un pseudo court, en tête ou en fin
+  // (gas → gass, gas → gas1, gas → xgas). C'est le cas que le garde-fou
+  // `length >= 4` laisse passer, alors qu'ajouter à un handle EXACT est
+  // délibéré. On exige que le pseudo cible soit un préfixe ou un suffixe
+  // ENTIER du suspect (donc « vegas » n'usurpe pas « gas » : il ne commence ni
+  // ne finit par « gas »… « gaston » non plus n'ajoute qu'en fin mais 3 char).
+  // Signal volontairement CORROBORANT (voir le score plus bas) : seul, un
+  // pseudo court reste trop ambigu.
+  // `jaro >= 0.7` élimine les mots qui ne PARTAGENT que la sous-chaîne finale
+  // sans être proches (« vegas » finit par « gas » mais jaro = 0) : seul un
+  // vrai voisin (gass, xgas…) passe.
+  const shortAppend = target.length >= 3
+    && suspect !== target
+    && (suspect.startsWith(target) || suspect.endsWith(target))
+    && (suspect.length - target.length) <= 2
+    && jaro >= 0.7;
   const stripped = stripKnownImpersonationAffixes(suspect);
   const strippedDistance = stripped.removed.length
     ? damerauLevenshtein(target, stripped.core)
@@ -390,6 +406,12 @@ function usernameAnalysis(targetUsername, suspectUsername) {
     reason = 'username_similar';
   } else if (blended >= 0.82 && jaro >= 0.86 && target.length >= 5) {
     score = clamp(0.72 + (blended - 0.82) * 0.8, 0.72, 0.86);
+    reason = 'username_similar';
+  } else if (shortAppend) {
+    // Corroborant : 0,55 ne franchit pas seul le seuil (0,72) — un pseudo court
+    // « proche » ne suffit pas à accuser — mais il expose le motif et bascule
+    // l'alerte dès qu'un autre indice l'accompagne (typiquement la même photo).
+    score = 0.55;
     reason = 'username_similar';
   }
 
