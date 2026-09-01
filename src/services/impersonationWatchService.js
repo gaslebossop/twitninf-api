@@ -19,6 +19,11 @@ const signals = require('./impersonationSignals');
 // <= 0,29. Un seuil a 0,60 laisse une marge enorme des deux cotes. Reglable
 // pour recalibrer quand la base grossit, sans redeploiement.
 const EMBED_MIN_COSINE = Number(process.env.IMPERSONATION_EMBED_MIN_COSINE) || 0.6;
+// Au-delà de ce cosinus, un « même sujet, autre photo » est assez sûr pour
+// alerter SEUL (poids 0,75). Entre EMBED_MIN_COSINE et ce seuil, signal fort
+// mais corroboration souhaitable (0,62). Mesuré : paires distinctes <= 0,29,
+// même sujet >= 0,83 — l'écart est énorme, 0,78 laisse une large marge.
+const EMBED_STRONG_COSINE = Number(process.env.IMPERSONATION_EMBED_STRONG_COSINE) || 0.78;
 const logger = require('../utils/logger');
 const { ultraLimit } = require('../utils/ultraGate');
 
@@ -562,8 +567,8 @@ function evaluate(target, suspect) {
     // Même sujet, autre photo ou autre cadre. Au-delà de 0,85 de cosinus c'est
     // aussi sûr qu'une copie exacte → alerte seule ; dans la bande 0,60-0,85,
     // signal fort mais qui gagne à être confirmé par un autre indice.
-    const cos = embeddingCosine == null ? (reframedAvatar ? 0.86 : EMBED_MIN_COSINE) : embeddingCosine;
-    score += cos >= 0.85 ? 0.75 : 0.62;
+    const cos = embeddingCosine == null ? (reframedAvatar ? EMBED_STRONG_COSINE : EMBED_MIN_COSINE) : embeddingCosine;
+    score += cos >= EMBED_STRONG_COSINE ? 0.75 : 0.62;
   }
 
   const targetBio = normalizeProfileText(target.bio);
