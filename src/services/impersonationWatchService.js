@@ -440,6 +440,27 @@ function evaluate(target, suspect) {
     && avatarDistinctive
     && avatarFingerprint.likelyCroppedCopy(target._fingerprint, suspect._fingerprint);
 
+  /*
+   * La MEME SCENE, reprise dans un autre cadre.
+   *
+   * Cas reel : `@levraicongo` reprend la peluche, le decor et le fond de
+   * `@policiercongo`, mais le sujet a bouge dans le cadre. Ce n'est pas un
+   * recadrage — une dHash ne suit pas une translation, et meme en cherchant le
+   * meilleur decoupage sur 9 echelles et 25 positions la distance ne descend
+   * pas sous 12. C'est la conjonction distance + couleur qui l'attrape.
+   *
+   * Remonter sa photo dans un autre cadre demande d'AVOIR la photo, ou d'avoir
+   * refait la mise en scene. Aucune des deux n'arrive par hasard : le signal
+   * pese donc lourd, meme sans autre indice.
+   */
+  const reframedAvatar = !sameAvatar
+    && avatarDistinctive
+    && avatarFingerprint.sameSubject(target._fingerprint, suspect._fingerprint);
+  if (reframedAvatar) {
+    addReason(reasons, 'same_photo_reframed');
+    score += 0.62;
+  }
+
   if (sameAvatar) {
     addReason(reasons, 'same_avatar');
     score += username.score > 0 ? 0.14 : 0.32;
@@ -606,6 +627,12 @@ function evaluate(target, suspect) {
 
   // Reprendre la photo ET les publications ne laisse plus de lecture
   // innocente : ce sont deux gestes deliberes qui visent la meme personne.
+  // Reprendre la mise en scene de quelqu'un ET un fragment de son identite ne
+  // laisse plus de lecture innocente.
+  if (reframedAvatar && (username.score > 0 || crossSimilarity >= 0.6 || exactDisplayName)) {
+    score = Math.max(score, 0.88);
+  }
+
   if (sameAvatar && copiedContent) score = Math.max(score, 0.95);
   else if (copiedContent && (exactDisplayName || username.score > 0)) score = Math.max(score, 0.88);
 
@@ -617,6 +644,7 @@ function evaluate(target, suspect) {
       same_avatar: sameAvatar,
       same_avatar_by: sameAvatar ? (samePixels ? 'pixels' : 'url') : null,
       cropped_avatar: croppedAvatar,
+      same_photo_reframed: reframedAvatar,
       bio_similarity: Math.round(bioSimilarity * 1000) / 1000,
       display_name_similarity: Math.round(displaySimilarity * 1000) / 1000,
       content_similarity: Math.round(contentSimilarity * 1000) / 1000,
@@ -650,7 +678,12 @@ async function ensureFingerprint(user) {
   if (existing && existing.avatar_url === avatarUrl) {
     return existing.unreadable
       ? null
-      : { dhash: existing.dhash, ahash: existing.ahash, color: existing.color };
+      : {
+        dhash: existing.dhash,
+        ahash: existing.ahash,
+        pyramid: existing.pyramid || (existing.dhash ? [existing.dhash] : []),
+        color: existing.color,
+      };
   }
 
   const computed = await avatarFingerprint.fingerprintAvatar(avatarUrl);
@@ -659,6 +692,8 @@ async function ensureFingerprint(user) {
     avatar_url: avatarUrl,
     dhash: computed?.dhash || null,
     ahash: computed?.ahash || null,
+    pyramid: computed?.pyramid || null,
+    bands: computed?.bands || null,
     color: computed?.color || null,
     unreadable: !computed,
     computed_at: new Date(),
@@ -670,6 +705,46 @@ async function ensureFingerprint(user) {
     // on s'en sert quand même pour ce passage-ci.
     logger.warn(`[usurpation] empreinte non enregistrée pour ${user.id} : ${error.message}`);
   }
+  return computed;
+}
+
+/**
+ * Calcule les empreintes manquantes des comptes a vraie photo.
+ *
+ * ── Pourquoi c'est indispensable, et pas une optimisation ────────────────
+ *
+ * La preselection par la photo interroge `user_avatar_fingerprints`. Mais les
+ * empreintes des suspects n'etaient calculees QU'APRES qu'ils soient devenus
+ * candidats — donc un compte trouvable uniquement par sa photo ne pouvait
+ * jamais l'etre : son empreinte n'existait pas encore au moment ou on la
+ * cherchait. Poule et oeuf, et le symptome est un silence complet.
+ *
+ * Les comptes a l'avatar par defaut sont ecartes : ils sont des milliers a
+ * partager la meme image, leur empreinte ne distingue rien et remplirait la
+ * table pour rien.
+ */
+async function backfillFingerprints({ limit = 300 } = {}) {
+  const rows = await queryRead(`
+    SELECT u.id::text AS id, u.avatar
+    FROM users u
+    LEFT JOIN user_avatar_fingerprints f
+      ON f.user_id = u.id AND f.avatar_url = u.avatar
+    WHERE u.is_active = true
+      AND COALESCE(u.is_data_test, false) = false
+      AND u.avatar LIKE '%/static/avatars/%'
+      AND f.user_id IS NULL
+    ORDER BY u.updated_at DESC
+    LIMIT :limit
+  `, { replacements: { limit }, type: sequelize.QueryTypes.SELECT });
+
+  let computed = 0;
+  // En serie : chaque calcul decode une image, et les lancer de front ferait
+  // tomber la latence de toutes les autres requetes du processus.
+  for (const row of rows) {
+    const print = await ensureFingerprint({ id: row.id, avatar: row.avatar });
+    if (print) computed += 1;
+  }
+  if (rows.length) logger.info(`[usurpation] ${computed}/${rows.length} empreintes calculees`);
   return computed;
 }
 
@@ -689,32 +764,58 @@ async function ensureFingerprint(user) {
  * table entière.
  */
 async function avatarCandidateIds(targetId, fingerprint) {
-  if (!fingerprint?.dhash || fingerprint.dhash.length !== 16) return [];
-  const d = fingerprint.dhash;
+  if (!fingerprint?.dhash) return [];
+
+  /*
+   * ── Pourquoi on charge, au lieu de filtrer en SQL ──────────────────────
+   *
+   * La preselection par tranches (« bandes ») ne garantit un recouvrement que
+   * pour des empreintes distantes de 3 bits ou moins — c'est le principe des
+   * tiroirs sur 64 bits en 4 tranches. Elle attrape donc le reupload et le
+   * redimensionnement, mais PAS une photo reprise dans un autre cadre, ou la
+   * distance monte a 11 (cas reel mesure : @levraicongo face a
+   * @policiercongo).
+   *
+   * Or ce cas-la est justement celui qu'on veut voir. Comme seuls les comptes
+   * a VRAIE photo portent une empreinte — l'avatar par defaut est ecarte, et
+   * il couvre l'immense majorite de la base — le vivier reel se compte en
+   * dizaines. On le charge et on applique les vrais predicats en memoire,
+   * plutot que d'approximer en SQL.
+   *
+   * `MAX_FINGERPRINTS` est la borne de securite : au-dela, il faudra une
+   * vraie recherche par voisinage (index LSH sur les bandes), pas un plafond
+   * plus haut.
+   */
+  const MAX_FINGERPRINTS = 5000;
   const rows = await queryRead(`
-    SELECT user_id
-    FROM user_avatar_fingerprints
-    WHERE user_id <> :targetId
-      AND unreadable = false
-      AND dhash IS NOT NULL
-      AND (
-        substr(dhash, 1, 4)  = :b1
-        OR substr(dhash, 5, 4)  = :b2
-        OR substr(dhash, 9, 4)  = :b3
-        OR substr(dhash, 13, 4) = :b4
-      )
-    LIMIT 500
+    SELECT f.user_id::text AS user_id, f.pyramid, f.dhash, f.ahash, f.color
+    FROM user_avatar_fingerprints f
+    JOIN users u ON u.id = f.user_id
+    WHERE f.user_id <> :targetId
+      AND f.unreadable = false
+      AND f.dhash IS NOT NULL
+      AND u.is_active = true
+      AND u.is_suspended = false
+    LIMIT :max
   `, {
-    replacements: {
-      targetId: String(targetId),
-      b1: d.slice(0, 4),
-      b2: d.slice(4, 8),
-      b3: d.slice(8, 12),
-      b4: d.slice(12, 16),
-    },
+    replacements: { targetId: String(targetId), max: MAX_FINGERPRINTS },
     type: sequelize.QueryTypes.SELECT,
   });
-  return rows.map((row) => String(row.user_id));
+
+  const matches = [];
+  for (const row of rows) {
+    const other = {
+      dhash: row.dhash,
+      ahash: row.ahash,
+      pyramid: row.pyramid || (row.dhash ? [row.dhash] : []),
+      color: row.color,
+    };
+    if (avatarFingerprint.sameImage(fingerprint, other)
+      || avatarFingerprint.sameSubject(fingerprint, other)) {
+      matches.push(String(row.user_id));
+    }
+  }
+  return matches;
 }
 
 /** Normalise un tweet pour la comparaison : on compare des MOTS, pas des pixels. */
@@ -931,6 +1032,10 @@ async function scanUser(userId) {
   });
   if (!target || target.is_data_test) return 0;
 
+  // Sans ce rattrapage, la preselection par la photo ne trouve rien : elle
+  // cherche dans une table que seul le scan remplit.
+  await backfillFingerprints({ limit: 150 });
+
   const targetFingerprint = await ensureFingerprint(target);
   target._fingerprint = targetFingerprint;
 
@@ -1095,6 +1200,7 @@ async function markReported({ userId, alertId, reportId }) {
 }
 
 module.exports = {
+  backfillFingerprints,
   scanUser,
   scanAllSubscribers,
   listFor,

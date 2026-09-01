@@ -30,21 +30,35 @@ const logger = require('../utils/logger');
  * On ajoute une **aHash** (moyenne) : elle se trompe differemment de la dHash,
  * et exiger que les deux concordent supprime l'essentiel des collisions.
  *
- * ── La signature couleur, et pourquoi elle ne DECIDE jamais ──────────────
+ * ── Le recadrage, et la pyramide qui le regle ───────────────────────────
  *
- * Une dHash est structurellement sensible au RECADRAGE : la grille se decale
- * et la moitie des bits changent. Mesure sur de vrais avatars : un recadrage
- * de 90 % donne une distance de 9 a 16, hors de portee du seuil.
+ * Une dHash seule est structurellement sensible au RECADRAGE : la grille se
+ * decale et la moitie des bits changent. Mesure sur de vrais avatars, une
+ * seule empreinte : un recadrage de 90 % donne une distance de 10 a 14, un
+ * recadrage de 70 % monte a 30. Hors de portee, alors que c'est le geste le
+ * plus courant d'un usurpateur — il reprend la photo et la recadre.
  *
- * D'ou un troisieme signal, un histogramme couleur 4x4x4 : retirer 10 % des
- * pixels ne change pas la REPARTITION des couleurs. Mesure sur les memes
- * avatars, recadrage 90 % : 0,995 de similarite.
+ * La correction n'est pas d'elargir le seuil (ce serait ouvrir la porte aux
+ * faux positifs) mais de calculer PLUSIEURS empreintes par image : l'entiere,
+ * puis ses centres a 90 %, 80 % et 70 %. Si B est un recadrage de A, alors le
+ * recadrage correspondant de A ressemble a B ENTIERE. On compare donc toutes
+ * les paires de niveaux et on garde la plus proche.
  *
- * Mais il SEPARE mal — deux avatars sans aucun rapport atteignent 0,943.
- * L'ecart utile entre « meme image recadree » et « images differentes » ne
- * fait que quelques centiemes. Il est donc cable comme un signal d'APPOINT :
- * il ne declenche jamais une alerte a lui seul, il ne fait que renforcer un
- * faisceau ou le pseudo et la bio disent deja quelque chose.
+ * Mesure sur les memes avatars, avec la pyramide :
+ *
+ *   recadrage 90 % : 14 -> 2      images differentes : minimum 20
+ *   recadrage 80 % : 23 -> 1      (aucune paire sous le seuil de 8)
+ *   recadrage 70 % : 30 -> 1
+ *
+ * L'ecart entre « meme image recadree » (<= 3) et « images differentes »
+ * (>= 20) est franc : le seuil de 8 tombe au milieu, sans rien frôler.
+ *
+ * ── La signature couleur, reduite a un appoint ──────────────────────────
+ *
+ * Un histogramme couleur 4x4x4 tolere lui aussi le recadrage (0,995 a 90 %),
+ * mais il SEPARE mal — deux avatars sans aucun rapport atteignent 0,943.
+ * Depuis que la pyramide traite le recadrage correctement, il ne sert plus
+ * qu'a nuancer : il ne declenche jamais une alerte a lui seul.
  *
  * ── Ce que ca ne fait pas ────────────────────────────────────────────────
  *
@@ -58,6 +72,15 @@ const logger = require('../utils/logger');
 /** Taille de la grille dHash : 9 colonnes pour 8 comparaisons par ligne. */
 const DHASH_WIDTH = 9;
 const DHASH_HEIGHT = 8;
+
+/**
+ * Niveaux de la pyramide : l'image entiere, puis ses centres.
+ *
+ * Quatre suffisent — au-dela on multiplie les comparaisons (donc les chances
+ * de collision) pour couvrir des recadrages si agressifs qu'ils ne laissent
+ * plus reconnaitre la photo d'origine.
+ */
+const CROP_LEVELS = [1, 0.9, 0.8, 0.7];
 /** aHash sur une grille carree. */
 const AHASH_SIZE = 8;
 
@@ -79,6 +102,30 @@ const MAX_HAMMING = 8;
  * exactement pourquoi ce signal ne decide jamais seul.
  */
 const MIN_COLOR_SIMILARITY = 0.985;
+
+/**
+ * ── Meme sujet, cadre different ─────────────────────────────────────────
+ *
+ * Cas reel qui a motive ce seuil : `@levraicongo` reprend la peluche, la
+ * scene et le fond de `@policiercongo`, mais le sujet a BOUGE dans le cadre —
+ * ce n'est pas un recadrage, c'est une autre prise de la meme mise en scene.
+ *
+ * Une dHash ne suit pas une translation : meme en cherchant le meilleur
+ * recadrage sur 9 echelles x 25 positions, la distance ne descend pas sous 12.
+ * La couleur, elle, ne bouge pas : 0,9945.
+ *
+ * Aucun des deux signaux ne tranche seul — 12 est trop haut pour une dHash,
+ * et 0,99 de couleur peut arriver entre deux photos d'interieur quelconques.
+ * C'est leur CONJONCTION qui separe : mesure sur toutes les vraies photos de
+ * la base, la mediane de couleur entre paires distinctes est 0,654 et la
+ * mediane de pyramide 28. La regle ci-dessous retient exactement une paire,
+ * la bonne.
+ *
+ * Echantillon encore petit (8 photos reelles) : a surveiller si la base de
+ * vraies photos grossit.
+ */
+const REFRAMED_MAX_HAMMING = 14;
+const REFRAMED_MIN_COLOR = 0.99;
 
 /** Ne jamais telecharger une image distante au-dela de cette taille. */
 const MAX_REMOTE_BYTES = 5 * 1024 * 1024;
@@ -152,6 +199,34 @@ async function readImageBuffer(avatarUrl) {
  * Ne jette jamais : une photo corrompue ne doit pas interrompre le balayage
  * de toute une table.
  */
+/** dHash d'un buffer, eventuellement du centre `keep` de l'image. */
+async function dhashOf(buffer, keep) {
+  let pipeline = sharp(buffer, { failOn: 'none' });
+  if (keep < 1) {
+    const meta = await sharp(buffer, { failOn: 'none' }).metadata();
+    const width = Math.max(1, Math.round(meta.width * keep));
+    const height = Math.max(1, Math.round(meta.height * keep));
+    pipeline = pipeline.extract({
+      left: Math.round((meta.width - width) / 2),
+      top: Math.round((meta.height - height) / 2),
+      width,
+      height,
+    });
+  }
+  const raw = await pipeline
+    .greyscale()
+    .resize(DHASH_WIDTH, DHASH_HEIGHT, { fit: 'fill' })
+    .raw()
+    .toBuffer();
+  const bits = [];
+  for (let row = 0; row < DHASH_HEIGHT; row += 1) {
+    for (let col = 0; col < DHASH_WIDTH - 1; col += 1) {
+      bits.push(raw[row * DHASH_WIDTH + col] > raw[row * DHASH_WIDTH + col + 1] ? 1 : 0);
+    }
+  }
+  return bitsToHex(bits);
+}
+
 async function fingerprintAvatar(avatarUrl) {
   try {
     const buffer = await readImageBuffer(avatarUrl);
@@ -207,8 +282,17 @@ async function fingerprintAvatar(avatarUrl) {
     }
     const pixels = bins.reduce((total, value) => total + value, 0) || 1;
 
+    // La pyramide : l'image entiere puis ses centres. C'est elle qui rend le
+    // recadrage detectable (voir l'en-tete).
+    const pyramid = [];
+    for (const keep of CROP_LEVELS) {
+      pyramid.push(keep === 1 ? bitsToHex(dBits) : await dhashOf(buffer, keep));
+    }
+
     return {
       dhash: bitsToHex(dBits),
+      pyramid,
+      bands: bandsOf(pyramid),
       ahash: bitsToHex(aBits),
       // Arrondi a 5 decimales : la precision au-dela ne change aucun verdict
       // et triple la taille stockee.
@@ -247,10 +331,54 @@ function hammingDistance(hexA, hexB) {
  */
 function sameImage(a, b) {
   if (!a?.dhash || !b?.dhash) return false;
-  const dDistance = hammingDistance(a.dhash, b.dhash);
+  // La pyramide plutot que la seule empreinte pleine : un recadrage centre
+  // passe de 14 a 2 (mesure sur de vrais avatars).
+  const dDistance = pyramidDistance(a, b);
   if (dDistance > MAX_HAMMING) return false;
   if (a.ahash && b.ahash && hammingDistance(a.ahash, b.ahash) > MAX_HAMMING) return false;
   return true;
+}
+
+/**
+ * Toutes les tranches de 4 hex de tous les niveaux, dedoublonnees.
+ *
+ * Deux empreintes distantes de 3 bits ou moins partagent forcement une tranche
+ * (principe des tiroirs, 64 bits en 4 tranches). Un recouvrement de tableaux
+ * suffit donc a ramener le vivier a quelques lignes.
+ */
+function bandsOf(pyramid) {
+  const out = new Set();
+  for (const hash of pyramid || []) {
+    if (typeof hash !== 'string' || hash.length !== 16) continue;
+    for (let i = 0; i < 16; i += 4) out.add(`${i}:${hash.slice(i, i + 4)}`);
+  }
+  return [...out];
+}
+
+/** Distance minimale entre deux pyramides, toutes paires de niveaux. */
+function pyramidDistance(a, b) {
+  const x = a?.pyramid?.length ? a.pyramid : (a?.dhash ? [a.dhash] : []);
+  const y = b?.pyramid?.length ? b.pyramid : (b?.dhash ? [b.dhash] : []);
+  if (!x.length || !y.length) return Infinity;
+  let best = Infinity;
+  for (const left of x) for (const right of y) {
+    const distance = hammingDistance(left, right);
+    if (distance < best) best = distance;
+  }
+  return best;
+}
+
+/**
+ * Meme sujet dans un cadre different : la photo a ete reprise et recadrée.
+ *
+ * Exige les DEUX conditions. La distance seule laisserait passer des interieurs
+ * quelconques, la couleur seule designerait des inconnus (voir l'en-tete).
+ */
+function sameSubject(a, b) {
+  if (!a?.dhash || !b?.dhash) return false;
+  if (sameImage(a, b)) return false; // deja traite, plus fortement
+  return pyramidDistance(a, b) <= REFRAMED_MAX_HAMMING
+    && colorSimilarity(a, b) >= REFRAMED_MIN_COLOR;
 }
 
 /**
@@ -297,6 +425,9 @@ function likelyCroppedCopy(a, b) {
 
 module.exports = {
   fingerprintAvatar,
+  bandsOf,
+  pyramidDistance,
+  sameSubject,
   colorSimilarity,
   likelyCroppedCopy,
   MIN_COLOR_SIMILARITY,

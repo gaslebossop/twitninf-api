@@ -60,6 +60,34 @@ const userAvatarFingerprintSchema = {
     },
 
     /**
+     * Empreintes de l'image entiere puis de ses centres a 90/80/70 %.
+     *
+     * C'est ce qui rend le RECADRAGE detectable : si B est un recadrage de A,
+     * le niveau correspondant de A ressemble a B entiere. Mesure sur de vrais
+     * avatars : un recadrage a 90 % passe d'une distance de 14 a 2.
+     */
+    pyramid: {
+      type: DataTypes.JSONB,
+      allowNull: true,
+    },
+
+    /**
+     * Toutes les tranches de 4 hex de tous les niveaux (16 entrees).
+     *
+     * Sert UNIQUEMENT a la preselection : deux empreintes proches partagent
+     * forcement une tranche (principe des tiroirs), donc un simple recouvrement
+     * de tableaux ramene le vivier a quelques lignes, que la distance de
+     * Hamming departage ensuite en memoire.
+     *
+     * Sans ca, un compte a la photo reprise mais au pseudo different n'etait
+     * jamais candidat : le score, aussi bon soit-il, ne tournait pas sur lui.
+     */
+    bands: {
+      type: DataTypes.ARRAY(DataTypes.TEXT),
+      allowNull: true,
+    },
+
+    /**
      * Histogramme couleur 4x4x4 normalise (64 valeurs).
      *
      * Tolerant au recadrage, mais mauvais discriminant : ne sert qu'a
