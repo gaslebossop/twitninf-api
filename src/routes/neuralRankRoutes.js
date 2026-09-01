@@ -18,7 +18,6 @@ const { spaceOutReplies } = require('../utils/feedShape');
 const rustClient = require('../services/rustRecommenderClient');
 const { mirrorDwell } = require('../services/dwellMirror');
 const { coalesceAuthorId } = require('../services/interactionAuthor');
-const featureFlagService = require('../services/featureFlagService');
 const paidContentService = require('../services/paidContentService');
 const adService = require('../services/adService');
 const { withFeedCache } = require('../services/feedCache');
@@ -667,17 +666,21 @@ router.get('/recommendations', authenticateToken, async (req, res) => {
   // de la barrière d'une session à l'autre, sans quoi il verrait le tweet
   // changer de formulation à chaque rafraîchissement.
   //
-  // /!\ Contexte COMPLET et non `{ user_id }` : la liste d'acces d'un drapeau
-  // reconnait un identifiant, un pseudo OU un identifiant d'appareil
-  // (`featureFlagEvaluator.listedIn`), et l'ecran d'admin y ecrit des PSEUDOS.
-  // Evalue avec le seul `user_id`, ce drapeau ignorait donc en silence tous
-  // les testeurs internes inscrits sur la liste — alors que l'app, qui resout
-  // ses drapeaux avec le contexte complet, leur affichait la fonctionnalite.
-  const enableExperiments = req.headers['x-twitninf-client'] === 'windows-electron'
-    || await featureFlagService.isEnabled(
-      'fil.abtest',
-      await featureFlagService.contextFromRequest(req),
-    );
+  // LIRE une variante est ouvert a tout le monde ; seule l'ECRITURE (lancer
+  // une experience) reste derriere `fil.abtest`, dans `clientMayAuthor`.
+  //
+  // Les deux etaient gardes par le meme drapeau, et ca vidait la
+  // fonctionnalite de son sens : le drapeau valait `rollout_percentage: 10`
+  // avec `allowlist: ['gas']`, donc l'auteur pouvait creer un test A/B que
+  // ~personne ne recevait. Les lecteurs hors cohorte voyaient le tweet
+  // d'origine, `assign_variants` n'etait jamais appele pour eux, aucune
+  // assignation n'etait ecrite — et le Studio createur affichait des zeros
+  // sur une experience active depuis des heures, sans rien pour l'expliquer.
+  //
+  // Un test A/B dont l'echantillon est limite a 10 % des lecteurs ne mesure
+  // rien d'utile a cette taille de base : il faut des semaines pour franchir
+  // un seuil de quatre personnes par variante.
+  const enableExperiments = true;
 
   try {
     let refusedByPaidContent = false;
