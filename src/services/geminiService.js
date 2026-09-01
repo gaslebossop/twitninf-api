@@ -16,13 +16,18 @@ async function evaluateTweetForRecommendations({ content, authorUsername, isRepl
       if (isReply) {
         return { decision: 'eligible', eligible: true, reason: 'skip_reply', score: 0.7 };
       }
-      const [apiKey] = keysInRotationOrder();
-      if (!apiKey) {
-        return { decision: 'eligible', eligible: true, reason: 'gemini_not_configured', score: 0.7 };
+      // AUDIT 2026-09-01 : les 9 clés `GEMINI_API_KEYS` sont toutes révoquées
+      // par Google (« reported as leaked », liées au passage en public des
+      // dépôts) → cet appel partait en 403 et retombait sur le fail-open, donc
+      // AUCUN filtrage de qualité/sécurité ne s'appliquait plus. On bascule sur
+      // OpenRouter, exactement comme `evaluateStrikeDispute` : transport
+      // différent, MÊME prompt et même contrat de sortie. Fail-open conservé.
+      const apiKey = process.env.OPENROUTER_API_KEY;
+      const model = process.env.OPENROUTER_MODEL;
+      if (!apiKey || !model) {
+        return { decision: 'eligible', eligible: true, reason: 'evaluator_not_configured', score: 0.7 };
       }
-  
-      const ai = new GoogleGenAI({ apiKey });
-      
+
       // Prompt en français avec décision explicite (eligible / not_eligible / ban)
       const prompt = `Tâche : Évaluer un tweet et décider s'il est :
   - "eligible" : OK pour recommandations
@@ -101,61 +106,19 @@ async function evaluateTweetForRecommendations({ content, authorUsername, isRepl
    
    Réponds en JSON uniquement :`;
   
-            const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-      });
-
-      // LOG de la réponse brute de Gemini
-      logger.info(`🔍 RÉPONSE BRUTE GEMINI:`, {
-        hasResponse: !!response,
-        hasResponseText: !!response?.response,
-        responseType: typeof response?.response,
-        textType: typeof response?.text,
-        fullResponse: JSON.stringify(response, null, 2)
-      });
-
-      // Quand le tweet déclenche les filtres de sécurité de Gemini, l'API ne
-      // renvoie AUCUN texte, juste un finishReason. Ce cas retombait sur les
-      // fallbacks génériques plus bas, qui répondent "eligible" — autrement dit
-      // le contenu le plus problématique (insultes crues, violence) passait en
-      // recommandation, alors que le refus du modèle en est justement le signal
-      // le plus fort. On le traite comme non recommandable, sans le supprimer :
-      // ce signal peut avoir des faux positifs, il ne justifie pas un ban.
-      const blockedFinishReason = String(response?.candidates?.[0]?.finishReason || '');
-      if (['PROHIBITED_CONTENT', 'SAFETY', 'BLOCKLIST', 'SPII'].includes(blockedFinishReason)) {
-        logger.warn(`🛑 Gemini a bloqué sa propre réponse (${blockedFinishReason}) — tweet non recommandé`);
-        return {
-          decision: 'not_eligible',
-          eligible: false,
-          reason: `gemini_safety_block:${blockedFinishReason}`,
-          score: 0.1
-        };
-      }
-
-            // Extraction robuste du texte de réponse
-      let text = '';
-      if (response?.response && typeof response.response.text === 'function') {
-        try {
-          text = response.response.text();
-          logger.info(`✅ Texte extrait via response.response.text()`);
-        } catch (textError) {
-          logger.error(`❌ Erreur lors de l'extraction du texte: ${textError.message}`);
+      const response = await axios.post(
+        'https://openrouter.ai/api/v1/chat/completions',
+        { model, messages: [{ role: 'user', content: prompt }], temperature: 0.2 },
+        {
+          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          timeout: 20000,
         }
-      } else if (typeof response.text === 'function') {
-        try { 
-          text = response.text(); 
-          logger.info(`✅ Texte extrait via response.text()`);
-        } catch (textError) {
-          logger.error(`❌ Erreur lors de l'extraction du texte: ${textError.message}`);
-        }
-      } else if (typeof response.text === 'string') {
-        text = response.text;
-        logger.info(`✅ Texte extrait directement (string)`);
-      } else {
-        logger.error(`🚨 Impossible d'extraire le texte de la réponse Gemini`);
-        logger.error(`📋 Structure de la réponse:`, response);
-      }
+      );
+
+      // Sortie OpenAI-compatible : le JSON demandé est dans le message. Un échec
+      // réseau/HTTP remonte au catch externe, qui applique le fail-open (on ne
+      // bloque jamais la diffusion sur une panne du moteur d'évaluation).
+      let text = response.data?.choices?.[0]?.message?.content;
 
       // Vérifier que text est bien défini et est une chaîne avant d'appeler .trim()
       if (typeof text !== 'string') {

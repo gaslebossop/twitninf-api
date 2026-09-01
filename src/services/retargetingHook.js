@@ -52,8 +52,13 @@ function getCreateBatch() {
 
   } catch (err) {
     _loadError = err.message;
-    logger.error(`❌ [RetargetingHook] Impossible de charger le service de ciblage: ${err.message}`);
-    logger.error(`   Chemin tenté: ${SERVICE_PATH}`);
+    // Le module de ciblage est un STUB volontairement absent en production
+    // (voir api/CLAUDE.md : « targeting (stub) »). Son absence n'est donc pas
+    // une erreur mais un état de déploiement attendu : on la journalise une
+    // seule fois, au niveau `warn`, pour ne pas polluer l'agrégation d'erreurs
+    // (elle y ressortait ~10×, une par redémarrage). Le retargeting devient
+    // simplement un no-op.
+    logger.warn(`🎯 [RetargetingHook] Ciblage indisponible (module stub absent), retargeting désactivé: ${err.message}`);
     return null;
   }
 }

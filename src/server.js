@@ -1073,6 +1073,17 @@ app.use('*', (req, res) => {
 
 // Middleware de gestion des erreurs global
 app.use((error, req, res, next) => {
+  // URI malformée : ce sont des scanners qui sondent des chemins encodés
+  // n'importe comment (/.aws/credentials%A0, /.azure/…). Express lève une
+  // `URIError` au décodage du chemin, AVANT tout routage. Ce n'est ni un bug
+  // ni une « erreur serveur » : c'est une requête invalide. On répond 400 et
+  // on journalise en `warn` (pas `error`), pour ne pas noyer l'agrégation
+  // d'erreurs sous le bruit des robots.
+  if (error instanceof URIError || /Failed to decode param|URI malformed/i.test(error?.message || '')) {
+    logger.warn(`Requête à URI invalide rejetée: ${req.method} ${req.originalUrl} (${req.ip})`);
+    return res.status(400).json({ success: false, message: 'Requête invalide' });
+  }
+
   logger.error('Erreur serveur', {
     error: error.message,
     stack: error.stack,
