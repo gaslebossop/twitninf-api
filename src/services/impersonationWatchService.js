@@ -832,7 +832,14 @@ async function findSuspects(target, targetFingerprint) {
         regexp_replace(
           translate(lower(COALESCE(username, '')), :confusableFrom, :confusableTo),
           '[^a-z0-9]', '', 'g'
-        ) AS username_skeleton
+        ) AS username_skeleton,
+        -- Meme reduction appliquee au NOM AFFICHE. Sans elle, un compte qui
+        -- met le pseudo de sa cible dans son nom n'etait jamais candidat : le
+        -- score, aussi bon soit-il, ne tournait jamais sur lui.
+        regexp_replace(
+          translate(lower(COALESCE(full_name, '')), :confusableFrom, :confusableTo),
+          '[^a-z0-9]', '', 'g'
+        ) AS name_skeleton
       FROM users
       WHERE id <> :targetId
         AND is_active = true
@@ -850,6 +857,12 @@ async function findSuspects(target, targetFingerprint) {
             + (username_skeleton LIKE :fragmentB)::int
             + (username_skeleton LIKE :fragmentC)::int
           ) >= 2 THEN 82
+          WHEN name_skeleton = :targetSkeleton THEN 96
+          WHEN (
+            (name_skeleton LIKE :fragmentA)::int
+            + (name_skeleton LIKE :fragmentB)::int
+            + (name_skeleton LIKE :fragmentC)::int
+          ) >= 2 THEN 90
           WHEN id = ANY(ARRAY[:avatarIds]::uuid[]) THEN 88
           WHEN :avatarDistinctive = true AND avatar = :targetAvatar THEN 70
           WHEN :targetFullName <> '' AND lower(trim(COALESCE(full_name, ''))) = :targetFullName THEN 60
@@ -863,6 +876,12 @@ async function findSuspects(target, targetFingerprint) {
           (username_skeleton LIKE :fragmentA)::int
           + (username_skeleton LIKE :fragmentB)::int
           + (username_skeleton LIKE :fragmentC)::int
+        ) >= 2
+        OR name_skeleton = :targetSkeleton
+        OR (
+          (name_skeleton LIKE :fragmentA)::int
+          + (name_skeleton LIKE :fragmentB)::int
+          + (name_skeleton LIKE :fragmentC)::int
         ) >= 2
         OR id = ANY(ARRAY[:avatarIds]::uuid[])
         OR (:avatarDistinctive = true AND avatar = :targetAvatar)
