@@ -10,6 +10,7 @@ const {
   IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS,
 } = require('../constants/premiumMarket');
 const avatarFingerprint = require('./avatarFingerprint');
+const signals = require('./impersonationSignals');
 const logger = require('../utils/logger');
 
 const INVISIBLE_CHARACTERS = /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/gu;
@@ -409,6 +410,34 @@ function evaluate(target, suspect) {
   if (username.reason) addReason(reasons, username.reason);
 
   /*
+   * ── Les deformations que la distance d'edition ne voit pas ─────────────
+   *
+   * `usernameAnalysis` couvre les confusables et les affixes. Restaient
+   * quatre schemas courants, chacun invisible pour une distance d'edition :
+   *
+   *   faute de frappe plausible  policiercpngo   (o et p sont voisins)
+   *   remplissage                policiercongo2, xX_policiercongo_Xx
+   *   blocs permutes             congopolicier
+   *   homophonie                 polissierkongo
+   *
+   * Le dernier compte particulierement : un pseudo se transmet a l'oral, et
+   * deux pseudos qui se prononcent pareil sont interchangeables pour qui le
+   * cherche de memoire.
+   *
+   * On prend la MEILLEURE lecture, et son etiquette voyage jusqu'a l'alerte :
+   * « pseudo qui se prononce pareil » ne se defend pas comme « pseudo a une
+   * lettre pres », et la personne visee doit pouvoir juger.
+   */
+  const handle = signals.handleAnalysis(target.username, suspect.username);
+  if (handle.score >= 0.9 && handle.score > username.score) {
+    addReason(reasons, `handle_${handle.kind}`);
+    score = Math.max(score, 0.72 + (handle.score - 0.9) * 2.4);
+  } else if (handle.score >= 0.78 && username.score === 0) {
+    addReason(reasons, `handle_${handle.kind}`);
+    score = Math.max(score, 0.4 + (handle.score - 0.78) * 1.6);
+  }
+
+  /*
    * ── La photo, comparée par son CONTENU ────────────────────────────────
    *
    * L'égalité d'URL qui servait ici ne pouvait structurellement jamais se
@@ -470,8 +499,26 @@ function evaluate(target, suspect) {
   const suspectBio = normalizeProfileText(suspect.bio);
   const comparableBio = targetBio.length >= 20 && suspectBio.length >= 20;
   const exactBio = comparableBio && targetBio === suspectBio;
+  /*
+   * Le recouvrement brut donne deja 0,3 entre deux bios francaises sans aucun
+   * rapport : « de », « la », « pour » sont partages par tout le monde. On y
+   * ajoute donc une lecture PONDEREE PAR LA RARETE — reprendre « astreinte »
+   * n'a pas la portee de reprendre « toujours » — et la plus longue suite de
+   * mots identiques, qui ne se dilue pas avec la longueur du texte : personne
+   * n'ecrit par hasard six mots consecutifs identiques.
+   */
+  const weighted = comparableBio
+    ? signals.weightedOverlap(target.bio, suspect.bio, suspect._bioFrequencies, suspect._bioCorpusSize)
+    : 0;
+  const sharedRun = comparableBio ? signals.longestSharedRun(target.bio, suspect.bio) : 0;
   const bioSimilarity = comparableBio
-    ? Math.max(tokenJaccard(targetBio, suspectBio), diceCoefficient(targetBio, suspectBio))
+    ? Math.max(
+      tokenJaccard(targetBio, suspectBio),
+      diceCoefficient(targetBio, suspectBio),
+      weighted,
+      // Six mots d'affilee valent une bio quasi identique.
+      sharedRun >= 6 ? 0.9 : 0,
+    )
     : 0;
   const similarBio = !exactBio && comparableBio && bioSimilarity >= 0.82;
   if (exactBio || similarBio) {
@@ -636,10 +683,43 @@ function evaluate(target, suspect) {
   if (sameAvatar && copiedContent) score = Math.max(score, 0.95);
   else if (copiedContent && (exactDisplayName || username.score > 0)) score = Math.max(score, 0.88);
 
+  /*
+   * ── L'audience : la trace la plus couteuse a effacer ──────────────────
+   *
+   * Un usurpateur demarche les abonnes de sa cible — ce sont les seuls a
+   * pouvoir se tromper. Changer de pseudo prend une seconde ; se refaire une
+   * audience prend des semaines. Ce signal-la est donc involontaire, et c'est
+   * ce qui en fait le plus solide du lot.
+   *
+   * Il ne se declenche jamais seul : deux comptes d'une petite plateforme
+   * partagent forcement des abonnes. Il CONFIRME un faisceau existant.
+   */
+  const overlap = Number(suspect._audienceOverlap) || 0;
+  if (overlap >= 0.5 && reasons.length > 0) {
+    addReason(reasons, 'targets_your_audience');
+    score += overlap >= 0.75 ? 0.22 : 0.12;
+  }
+
+  /*
+   * Le contexte ne s'ajoute pas, il MULTIPLIE — c'est ce qui distingue deux
+   * comptes aux signaux identiques mais aux situations opposees. Le cas qui
+   * compte : un compte ANTERIEUR a la cible ne l'usurpe pas, il etait la
+   * avant. Sans ce garde-fou, on signale le compte historique a l'arrivant.
+   */
+  const context = signals.contextMultiplier(target, suspect);
+  score *= context.factor;
+  for (const reason of context.reasons) addReason(reasons, reason);
+
   return {
     score: Math.round(clamp(score) * 1000) / 1000,
     reasons,
     metrics: {
+      handle_kind: handle.kind,
+      handle_score: Math.round(handle.score * 1000) / 1000,
+      bio_weighted: Math.round(weighted * 1000) / 1000,
+      bio_shared_run: sharedRun,
+      audience_overlap: Math.round(overlap * 1000) / 1000,
+      context_factor: Math.round(context.factor * 100) / 100,
       username,
       same_avatar: sameAvatar,
       same_avatar_by: sameAvatar ? (samePixels ? 'pixels' : 'url') : null,
@@ -890,6 +970,104 @@ async function contentOverlap(targetId, suspectIds) {
   return result;
 }
 
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Signaux relationnels et de contexte
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Abonnes d'un compte, en identifiants.
+ *
+ * Plafonne : au-dela, le recouvrement est deja statistiquement etabli et
+ * charger cent mille lignes pour affiner la troisieme decimale n'apporte rien.
+ */
+const AUDIENCE_CAP = 3000;
+
+async function followerIdsOf(userIds) {
+  const ids = [...new Set(userIds.map(String))].filter(Boolean);
+  if (!ids.length) return new Map();
+  const rows = await queryRead(`
+    SELECT following_id::text AS owner, follower_id::text AS follower
+    FROM (
+      SELECT following_id, follower_id,
+             row_number() OVER (PARTITION BY following_id ORDER BY created_at DESC) AS rank
+      FROM user_follows
+      WHERE following_id = ANY(ARRAY[:ids]::uuid[])
+        AND status = 'active'
+        AND COALESCE(is_data_test, false) = false
+    ) ranked
+    WHERE rank <= :cap
+  `, { replacements: { ids, cap: AUDIENCE_CAP }, type: sequelize.QueryTypes.SELECT });
+
+  const map = new Map();
+  for (const row of rows) {
+    if (!map.has(row.owner)) map.set(row.owner, new Set());
+    map.get(row.owner).add(row.follower);
+  }
+  return map;
+}
+
+/**
+ * Nombre de tweets et d'abonnes, pour le multiplicateur de contexte.
+ *
+ * Lu directement plutot que depuis `users.stats` : ce champ JSONB est mis a
+ * jour par des chemins multiples et peut deriver. Un compte qu'on s'apprete a
+ * signaler merite un comptage exact.
+ */
+async function activityOf(userIds) {
+  const ids = [...new Set(userIds.map(String))].filter(Boolean);
+  if (!ids.length) return new Map();
+  const rows = await queryRead(`
+    SELECT u.id::text AS id,
+      (SELECT COUNT(*) FROM tweets t
+        WHERE t.user_id = u.id AND t.deleted_at IS NULL
+          AND COALESCE(t.is_data_test, false) = false) AS tweets,
+      (SELECT COUNT(*) FROM user_follows f
+        WHERE f.following_id = u.id AND f.status = 'active'
+          AND COALESCE(f.is_data_test, false) = false) AS followers
+    FROM users u
+    WHERE u.id = ANY(ARRAY[:ids]::uuid[])
+  `, { replacements: { ids }, type: sequelize.QueryTypes.SELECT });
+  const map = new Map();
+  for (const row of rows) {
+    map.set(row.id, { tweets: Number(row.tweets) || 0, followers: Number(row.followers) || 0 });
+  }
+  return map;
+}
+
+/**
+ * Frequence des mots dans les bios recentes, pour ponderer la rarete.
+ *
+ * Sans corpus, « astreinte » et « bienvenue » pesent pareil, et deux bios
+ * banales se ressemblent autant que deux bios copiees. Un echantillon suffit :
+ * on ne cherche pas une frequence exacte, seulement l'ordre de grandeur qui
+ * separe un mot courant d'un mot rare.
+ */
+let bioCorpus = { frequencies: new Map(), size: 0, builtAt: 0 };
+const CORPUS_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function ensureBioCorpus() {
+  if (bioCorpus.size && Date.now() - bioCorpus.builtAt < CORPUS_TTL_MS) return bioCorpus;
+  try {
+    const rows = await queryRead(`
+      SELECT bio FROM users
+      WHERE bio IS NOT NULL AND length(bio) > 20
+        AND is_active = true AND COALESCE(is_data_test, false) = false
+      LIMIT 2000
+    `, { type: sequelize.QueryTypes.SELECT });
+    const frequencies = new Map();
+    for (const row of rows) {
+      for (const word of new Set(signals.contentWords(row.bio))) {
+        frequencies.set(word, (frequencies.get(word) || 0) + 1);
+      }
+    }
+    bioCorpus = { frequencies, size: rows.length, builtAt: Date.now() };
+  } catch (error) {
+    logger.warn(`[usurpation] corpus de bios indisponible : ${error.message}`);
+  }
+  return bioCorpus;
+}
+
 /** Suspects plausibles pour un compte, sans balayer toute la table `users`. */
 async function findSuspects(target, targetFingerprint) {
   const since = new Date(Date.now() - IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS * 86400000);
@@ -1052,6 +1230,30 @@ async function scanUser(userId) {
   const overlap = await contentOverlap(target.id, suspects.map((s) => s.id));
   for (const suspect of suspects) {
     suspect._contentSimilarity = overlap.get(String(suspect.id)) || 0;
+  }
+
+  /*
+   * Les trois enrichissements qui demandent la base, tous groupes : une seule
+   * requete chacun pour l'ensemble des suspects, jamais une par suspect. Le
+   * scan tourne toutes les heures pour chaque abonne — N+1 ici se paierait a
+   * chaque passage.
+   */
+  const suspectIds = suspects.map((suspect) => String(suspect.id));
+  const [audiences, activity, corpus] = await Promise.all([
+    followerIdsOf([String(target.id), ...suspectIds]),
+    activityOf(suspectIds),
+    ensureBioCorpus(),
+  ]);
+
+  const targetAudience = audiences.get(String(target.id)) || new Set();
+  for (const suspect of suspects) {
+    const id = String(suspect.id);
+    suspect._audienceOverlap = signals.audienceOverlap(targetAudience, audiences.get(id) || []);
+    const counts = activity.get(id);
+    suspect._tweetCount = counts?.tweets;
+    suspect._followerCount = counts?.followers;
+    suspect._bioFrequencies = corpus.frequencies;
+    suspect._bioCorpusSize = corpus.size;
   }
 
   for (const suspect of suspects) {
