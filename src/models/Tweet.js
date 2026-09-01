@@ -340,8 +340,17 @@ const tweetSchema = {
         if (!Array.isArray(value)) {
           throw new Error('media_urls doit être un tableau');
         }
-        if (value.length > 4) {
-          throw new Error('Maximum 4 médias par tweet');
+        // Plafond ABSOLU, pas le plafond du palier : le plafond par palier
+        // (4 en standard, 8 en Ultra) est appliqué à la source, dans la route,
+        // par `tweetImageService.sanitizeMediaUrls({ maxImages })`. Ce
+        // validateur de modèle n'a pas accès au palier de l'auteur ; il ne fait
+        // que borner au maximum possible. Il valait 4 en dur — donc tout tweet
+        // Ultra à plus de 4 images partait en 500 alors que la route l'avait
+        // laissé passer. La valeur doit rester alignée sur
+        // `MAX_IMAGES_PER_TWEET_ULTRA` (tweetImageService.js).
+        const MAX_MEDIA_ABSOLUTE = 8;
+        if (value.length > MAX_MEDIA_ABSOLUTE) {
+          throw new Error(`Maximum ${MAX_MEDIA_ABSOLUTE} médias par tweet`);
         }
         value.forEach(url => {
           if (typeof url !== 'string' || (!url.startsWith('http') && !url.startsWith('/storage/'))) {
