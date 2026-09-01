@@ -32,7 +32,7 @@
 
 const sharp = require('sharp');
 
-const { getPublicMediaOrigin } = require('../utils/publicMediaOrigin');
+const { getPublicMediaOrigin, rewriteMediaUrl } = require('../utils/publicMediaOrigin');
 const logger = require('../utils/logger');
 
 /**
@@ -150,12 +150,21 @@ const AVATAR_MAX_BYTES = 4 * 1024 * 1024;
 
 /** L'avatar, en octets — ou `null`, ce qui n'est jamais une erreur. */
 async function fetchAvatarBytes(url) {
-  if (!isOwnMediaUrl(url)) return null;
+  // Normalise d'abord vers le domaine public COURANT. Les épingles chargent
+  // l'avatar par SQL brut (pas via le toJSON du modèle), donc sans le
+  // `rewriteMediaUrl` que celui-ci applique : un avatar stocké sous un ancien
+  // domaine (`twitninf.duckdns.org/static/avatars/…`) gardait cet hôte, que
+  // `isOwnMediaUrl` rejette depuis le passage à `api.twitninf.fr` — d'où des
+  // épingles vides pour tous les comptes sauf ceux dont l'avatar venait d'être
+  // réuploadé. Le fichier vit toujours au même chemin `/static/avatars/…` sur
+  // le VPS A ; seul l'hôte devait être réécrit.
+  const normalized = rewriteMediaUrl(url);
+  if (!isOwnMediaUrl(normalized)) return null;
 
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), AVATAR_FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { signal: abort.signal, redirect: 'error' });
+    const response = await fetch(normalized, { signal: abort.signal, redirect: 'error' });
     if (!response.ok) return null;
 
     const declared = Number(response.headers.get('content-length'));
