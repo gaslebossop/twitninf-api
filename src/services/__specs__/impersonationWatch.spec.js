@@ -281,3 +281,252 @@ describe('findSuspects', () => {
     expect(options.replacements.targetSkeleton).toBe('gaslebossop');
   });
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Les trois trous qui laissaient passer des comptes usurpés
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe('photo comparée au CONTENU, plus à l\'URL', () => {
+  // Une empreinte : 16 caractères hexadécimaux.
+  const print = (hex, color) => ({ dhash: hex, ahash: hex, color });
+  const IDENTIQUE = 'a1b2c3d4e5f60718';
+  // Un seul bit change : c'est l'ordre de grandeur mesuré sur de vrais
+  // avatars après un redimensionnement en 96 px et une recompression JPEG 55.
+  const RETAILLE  = 'a1b2c3d4e5f60719';
+  const AUTRE     = '0f0f0f0f0f0f0f0f';
+
+  test('la même photo réuploadée est détectée, malgré des URL différentes', () => {
+    // LE bug d'origine : un upload nomme le fichier
+    // `<uuid-de-l-uploadeur>-<horodatage>-<aléa>.jpg`, donc deux comptes ont
+    // TOUJOURS des URL différentes pour une image identique. L'égalité d'URL
+    // ne pouvait structurellement jamais se déclencher.
+    const withPrint = evaluate(
+      { ...target, _fingerprint: print(IDENTIQUE) },
+      {
+        username: 'compte-sans-rapport-2026',
+        full_name: 'Autre Personne',
+        avatar: '/storage/avatars/AUTRE-URL-1785.jpg',
+        bio: null,
+        _fingerprint: print(IDENTIQUE),
+      },
+    );
+    expect(withPrint.reasons).toContain('same_avatar');
+    expect(withPrint.metrics.same_avatar_by).toBe('pixels');
+  });
+
+  test('un redimensionnement + recompression reste la même photo', () => {
+    const result = evaluate(
+      { ...target, _fingerprint: print(IDENTIQUE) },
+      {
+        username: 'gasIebossop',
+        full_name: 'Gas',
+        avatar: '/storage/avatars/autre.jpg',
+        bio: null,
+        _fingerprint: print(RETAILLE),
+      },
+    );
+    expect(result.reasons).toContain('same_avatar');
+  });
+
+  test('deux photos différentes ne déclenchent rien', () => {
+    const result = evaluate(
+      { ...target, _fingerprint: print(IDENTIQUE) },
+      {
+        username: 'quelquun-dautre',
+        full_name: 'Quelqu un D autre',
+        avatar: '/storage/avatars/x.jpg',
+        bio: null,
+        _fingerprint: print(AUTRE),
+      },
+    );
+    expect(result.reasons).not.toContain('same_avatar');
+  });
+
+  test('le recadrage ne suffit JAMAIS seul à accuser', () => {
+    // La signature couleur tolère le recadrage mais sépare mal : deux avatars
+    // sans rapport atteignent 0,943 de similarité. Employée seule, elle
+    // désignerait des inconnus.
+    const color = new Array(64).fill(1 / 64);
+    const result = evaluate(
+      { ...target, _fingerprint: print(IDENTIQUE, color) },
+      {
+        username: 'aucun-rapport-du-tout',
+        full_name: 'Sans Rapport Aucun',
+        avatar: '/storage/avatars/y.jpg',
+        bio: null,
+        _fingerprint: print(AUTRE, color),
+      },
+    );
+    // Le nom affiché distinctif ouvre une raison, donc le recadrage peut la
+    // renforcer — mais il ne doit jamais porter l'accusation à lui seul.
+    expect(result.score).toBeLessThan(0.72);
+  });
+});
+
+describe('contenu publié recopié', () => {
+  test('recopier les tweets est un signal fort, mais pas une usurpation à lui seul', () => {
+    // Aucun signal ne regardait ce qui est PUBLIÉ : un compte pouvait
+    // republier mot pour mot et rester invisible.
+    //
+    // Mais recopier des textes sous un autre nom, une autre photo et un autre
+    // pseudo, c'est du vol de contenu — pas une usurpation d'IDENTITÉ, et
+    // cette veille-ci accuse quelqu'un de se faire passer pour vous. Le signal
+    // pèse donc lourd sans franchir le seuil seul.
+    const result = evaluate(target, {
+      username: 'un-pseudo-sans-lien',
+      full_name: 'Nom Different Ici',
+      avatar: null,
+      bio: null,
+      _contentSimilarity: 0.92,
+    });
+    expect(result.reasons).toContain('copied_tweets');
+    expect(result.score).toBeLessThan(IMPERSONATION_SIMILARITY_THRESHOLD);
+  });
+
+  test('tweets recopiés + nom repris franchissent le seuil', () => {
+    // Le couple est ce qui distingue l'usurpation du plagiat : reprendre
+    // l'identité ET la parole.
+    const result = evaluate(
+      { ...target, full_name: 'Kospor et Caramel' },
+      {
+        username: 'un-pseudo-sans-lien',
+        full_name: 'Kospor et Caramel',
+        avatar: null,
+        bio: null,
+        _contentSimilarity: 0.92,
+      },
+    );
+    expect(result.reasons).toEqual(expect.arrayContaining(['copied_tweets', 'same_display_name']));
+    expect(result.score).toBeGreaterThanOrEqual(IMPERSONATION_SIMILARITY_THRESHOLD);
+  });
+
+  test('quelques phrases banales en commun ne suffisent pas', () => {
+    const result = evaluate(target, {
+      username: 'un-pseudo-sans-lien',
+      full_name: 'Nom Different Ici',
+      avatar: null,
+      bio: null,
+      _contentSimilarity: 0.3,
+    });
+    expect(result.reasons).not.toContain('copied_tweets');
+  });
+
+  test('photo reprise ET tweets recopiés ne laissent aucune lecture innocente', () => {
+    const p = { dhash: 'a1b2c3d4e5f60718', ahash: 'a1b2c3d4e5f60718' };
+    const result = evaluate(
+      { ...target, _fingerprint: p },
+      {
+        username: 'nimporte-quoi',
+        full_name: 'Nom Different',
+        avatar: '/storage/avatars/z.jpg',
+        bio: null,
+        _fingerprint: p,
+        _contentSimilarity: 0.9,
+      },
+    );
+    expect(result.score).toBeGreaterThanOrEqual(0.95);
+  });
+});
+
+describe('nom affiché seul', () => {
+  test('un nom distinctif copié compte, même sans autre signal', () => {
+    // Le nom affiché ne pesait QUE s'il accompagnait déjà autre chose. Un
+    // compte reprenant « Kospor et Caramel » sous un pseudo sans ressemblance
+    // marquait donc zéro — alors que c'est le nom, pas le pseudo, que lisent
+    // les gens dans le fil.
+    const result = evaluate(
+      { ...target, full_name: 'Kospor et Caramel' },
+      {
+        username: 'aucun-rapport-2026',
+        full_name: 'Kospor et Caramel',
+        avatar: null,
+        bio: null,
+      },
+    );
+    expect(result.reasons).toContain('same_display_name');
+  });
+
+  test('un nom court reste partagé par des milliers de gens', () => {
+    const result = evaluate(
+      { ...target, full_name: 'Leo' },
+      { username: 'aucun-rapport-2026', full_name: 'Leo', avatar: null, bio: null },
+    );
+    expect(result.reasons).not.toContain('same_display_name');
+  });
+});
+
+describe('croisement des champs', () => {
+  // Le cas reel qui passait a travers : un compte nomme `fanfanpolicier`
+  // portait « policiercong » comme NOM AFFICHE — a une lettre du PSEUDO de sa
+  // cible, `policiercongo`. Tout etait compare champ a champ, donc rien ne
+  // pouvait le voir : son pseudo ne ressemble pas au pseudo, son nom ne
+  // ressemble pas au nom.
+  const officiel = {
+    username: 'policiercongo',
+    full_name: 'Congo',
+    avatar: null,
+    bio: 'Je traîne ici surtout la nuit.',
+  };
+
+  test('un nom affiché qui copie le PSEUDO de la cible est détecté', () => {
+    const result = evaluate(officiel, {
+      username: 'fanfanpolicier',
+      full_name: 'policiercong',
+      avatar: null,
+      bio: null,
+    });
+    expect(result.reasons).toContain('cross_field_copy');
+    expect(result.score).toBeGreaterThanOrEqual(IMPERSONATION_SIMILARITY_THRESHOLD);
+  });
+
+  test('contenir le pseudo ne suffit pas — un fan-club n\'usurpe personne', () => {
+    // « policiercongo fan club » contient le pseudo sans se faire passer pour
+    // lui. La contenance seule doit rester un indice, jamais une accusation.
+    const result = evaluate(officiel, {
+      username: 'clubdesfans2026',
+      full_name: 'policiercongo fan club',
+      avatar: null,
+      bio: null,
+    });
+    expect(result.score).toBeLessThan(IMPERSONATION_SIMILARITY_THRESHOLD);
+  });
+
+  test('deux pseudos courts qui se ressemblent ne croisent rien', () => {
+    // Sous 6 caractères, le squelette de trop de mots se confond.
+    const result = evaluate(
+      { username: 'leo', full_name: 'Leo', avatar: null, bio: null },
+      { username: 'leon', full_name: 'leo', avatar: null, bio: null },
+    );
+    expect(result.reasons).not.toContain('cross_field_copy');
+  });
+});
+
+describe('bio qui revendique l\'identité', () => {
+  test('« officiel compte de <cible> » est une revendication explicite', () => {
+    // Le seul signal du lot où l'auteur écrit noir sur blanc ce qu'il fait —
+    // et il ne coûtait rien à lire.
+    const result = evaluate(
+      { username: 'policiercongo', full_name: 'Congo', avatar: null, bio: 'La nuit.' },
+      {
+        username: 'compte-neutre-2026',
+        full_name: 'Un Nom Quelconque',
+        avatar: null,
+        bio: 'officiel compte de policiercongo',
+      },
+    );
+    expect(result.reasons).toContain('bio_claims_identity');
+  });
+
+  test('citer quelqu\'un sans revendiquer son identité ne déclenche rien', () => {
+    const result = evaluate(
+      { username: 'policiercongo', full_name: 'Congo', avatar: null, bio: 'La nuit.' },
+      {
+        username: 'compte-neutre-2026',
+        full_name: 'Un Nom Quelconque',
+        avatar: null,
+        bio: 'je discute souvent avec policiercongo, sympa',
+      },
+    );
+    expect(result.reasons).not.toContain('bio_claims_identity');
+  });
+});

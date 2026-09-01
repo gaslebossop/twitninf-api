@@ -1,4 +1,4 @@
-const { User, ImpersonationAlert, Notification } = require('../models');
+const { User, ImpersonationAlert, Notification, UserAvatarFingerprint } = require('../models');
 const { sequelize } = require('../database/index');
 // Veille horaire : elle balaie toute la table `users` pour chaque abonné, et
 // n'écrit rien. C'est exactement le type de requête à sortir du primaire —
@@ -9,6 +9,7 @@ const {
   IMPERSONATION_SIMILARITY_THRESHOLD,
   IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS,
 } = require('../constants/premiumMarket');
+const avatarFingerprint = require('./avatarFingerprint');
 const logger = require('../utils/logger');
 
 const INVISIBLE_CHARACTERS = /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/gu;
@@ -407,13 +408,38 @@ function evaluate(target, suspect) {
   let score = username.score;
   if (username.reason) addReason(reasons, username.reason);
 
+  /*
+   * ── La photo, comparée par son CONTENU ────────────────────────────────
+   *
+   * L'égalité d'URL qui servait ici ne pouvait structurellement jamais se
+   * déclencher entre deux comptes : un upload produit un nom de fichier de la
+   * forme `<uuid-de-l-uploadeur>-<horodatage>-<aléa>.jpg`, donc l'identifiant
+   * du compte est DANS l'URL. Deux personnes téléversant la même image
+   * obtenaient toujours deux URL différentes. Le signal le plus fort des trois
+   * était mort depuis l'origine — c'est ce qui laissait passer les comptes
+   * usurpés créés pour le test.
+   *
+   * On compare désormais des empreintes perceptuelles (voir
+   * `avatarFingerprint`) : reprendre la photo, la retailler et la recompresser
+   * ne change presque aucun bit.
+   */
   const targetAvatar = canonicalAvatar(target.avatar);
   const suspectAvatar = canonicalAvatar(suspect.avatar);
   const avatarDistinctive = suspect._sharedAvatarDistinctive !== false
     && !isKnownDefaultAvatar(targetAvatar);
-  const sameAvatar = Boolean(
-    targetAvatar && suspectAvatar && targetAvatar === suspectAvatar && avatarDistinctive,
-  );
+
+  const sameUrl = Boolean(targetAvatar && suspectAvatar && targetAvatar === suspectAvatar);
+  const samePixels = avatarFingerprint.sameImage(target._fingerprint, suspect._fingerprint);
+  const sameAvatar = Boolean((sameUrl || samePixels) && avatarDistinctive);
+
+  // Recadrage : la dHash décroche (la grille se décale), la signature couleur
+  // tient. Mais elle sépare mal — deux avatars sans rapport atteignent 0,943 —
+  // donc ce signal ne vaut QUE s'il vient renforcer autre chose. Seul, il
+  // désignerait des inconnus.
+  const croppedAvatar = !sameAvatar
+    && avatarDistinctive
+    && avatarFingerprint.likelyCroppedCopy(target._fingerprint, suspect._fingerprint);
+
   if (sameAvatar) {
     addReason(reasons, 'same_avatar');
     score += username.score > 0 ? 0.14 : 0.32;
@@ -445,9 +471,130 @@ function evaluate(target, suspect) {
     )
     : 0;
   const similarDisplayName = !exactDisplayName && comparableDisplayName && displaySimilarity >= 0.9;
-  if ((exactDisplayName || similarDisplayName) && reasons.length > 0) {
+
+  /*
+   * Le nom affiché comptait UNIQUEMENT s'il accompagnait déjà un autre signal
+   * (`reasons.length > 0`). Un compte qui reprend « Kospor et Caramel » à
+   * l'identique sous un pseudo sans ressemblance marquait donc zéro — alors
+   * que c'est le nom affiché, pas le pseudo, que lisent les gens dans le fil.
+   *
+   * Il pèse maintenant seul, mais deux fois moins : un nom courant est
+   * légitimement partagé, un pseudo bien moins.
+   */
+  const corroborated = reasons.length > 0;
+  // Un nom court est porte legitimement par des milliers de gens : « Gas »,
+  // « Leo », « Marie ». Il ne devient une PREUVE que s'il est distinctif, ou
+  // s'il vient confirmer un autre signal. Le seuil porte sur le nom normalise,
+  // donc sur des lettres reelles, pas sur des espaces ou des emojis.
+  const distinctiveDisplayName = targetDisplayName.replace(/\s+/g, '').length >= 8;
+  if ((exactDisplayName || similarDisplayName) && (corroborated || distinctiveDisplayName)) {
     addReason(reasons, 'same_display_name');
-    score += exactDisplayName ? 0.1 : 0.06;
+    if (exactDisplayName) score += corroborated ? 0.1 : 0.34;
+    else score += corroborated ? 0.06 : 0.18;
+  }
+
+  /*
+   * ── Le contenu publié ─────────────────────────────────────────────────
+   *
+   * Un usurpateur recopie les tweets de sa cible pour rendre le compte
+   * crédible. Aucun signal ne regardait ce qui était PUBLIÉ : un compte
+   * pouvait republier mot pour mot et passer inaperçu.
+   *
+   * Mesuré sur les tweets récents des deux comptes (voir `contentOverlap`).
+   * Reprendre le texte de quelqu'un est un geste beaucoup plus délibéré que
+   * porter le même prénom — d'où un poids élevé même sans autre signal.
+   */
+  /*
+   * ── Le croisement des champs ──────────────────────────────────────────
+   *
+   * Tout etait compare champ a champ : pseudo contre pseudo, nom contre nom,
+   * bio contre bio. Or un usurpateur MELANGE les champs — c'est meme le
+   * schema le plus courant, parce qu'il rend le compte credible sans copier
+   * le pseudo, qui est la seule chose que la plateforme empeche de dupliquer.
+   *
+   * Cas reel manque par l'ancienne version : un compte nomme `fanfanpolicier`
+   * portait « policiercong » comme NOM AFFICHE — a une lettre du PSEUDO de sa
+   * cible, `policiercongo`. Aucun signal ne pouvait le voir : son pseudo ne
+   * ressemble pas au pseudo, et son nom ne ressemble pas au nom.
+   *
+   * On compare donc aussi en diagonale. Le nom affiche est ce que les gens
+   * lisent dans le fil ; y mettre le pseudo de quelqu'un d'autre n'a qu'une
+   * seule raison d'etre.
+   */
+  const targetHandle = normalizeLookalike(target.username);
+  const suspectHandle = normalizeLookalike(suspect.username);
+  const targetNameSkeleton = confusableSkeleton(target.full_name);
+  const suspectNameSkeleton = confusableSkeleton(suspect.full_name);
+
+  const crossPairs = [
+    [suspectNameSkeleton, targetHandle],   // son NOM copie ton PSEUDO
+    [suspectHandle, targetNameSkeleton],   // son PSEUDO copie ton NOM
+  ];
+  let crossSimilarity = 0;
+  let crossContainmentOnly = false;
+  for (const [a, b] of crossPairs) {
+    // Sous 6 caracteres, la ressemblance ne prouve rien : trop de mots courts
+    // se ressemblent une fois reduits a leur squelette.
+    if (a.length < 6 || b.length < 6) continue;
+    const edit = similarity(a, b);
+    if (edit > crossSimilarity) { crossSimilarity = edit; crossContainmentOnly = false; }
+    // La CONTENANCE est un signal bien plus faible que la quasi-egalite :
+    // « policiercongo fan club » contient le pseudo sans se faire passer pour
+    // lui. On la retient, mais separement et pour beaucoup moins.
+    if (edit < 0.6 && (a.includes(b) || b.includes(a)) && crossSimilarity < 0.6) {
+      crossSimilarity = 0.6;
+      crossContainmentOnly = true;
+    }
+  }
+
+  if (crossSimilarity >= 0.6) {
+    addReason(reasons, 'cross_field_copy');
+    if (crossContainmentOnly) {
+      // Contenance seule : ne doit jamais suffire.
+      score += 0.2;
+    } else if (crossSimilarity >= 0.92) {
+      // Un nom affiche a une lettre du pseudo de la cible. Il n'existe pas de
+      // raison innocente de s'appeler « policiercong » quand « policiercongo »
+      // existe deja — c'est le cas reel que l'ancienne version laissait
+      // passer. Suffisant seul pour PREVENIR la personne visee : l'alerte
+      // l'informe, elle ne sanctionne personne, et elle s'ecarte d'un geste.
+      score += 0.75;
+    } else if (crossSimilarity >= 0.85) {
+      score += 0.42;
+    } else {
+      score += 0.22;
+    }
+  }
+
+  /*
+   * Une bio qui REVENDIQUE d'etre le compte de la cible.
+   *
+   * « officiel compte de policiercongolevrai », « le vrai <pseudo> » : le
+   * texte lui-meme dit l'intention. C'est le seul signal du lot ou l'auteur
+   * ecrit noir sur blanc ce qu'il fait, et il ne coutait rien a lire.
+   */
+  const claimWords = /(officiel|official|le ?vrai|real|authentique|compte de|page de)/i;
+  const bioClaimsTarget = Boolean(
+    targetHandle.length >= 6
+    && suspectBio
+    && claimWords.test(suspect.bio || '')
+    && confusableSkeleton(suspect.bio).includes(targetHandle),
+  );
+  if (bioClaimsTarget) {
+    addReason(reasons, 'bio_claims_identity');
+    score += 0.3;
+  }
+
+  const contentSimilarity = Number(suspect._contentSimilarity) || 0;
+  const copiedContent = contentSimilarity >= 0.6;
+  if (copiedContent) {
+    addReason(reasons, 'copied_tweets');
+    score += contentSimilarity >= 0.85 ? 0.4 : 0.24;
+  }
+
+  if (croppedAvatar && reasons.length > 0) {
+    addReason(reasons, 'cropped_avatar');
+    score += 0.12;
   }
 
   // Synergies de profil : une copie exacte de la photo + du nom ou de la bio
@@ -457,23 +604,201 @@ function evaluate(target, suspect) {
   else if (sameAvatar && exactDisplayName) score = Math.max(score, 0.79);
   else if (exactBio && exactDisplayName) score = Math.max(score, 0.77);
 
+  // Reprendre la photo ET les publications ne laisse plus de lecture
+  // innocente : ce sont deux gestes deliberes qui visent la meme personne.
+  if (sameAvatar && copiedContent) score = Math.max(score, 0.95);
+  else if (copiedContent && (exactDisplayName || username.score > 0)) score = Math.max(score, 0.88);
+
   return {
     score: Math.round(clamp(score) * 1000) / 1000,
     reasons,
     metrics: {
       username,
       same_avatar: sameAvatar,
+      same_avatar_by: sameAvatar ? (samePixels ? 'pixels' : 'url') : null,
+      cropped_avatar: croppedAvatar,
       bio_similarity: Math.round(bioSimilarity * 1000) / 1000,
       display_name_similarity: Math.round(displaySimilarity * 1000) / 1000,
+      content_similarity: Math.round(contentSimilarity * 1000) / 1000,
+      cross_field_similarity: Math.round(crossSimilarity * 1000) / 1000,
+      bio_claims_identity: bioClaimsTarget,
     },
   };
 }
 
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Empreintes de photo et contenu publié
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Empreinte perceptuelle d'un compte, calculée à la demande puis mémorisée.
+ *
+ * Le calcul lit un fichier et le décode : le refaire à chaque balayage horaire
+ * pour chaque compte coûterait des milliers de décodages par heure pour un
+ * résultat identique. La ligne est donc conservée et n'est recalculée que
+ * lorsque l'URL de la photo change — c'est-à-dire quand la personne en change.
+ *
+ * `unreadable` est mémorisé aussi : une image corrompue échouerait sinon à
+ * chaque passage, indéfiniment, pour un résultat connu d'avance.
+ */
+async function ensureFingerprint(user) {
+  const avatarUrl = String(user?.avatar || '').trim();
+  if (!avatarUrl || isKnownDefaultAvatar(avatarUrl)) return null;
+
+  const existing = await UserAvatarFingerprint.findByPk(user.id);
+  if (existing && existing.avatar_url === avatarUrl) {
+    return existing.unreadable
+      ? null
+      : { dhash: existing.dhash, ahash: existing.ahash, color: existing.color };
+  }
+
+  const computed = await avatarFingerprint.fingerprintAvatar(avatarUrl);
+  const row = {
+    user_id: user.id,
+    avatar_url: avatarUrl,
+    dhash: computed?.dhash || null,
+    ahash: computed?.ahash || null,
+    color: computed?.color || null,
+    unreadable: !computed,
+    computed_at: new Date(),
+  };
+  try {
+    await UserAvatarFingerprint.upsert(row);
+  } catch (error) {
+    // Une empreinte qu'on n'a pas pu écrire ne doit pas interrompre la veille :
+    // on s'en sert quand même pour ce passage-ci.
+    logger.warn(`[usurpation] empreinte non enregistrée pour ${user.id} : ${error.message}`);
+  }
+  return computed;
+}
+
+/**
+ * Comptes dont la photo ressemble à celle de la cible.
+ *
+ * ── Pourquoi des bandes et pas une égalité ───────────────────────────────
+ *
+ * Un réupload identique donne la même dHash, mais un redimensionnement ou une
+ * recompression en décale 1 à 3 bits (mesuré sur de vrais avatars) : l'égalité
+ * exacte les manquerait, et ce sont précisément les cas courants.
+ *
+ * La dHash est donc découpée en quatre bandes de 16 bits. Par le principe des
+ * tiroirs, deux empreintes distantes de 3 bits ou moins partagent forcément au
+ * moins une bande à l'identique. On récupère ce vivier, puis la distance de
+ * Hamming tranche en mémoire — sur quelques dizaines de lignes, pas sur la
+ * table entière.
+ */
+async function avatarCandidateIds(targetId, fingerprint) {
+  if (!fingerprint?.dhash || fingerprint.dhash.length !== 16) return [];
+  const d = fingerprint.dhash;
+  const rows = await queryRead(`
+    SELECT user_id
+    FROM user_avatar_fingerprints
+    WHERE user_id <> :targetId
+      AND unreadable = false
+      AND dhash IS NOT NULL
+      AND (
+        substr(dhash, 1, 4)  = :b1
+        OR substr(dhash, 5, 4)  = :b2
+        OR substr(dhash, 9, 4)  = :b3
+        OR substr(dhash, 13, 4) = :b4
+      )
+    LIMIT 500
+  `, {
+    replacements: {
+      targetId: String(targetId),
+      b1: d.slice(0, 4),
+      b2: d.slice(4, 8),
+      b3: d.slice(8, 12),
+      b4: d.slice(12, 16),
+    },
+    type: sequelize.QueryTypes.SELECT,
+  });
+  return rows.map((row) => String(row.user_id));
+}
+
+/** Normalise un tweet pour la comparaison : on compare des MOTS, pas des pixels. */
+function normalizeTweetText(value) {
+  return normalizeProfileText(value);
+}
+
+/**
+ * Part des publications récentes du suspect qui reprennent celles de la cible.
+ *
+ * ── Pourquoi ce signal manquait, et pourquoi il pèse lourd ───────────────
+ *
+ * Aucun signal ne regardait ce qui est PUBLIÉ. Un compte pouvait recopier mot
+ * pour mot les tweets de sa cible — le moyen le plus efficace de rendre une
+ * usurpation crédible — sans que rien ne le remarque.
+ *
+ * On mesure la proportion des tweets du suspect qui ont un jumeau proche chez
+ * la cible, et non l'inverse : c'est le suspect qui copie. Prendre la moyenne
+ * des deux diluerait le signal dès que la cible publie beaucoup.
+ *
+ * Les textes très courts sont écartés : « merci », « lol » et « bonjour » sont
+ * écrits par tout le monde et ne prouvent rien.
+ */
+const MIN_TWEET_CHARS = 25;
+const TWEET_SAMPLE = 30;
+
+async function contentOverlap(targetId, suspectIds) {
+  const ids = [...new Set(suspectIds.map(String))].filter(Boolean);
+  if (!ids.length) return new Map();
+
+  const rows = await queryRead(`
+    SELECT user_id::text AS user_id, content
+    FROM (
+      SELECT user_id, content,
+             row_number() OVER (PARTITION BY user_id ORDER BY created_at DESC) AS rank
+      FROM tweets
+      WHERE user_id = ANY(ARRAY[:ids]::uuid[])
+        AND COALESCE(is_data_test, false) = false
+        AND deleted_at IS NULL
+        AND content IS NOT NULL
+    ) ranked
+    WHERE rank <= :sample
+  `, {
+    replacements: { ids: [targetId, ...ids].map(String), sample: TWEET_SAMPLE },
+    type: sequelize.QueryTypes.SELECT,
+  });
+
+  const byUser = new Map();
+  for (const row of rows) {
+    const text = normalizeTweetText(row.content);
+    if (text.length < MIN_TWEET_CHARS) continue;
+    if (!byUser.has(row.user_id)) byUser.set(row.user_id, []);
+    byUser.get(row.user_id).push(text);
+  }
+
+  const targetTexts = byUser.get(String(targetId)) || [];
+  const result = new Map();
+  if (!targetTexts.length) return result;
+
+  const targetSet = new Set(targetTexts);
+  for (const id of ids) {
+    const texts = byUser.get(id) || [];
+    if (!texts.length) continue;
+    let matched = 0;
+    for (const text of texts) {
+      if (targetSet.has(text)) { matched += 1; continue; }
+      // Une reprise avec un mot changé reste une reprise.
+      if (targetTexts.some((other) => diceCoefficient(text, other) >= 0.88)) matched += 1;
+    }
+    result.set(id, matched / texts.length);
+  }
+  return result;
+}
+
 /** Suspects plausibles pour un compte, sans balayer toute la table `users`. */
-async function findSuspects(target) {
+async function findSuspects(target, targetFingerprint) {
   const since = new Date(Date.now() - IMPERSONATION_SCAN_MAX_ACCOUNT_AGE_DAYS * 86400000);
   const normalized = normalizeLookalike(target.username);
   if (!normalized) return [];
+
+  // Comptes dont la PHOTO ressemble a celle de la cible. Sans eux, un suspect
+  // au pseudo sans rapport et a la photo reuploadee n'etait jamais candidat :
+  // le score ne tournait meme pas sur lui, quelle que soit sa qualite.
+  const avatarIds = await avatarCandidateIds(target.id, targetFingerprint);
 
   // Un avatar de défaut peut être partagé par des milliers de comptes. Il
   // n'entre dans la présélection que s'il est rare dans les comptes réels.
@@ -525,6 +850,7 @@ async function findSuspects(target) {
             + (username_skeleton LIKE :fragmentB)::int
             + (username_skeleton LIKE :fragmentC)::int
           ) >= 2 THEN 82
+          WHEN id = ANY(ARRAY[:avatarIds]::uuid[]) THEN 88
           WHEN :avatarDistinctive = true AND avatar = :targetAvatar THEN 70
           WHEN :targetFullName <> '' AND lower(trim(COALESCE(full_name, ''))) = :targetFullName THEN 60
           WHEN :targetBio <> '' AND lower(trim(COALESCE(bio, ''))) = :targetBio THEN 55
@@ -538,6 +864,7 @@ async function findSuspects(target) {
           + (username_skeleton LIKE :fragmentB)::int
           + (username_skeleton LIKE :fragmentC)::int
         ) >= 2
+        OR id = ANY(ARRAY[:avatarIds]::uuid[])
         OR (:avatarDistinctive = true AND avatar = :targetAvatar)
         OR (:targetFullName <> '' AND lower(trim(COALESCE(full_name, ''))) = :targetFullName)
         OR (:targetBio <> '' AND lower(trim(COALESCE(bio, ''))) = :targetBio)
@@ -558,6 +885,9 @@ async function findSuspects(target) {
       fragmentB: fragments[1],
       fragmentC: fragments[2],
       avatarDistinctive: avatarIsDistinctive,
+      // Tableau jamais vide : `ARRAY[]::uuid[]` sans element fait echouer
+      // l'inference de type de Postgres.
+      avatarIds: avatarIds.length ? avatarIds : ['00000000-0000-0000-0000-000000000000'],
       targetAvatar: String(target.avatar || ''),
       targetFullName: String(target.full_name || '').trim().toLowerCase(),
       targetBio: String(target.bio || '').trim().toLowerCase().slice(0, 1000),
@@ -582,8 +912,23 @@ async function scanUser(userId) {
   });
   if (!target || target.is_data_test) return 0;
 
-  const suspects = await findSuspects(target);
+  const targetFingerprint = await ensureFingerprint(target);
+  target._fingerprint = targetFingerprint;
+
+  const suspects = await findSuspects(target, targetFingerprint);
   let created = 0;
+
+  // Les empreintes des suspects sont calculees en serie et non en parallele :
+  // chaque calcul decode une image, et lancer 400 decodages de front sur le
+  // meme processus ferait tomber la latence de toutes les autres requetes.
+  for (const suspect of suspects) {
+    suspect._fingerprint = await ensureFingerprint(suspect);
+  }
+
+  const overlap = await contentOverlap(target.id, suspects.map((s) => s.id));
+  for (const suspect of suspects) {
+    suspect._contentSimilarity = overlap.get(String(suspect.id)) || 0;
+  }
 
   for (const suspect of suspects) {
     const { score, reasons } = evaluate(target, suspect);

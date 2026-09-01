@@ -13,6 +13,7 @@ const TweetLike = require('./TweetLike');
 const TweetRetweet = require('./TweetRetweet');
 const TweetBookmark = require('./TweetBookmark');
 const WeeklyTweetVote = require('./WeeklyTweetVote');
+const UserAvatarFingerprint = require('./UserAvatarFingerprint');
 const Notification = require('./Notification');
 const WebPushSubscription = require('./WebPushSubscription');
 const UserNudgeState = require('./UserNudgeState');
@@ -117,6 +118,7 @@ TweetLike.initTweetLikeModel(sequelize);
 TweetRetweet.initTweetRetweetModel(sequelize);
 TweetBookmark.initTweetBookmarkModel(sequelize);
 WeeklyTweetVote.initWeeklyTweetVoteModel(sequelize);
+UserAvatarFingerprint.initUserAvatarFingerprintModel(sequelize);
 Notification.initNotificationModel(sequelize);
 WebPushSubscription.initWebPushSubscriptionModel(sequelize);
 UserNudgeState.initUserNudgeStateModel(sequelize);
@@ -242,6 +244,15 @@ User.hasMany(WeeklyTweetVote, {
   as: 'weeklyTweetVotes',
   onDelete: 'CASCADE'
 });
+
+// Une seule empreinte courante par compte : la photo precedente n'aide pas a
+// decider si un compte en usurpe un autre aujourd'hui.
+User.hasOne(UserAvatarFingerprint, {
+  foreignKey: 'user_id',
+  as: 'avatarFingerprint',
+  onDelete: 'CASCADE'
+});
+UserAvatarFingerprint.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 
 User.hasMany(Notification, { 
   foreignKey: 'recipient_id', 
@@ -2343,6 +2354,7 @@ module.exports = {
   TweetRetweet,
   TweetBookmark,
   WeeklyTweetVote,
+  UserAvatarFingerprint,
   Notification,
   WebPushSubscription,
   UserNudgeState,
