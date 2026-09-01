@@ -422,11 +422,20 @@ const ERREURS_DEFINITIVES = [
   /^Timeout mod[èe]le/i,
   /session limit/i,
   /usage limit/i,
-  /rate.?limit/i,
+  // NB : « rate limit » n'est PAS ici. Un plafond de session/usage (compte) est
+  // définitif ; un « rate limit » passager (429 du pool partagé OpenRouter) se
+  // réessaie et se contourne par bascule de fournisseur. Les cas compte restent
+  // couverts par /session limit/, /usage limit/, /quota/, /credit/.
   /quota/i,
   /credit balance/i,
   /insufficient.*(credit|fund)/i,
-  /\b(401|402|403|429)\b/,
+  // 429 (rate-limit) est VOLONTAIREMENT absent : c'est passager. Avec
+  // allow_fallbacks, OpenRouter route vers un autre fournisseur avant même de
+  // renvoyer un 429 ; s'il en renvoie un quand même (tout est saturé), un
+  // court réessai a un sens, contrairement à un plafond de compte ou une clé
+  // invalide. Le marquer « définitif » tuait le run et le repoussait de
+  // plusieurs minutes.
+  /\b(401|402|403)\b/,
   /(unauthorized|forbidden)/i,
   /invalid api key/i,
   /authentication/i,

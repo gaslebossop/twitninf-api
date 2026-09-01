@@ -71,14 +71,20 @@ function loadV3Config(overrides = {}) {
     openrouterCacheControl: boolEnv('POLICIERCONGO_V3_OPENROUTER_CACHE_CONTROL', true),
     // Épinglage du fournisseur en amont — le levier nº1 du cache. Ce modèle est
     // servi par ~17 fournisseurs OpenRouter, CHACUN avec son propre cache : sans
-    // épinglage, OpenRouter répartit les requêtes et une bonne moitié tombe sur
-    // un cache froid (cache=0). En figeant l'ordre à un seul fournisseur qui
-    // cache, chaque tour réutilise le MÊME préfixe chaud. `allow_fallbacks=false`
-    // interdit de dériver vers un fournisseur hors liste (donc vers un cache
-    // vierge). Défaut : DeepInfra (fiable, cache, peu cher) puis DigitalOcean en
-    // secours DANS la liste — jamais un tiers au hasard.
+    // ordre stable, OpenRouter répartit les requêtes et une bonne moitié tombe
+    // sur un cache froid. On met DONC en tête les fournisseurs qui cachent
+    // (DeepInfra, DigitalOcean) : tant qu'ils répondent, tous les tours
+    // réutilisent le même préfixe chaud.
+    //
+    // MAIS `allow_fallbacks=true` : quand ces deux-là sont saturés (429 du pool
+    // partagé — vu en prod), OpenRouter DOIT pouvoir router vers un autre
+    // fournisseur. À false, un 429 des deux têtes faisait échouer tout le tour
+    // et le run repartait 5 à 60 min plus tard — d'où des réponses en 5 s et
+    // d'autres en 5 min. Un cache froid ponctuel vaut mieux qu'un run mort.
+    // Le vrai remède aux 429 est une clé fournisseur perso (BYOK) dans les
+    // réglages OpenRouter, qui sort du pool partagé.
     openrouterProviderOrder: csvEnv('POLICIERCONGO_V3_OPENROUTER_PROVIDER_ORDER', ['DeepInfra', 'DigitalOcean']),
-    openrouterAllowFallbacks: boolEnv('POLICIERCONGO_V3_OPENROUTER_ALLOW_FALLBACKS', false),
+    openrouterAllowFallbacks: boolEnv('POLICIERCONGO_V3_OPENROUTER_ALLOW_FALLBACKS', true),
     maxIterations: intEnv('POLICIERCONGO_V3_MAX_ITERATIONS', 18, 2, 64),
     maxToolCalls: intEnv('POLICIERCONGO_V3_MAX_TOOL_CALLS', 72, 1, 500),
     maxParallelReads: intEnv('POLICIERCONGO_V3_MAX_PARALLEL_READS', 6, 1, 20),
