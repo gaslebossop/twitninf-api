@@ -4,6 +4,7 @@ const router = express.Router();
 
 // Import des modèles et services
 const { User, UserFollow, Tweet, TweetLike, TweetRetweet, Notification, sequelize } = require('../models');
+const { engagementTargetId } = require('../utils/engagementTarget');
 const { Op } = require('sequelize');
 const multer = require('multer');
 const sharp = require('sharp');
@@ -1224,8 +1225,12 @@ router.get('/:id', [
  * métrique pour toute la page) au lieu d'une requête par tweet.
  */
 async function hydrateTweetStats(tweets, currentUserId) {
-  const tweetIds = tweets.map((t) => t.id);
-  if (tweetIds.length === 0) return [];
+  if (tweets.length === 0) return [];
+  // Un repost pur n'a pas d'engagement propre : likes, reposts, réponses et
+  // vues sont ceux du tweet d'origine (voir utils/engagementTarget). Compter
+  // sur la ligne du repost affichait des zéros sous un tweet populaire.
+  const statsIdOf = (tweet) => String(engagementTargetId(tweet) || tweet.id);
+  const tweetIds = [...new Set(tweets.map(statsIdOf))];
 
   const [likeCounts, retweetCounts, replyCounts, likedRows, retweetedRows] = await Promise.all([
     TweetLike.findAll({
@@ -1254,25 +1259,30 @@ async function hydrateTweetStats(tweets, currentUserId) {
       : []
   ]);
 
-  const likeCountMap = new Map(likeCounts.map((r) => [r.tweet_id, parseInt(r.count, 10)]));
-  const retweetCountMap = new Map(retweetCounts.map((r) => [r.tweet_id, parseInt(r.count, 10)]));
-  const replyCountMap = new Map(replyCounts.map((r) => [r.parent_tweet_id, parseInt(r.count, 10)]));
-  const likedSet = new Set(likedRows.map((r) => r.tweet_id));
-  const retweetedSet = new Set(retweetedRows.map((r) => r.tweet_id));
+  const likeCountMap = new Map(likeCounts.map((r) => [String(r.tweet_id), parseInt(r.count, 10)]));
+  const retweetCountMap = new Map(retweetCounts.map((r) => [String(r.tweet_id), parseInt(r.count, 10)]));
+  const replyCountMap = new Map(replyCounts.map((r) => [String(r.parent_tweet_id), parseInt(r.count, 10)]));
+  const likedSet = new Set(likedRows.map((r) => String(r.tweet_id)));
+  const retweetedSet = new Set(retweetedRows.map((r) => String(r.tweet_id)));
 
-  return tweets.map((tweet) => ({
-    ...tweet.toJSON(),
-    stats: {
-      likes: likeCountMap.get(tweet.id) || 0,
-      retweets: retweetCountMap.get(tweet.id) || 0,
-      replies: replyCountMap.get(tweet.id) || 0,
-      views: tweet.view_count || 0
-    },
-    user_interaction: {
-      is_liked: likedSet.has(tweet.id),
-      is_retweeted: retweetedSet.has(tweet.id)
-    }
-  }));
+  return tweets.map((tweet) => {
+    const sid = statsIdOf(tweet);
+    const original = (typeof tweet.getDataValue === 'function' && tweet.getDataValue('originalTweet')) || tweet.originalTweet;
+    const views = sid !== String(tweet.id) ? original?.view_count : tweet.view_count;
+    return {
+      ...tweet.toJSON(),
+      stats: {
+        likes: likeCountMap.get(sid) || 0,
+        retweets: retweetCountMap.get(sid) || 0,
+        replies: replyCountMap.get(sid) || 0,
+        views: views || 0
+      },
+      user_interaction: {
+        is_liked: likedSet.has(sid),
+        is_retweeted: retweetedSet.has(sid)
+      }
+    };
+  });
 }
 
 router.get('/:id/tweets', [
@@ -1281,7 +1291,9 @@ router.get('/:id/tweets', [
   param('id').isUUID().withMessage('ID d\'utilisateur invalide'),
   query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('La limite doit être entre 1 et 100'),
   query('offset').optional().isInt({ min: 0 }).withMessage('L\'offset doit être un nombre positif'),
-  query('type').optional().isIn(['all', 'tweets', 'replies', 'retweets', 'media', 'likes']).withMessage('Type de tweet invalide'),
+  // `posts` : ce que l'onglet « Tweets » d'un profil montre — tweets,
+  // reposts et citations, sans les réponses (qui ont leur onglet).
+  query('type').optional().isIn(['all', 'posts', 'tweets', 'replies', 'retweets', 'media', 'likes']).withMessage('Type de tweet invalide'),
   handleValidationErrors
 ], async (req, res) => {
   try {
@@ -1421,6 +1433,8 @@ router.get('/:id/tweets', [
         whereClause.parent_tweet_id = null;
         whereClause.is_retweet = false;
         whereClause.is_quote = false;
+      } else if (type === 'posts') {
+        whereClause.parent_tweet_id = null;
       } else if (type === 'media') {
         whereClause.is_retweet = false;
         whereClause[Op.and] = [
@@ -1431,13 +1445,14 @@ router.get('/:id/tweets', [
         ];
       }
 
+      const authorInclude = {
+        model: User,
+        as: 'author',
+        attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
+      };
       const rawTweets = await Tweet.findAll({
         where: whereClause,
-        include: [{
-          model: User,
-          as: 'author',
-          attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'premium', 'verification_style', 'profile_customization']
-        }],
+        include: [authorInclude],
         order: [['created_at', 'DESC']],
         limit: parseInt(limit),
         offset: parseInt(offset)
@@ -1445,7 +1460,37 @@ router.get('/:id/tweets', [
 
       totalCount = await Tweet.count({ where: whereClause });
 
-      tweets = await hydrateTweetStats(rawTweets, currentUserId);
+      // Tweet d'origine (repost, citation) et tweet parent (réponse), en une
+      // seule requête groupée. Sans l'original, un repost s'affichait comme un
+      // tweet vide ; sans le parent, une réponse n'avait aucun contexte.
+      // (Deux auto-jointures avec leur auteur dans la même requête font
+      // générer à Sequelize un SQL invalide — d'où cette seconde lecture.)
+      const relatedIds = [...new Set(rawTweets
+        .flatMap((t) => [t.original_tweet_id, t.parent_tweet_id])
+        .filter(Boolean)
+        .map(String))];
+      const related = relatedIds.length === 0 ? [] : await Tweet.findAll({
+        where: { id: relatedIds },
+        attributes: ['id', 'content', 'media_urls', 'created_at', 'view_count', 'user_id', 'is_retweet', 'is_quote',
+          'tweet_type', 'parent_tweet_id', 'original_tweet_id', 'is_private', 'moderation_status'],
+        include: [authorInclude]
+      });
+      const relatedById = new Map(related.map((r) => [String(r.id), r.get({ plain: true })]));
+      for (const t of rawTweets) {
+        if (t.original_tweet_id) t.setDataValue('originalTweet', relatedById.get(String(t.original_tweet_id)) || null);
+        if (t.parent_tweet_id) t.setDataValue('parentTweet', relatedById.get(String(t.parent_tweet_id)) || null);
+      }
+
+      // Un repost dont l'original a disparu (supprimé, privé, retiré par la
+      // modération) n'a rien à montrer : on l'écarte plutôt que d'afficher un vide.
+      const showable = rawTweets.filter((t) => {
+        const isPureRetweet = (t.is_retweet || t.tweet_type === 'retweet') && !t.is_quote;
+        if (!isPureRetweet) return true;
+        const o = t.getDataValue('originalTweet');
+        return !!o && !o.is_private && !['rejected', 'not_eligible'].includes(o.moderation_status);
+      });
+
+      tweets = await hydrateTweetStats(showable, currentUserId);
     }
 
     // Contenus payants : le profil est l'endroit le plus évident où aller
