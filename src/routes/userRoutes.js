@@ -2404,4 +2404,115 @@ router.post('/:id/unblock', [
   }
 });
 
+/**
+ * Centres d'intérêt (inscription + réglages)
+ *
+ * Stockés dans `user_preferences.content_preferences.preferred_topics`. Le JSON
+ * est FUSIONNÉ, jamais remplacé : `PUT /api/behavior/preferences` remplace
+ * l'objet entier et effacerait les autres préférences de contenu.
+ *
+ * `interests_updated_at` vaut `null` tant que l'utilisateur n'a jamais répondu
+ * (ni choisi, ni passé) : c'est ce qui dit à l'app de poser la question.
+ */
+const { INTERESTS, INTEREST_IDS, MIN_INTERESTS, MAX_INTERESTS } = require('../config/interests');
+const { UserPreferences } = require('../models');
+
+function publicCatalog() {
+  return INTERESTS.map(({ id, label }) => ({ id, label }));
+}
+
+/**
+ * GET /api/users/interests/catalog
+ * Catalogue public, pour afficher les choix avant même la connexion.
+ */
+router.get('/interests/catalog', (req, res) => {
+  res.json({
+    success: true,
+    data: { interests: publicCatalog(), min: MIN_INTERESTS, max: MAX_INTERESTS }
+  });
+});
+
+/**
+ * GET /api/users/me/interests
+ */
+router.get('/me/interests', [authenticateToken], async (req, res) => {
+  try {
+    const prefs = await UserPreferences.findOne({
+      where: { user_id: req.user.id },
+      attributes: ['content_preferences']
+    });
+    const content = prefs?.content_preferences || {};
+    const selected = Array.isArray(content.preferred_topics)
+      ? content.preferred_topics.filter((id) => INTEREST_IDS.has(id))
+      : [];
+    return res.json({
+      success: true,
+      data: {
+        interests: selected,
+        updated_at: content.interests_updated_at || null,
+        catalog: publicCatalog(),
+        min: MIN_INTERESTS,
+        max: MAX_INTERESTS
+      }
+    });
+  } catch (error) {
+    logger.error('Erreur lecture des centres d\'intérêt:', error);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
+/**
+ * PUT /api/users/me/interests
+ * Corps : { interests: string[] } — identifiants du catalogue.
+ * Une liste vide est acceptée : c'est « passer », et ça compte comme une
+ * réponse (la question ne revient pas).
+ */
+router.put('/me/interests', [
+  authenticateToken,
+  body('interests').isArray({ max: MAX_INTERESTS }).withMessage('Liste de centres d\'intérêt invalide'),
+  handleValidationErrors
+], async (req, res) => {
+  try {
+    const requested = [...new Set(req.body.interests.map((v) => String(v).trim()))];
+    const unknown = requested.filter((id) => !INTEREST_IDS.has(id));
+    if (unknown.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Centre d\'intérêt inconnu',
+        code: 'UNKNOWN_INTEREST',
+        data: { unknown }
+      });
+    }
+    if (requested.length > 0 && requested.length < MIN_INTERESTS) {
+      return res.status(400).json({
+        success: false,
+        message: `Choisis au moins ${MIN_INTERESTS} centres d'intérêt`,
+        code: 'TOO_FEW_INTERESTS'
+      });
+    }
+
+    const [prefs] = await UserPreferences.findOrCreate({
+      where: { user_id: req.user.id },
+      defaults: { user_id: req.user.id }
+    });
+    const updatedAt = new Date().toISOString();
+    // Nouvel objet : Sequelize ne détecte pas une mutation en place d'un JSON.
+    prefs.content_preferences = {
+      ...(prefs.content_preferences || {}),
+      preferred_topics: requested,
+      interests_updated_at: updatedAt
+    };
+    await prefs.save();
+
+    return res.json({
+      success: true,
+      message: 'Centres d\'intérêt enregistrés',
+      data: { interests: requested, updated_at: updatedAt }
+    });
+  } catch (error) {
+    logger.error('Erreur enregistrement des centres d\'intérêt:', error);
+    return res.status(500).json({ success: false, message: 'Erreur interne du serveur' });
+  }
+});
+
 module.exports = router;
