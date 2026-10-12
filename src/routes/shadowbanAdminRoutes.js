@@ -7,6 +7,7 @@ const similarity = require('../services/similarity');
 const rustClient = require('../services/rustRecommenderClient');
 const { STRIKE_POLICIES } = require('../config/strikePolicies');
 const logger = require('../utils/logger');
+const shadowbanGate = require('../services/shadowbanGate');
 
 const router = express.Router();
 
@@ -114,6 +115,29 @@ router.put(
     }
   }
 );
+
+/**
+ * GET /api/admin/shadowban/accounts — comptes actuellement restreints, avec
+ * leur profil. Lu dans le même Redis que le moteur : c'est la liste de ce qui
+ * s'applique vraiment, pas d'un historique.
+ */
+router.get('/accounts', async (req, res) => {
+  try {
+    const rows = await shadowbanGate.listRestricted();
+    const users = await User.findAll({
+      where: { id: rows.map((r) => r.user_id) },
+      attributes: ['id', 'username', 'full_name', 'avatar', 'verified', 'verification_style'],
+    });
+    const byId = new Map(users.map((u) => [String(u.id), u]));
+    const accounts = rows
+      .filter((r) => byId.has(r.user_id))
+      .map((r) => ({ ...r, user: byId.get(r.user_id) }));
+    return res.json({ success: true, data: { accounts } });
+  } catch (e) {
+    logger.error('shadowban accounts:', e);
+    return res.status(500).json({ success: false, message: 'Liste indisponible' });
+  }
+});
 
 router.get('/hashtags', async (req, res) => {
   try {
@@ -298,6 +322,7 @@ router.post(
         req.body.tweetId || null,
         req.body.reason || null
       );
+      shadowbanGate.invalidate(req.body.userId);
       logger.info(`[shadowban] avertissement ${req.body.policy} posé sur ${req.body.userId} par ${req.user.username}`);
       return res.json({ success: true, data: status });
     } catch (e) {
@@ -321,6 +346,7 @@ router.post(
     }
     try {
       const status = await rustClient.revokeStrike(req.body.userId, req.body.tweetId || null);
+      shadowbanGate.invalidate(req.body.userId);
       logger.info(`[shadowban] avertissements révoqués pour ${req.body.userId} par ${req.user.username}`);
       return res.json({ success: true, data: status });
     } catch (e) {
@@ -351,6 +377,7 @@ router.post(
         req.body.reason || null,
         req.body.expiresInDays || null
       );
+      shadowbanGate.invalidate(req.body.userId);
       logger.info(`[shadowban] niveau ${req.body.level} posé à la main sur ${req.body.userId} par ${req.user.username}`);
       return res.json(result);
     } catch (e) {

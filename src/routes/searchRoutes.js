@@ -11,6 +11,7 @@ const { authenticateToken, optionalAuthenticateToken, denySuspended } = require(
 const logger = require('../utils/logger');
 const { streamSearchSummary } = require('../services/searchSummaryService');
 const paidContentService = require('../services/paidContentService');
+const shadowbanGate = require('../services/shadowbanGate');
 
 router.post('/ai-summary/stream', async (req, res) => {
   const { q, type = 'all', users = [], tweets = [], hashtags = [] } = req.body || {};
@@ -153,7 +154,8 @@ router.get('/', optionalAuthenticateToken, [
 
     // Recherche d'utilisateurs
     if (type === 'all' || type === 'users') {
-      const users = await User.searchUsers(query, Math.ceil(limit / 2));
+      const users = await shadowbanGate.hideRestricted(
+        await User.searchUsers(query, Math.ceil(limit / 2)), req.user?.id, (u) => u.id, 'suppressed');
       results.users = blockedIds.length
         ? users.filter((u) => !blockedIds.includes(String(u.id)))
         : users;
@@ -168,9 +170,10 @@ router.get('/', optionalAuthenticateToken, [
         sortBy: sort === 'popular' ? 'view_count' : 'created_at',
         sortOrder: sort === 'latest' ? 'DESC' : 'DESC'
       });
+      const visibleTweets = await shadowbanGate.hideRestricted(rawTweets, req.user?.id, (t) => t.user_id, 'suppressed');
       const tweets = blockedIds.length
-        ? rawTweets.filter((t) => !blockedIds.includes(String(t.user_id)))
-        : rawTweets;
+        ? visibleTweets.filter((t) => !blockedIds.includes(String(t.user_id)))
+        : visibleTweets;
 
       // AUDIT R1-05 (2026-08-19) : 5 requêtes + un décodage JWT complet PAR
       // TWEET (jusqu'à 250 requêtes + 50 vérifications HMAC bloquantes pour
@@ -321,9 +324,11 @@ router.get('/users', optionalAuthenticateToken, [
       limit: parseInt(limit),
       offset: parseInt(offset)
     });
+    // Un compte restreint n'est plus trouvable par les autres.
+    const visibleUsers = await shadowbanGate.hideRestricted(rawUsers, req.user?.id, (u) => u.id, 'suppressed');
     const users = blockedIds.length
-      ? rawUsers.filter((u) => !blockedIds.includes(String(u.id)))
-      : rawUsers;
+      ? visibleUsers.filter((u) => !blockedIds.includes(String(u.id)))
+      : visibleUsers;
 
     // Compter le total
     const totalCount = await User.count({
@@ -432,9 +437,11 @@ router.get('/tweets', optionalAuthenticateToken, [
       sortBy: sort === 'popular' ? 'view_count' : 'created_at',
       sortOrder: sort === 'latest' ? 'DESC' : 'DESC'
     });
+    const unrestricted = await shadowbanGate.hideRestricted(
+      fetchedTweets, req.user?.id, (t) => t.user_id, 'suppressed');
     const rawTweets = blockedIds.length
-      ? fetchedTweets.filter((t) => !blockedIds.includes(String(t.user_id)))
-      : fetchedTweets;
+      ? unrestricted.filter((t) => !blockedIds.includes(String(t.user_id)))
+      : unrestricted;
     const hasMore = rawTweets.length > requestedLimit;
     const tweets = rawTweets.slice(0, requestedLimit);
 
@@ -562,9 +569,11 @@ router.get('/tweets/authenticated', [
       sortBy: sort === 'popular' ? 'view_count' : 'created_at',
       sortOrder: sort === 'latest' ? 'DESC' : 'DESC'
     });
+    const unrestricted = await shadowbanGate.hideRestricted(
+      fetchedTweets, req.user?.id, (t) => t.user_id, 'suppressed');
     const rawTweets = blockedIds.length
-      ? fetchedTweets.filter((t) => !blockedIds.includes(String(t.user_id)))
-      : fetchedTweets;
+      ? unrestricted.filter((t) => !blockedIds.includes(String(t.user_id)))
+      : unrestricted;
     const hasMore = rawTweets.length > requestedLimit;
     const tweets = rawTweets.slice(0, requestedLimit);
 
@@ -780,15 +789,17 @@ router.get('/trending', [
         moderation_status: 'approved',
         parent_tweet_id: null // Exclure les réponses
       },
-      attributes: ['hashtags', 'created_at', 'view_count'],
+      attributes: ['hashtags', 'created_at', 'view_count', 'user_id'],
       order: [['created_at', 'DESC']],
       limit: 10000 // Limite élevée pour une bonne analyse
     });
+    // Un compte restreint ne fait pas monter un hashtag en tendance.
+    const trendTweets = await shadowbanGate.hideRestricted(recentTweets, null, (t) => t.user_id, 'monitoring');
 
     // Analyser les hashtags tendance
     const hashtagTrends = {};
-    recentTweets.forEach(tweet => {
-      tweet.hashtags.forEach(tag => {
+    trendTweets.forEach(tweet => {
+      (Array.isArray(tweet.hashtags) ? tweet.hashtags : []).forEach(tag => {
         if (!hashtagTrends[tag]) {
           hashtagTrends[tag] = {
             tag,

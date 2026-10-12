@@ -1,6 +1,7 @@
 const { DataTypes, Model } = require('sequelize');
 const axios = require('axios');
 const logger = require('../utils/logger');
+const shadowbanGate = require('../services/shadowbanGate');
 
 class Notification extends Model {
   // Méthode pour marquer la notification comme lue
@@ -88,6 +89,9 @@ class Notification extends Model {
   static async createNotification(data) {
     try {
       const { _skip_push, ...record } = data || {};
+      // Compte « ghosted » : ses j'aime, reposts, abonnements, mentions et
+      // réponses ne notifient plus personne — ni en base, ni en push.
+      if (await shadowbanGate.shouldMuteNotification(record)) return null;
       const notification = await this.create(record);
       logger.info(`Nouvelle notification créée: ${notification.id} pour l'utilisateur ${data.recipient_id}`);
 

@@ -86,6 +86,7 @@ const {
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
 const { toDecodableBuffer } = require('../services/heifDecoder');
 const rustClient = require('../services/rustRecommenderClient');
+const shadowbanGate = require('../services/shadowbanGate');
 const { filterVisibleTweets } = require('../utils/privateAccountVisibility');
 
 // Middleware de validation des erreurs
@@ -537,7 +538,8 @@ router.get('/onboarding/suggestions', [
 ], async (req, res) => {
   try {
     const limit = parseInt(req.query.limit, 10) || 12;
-    const suggestions = await UserFollow.getInfluentialSuggestions(req.user.id, limit);
+    const suggestions = await shadowbanGate.hideRestricted(
+      await UserFollow.getInfluentialSuggestions(req.user.id, limit), req.user.id, (u) => u.id, 'monitoring');
 
     res.json({
       success: true,
@@ -654,7 +656,9 @@ router.get('/suggestions', [
     const { limit = 10 } = req.query;
     const userId = req.user.id;
 
-    const suggestions = await UserFollow.getFollowSuggestions(userId, parseInt(limit));
+    // Un compte restreint, même légèrement, n'est plus suggéré.
+    const suggestions = await shadowbanGate.hideRestricted(
+      await UserFollow.getFollowSuggestions(userId, parseInt(limit)), userId, (u) => u.id, 'monitoring');
 
     res.json({
       success: true,

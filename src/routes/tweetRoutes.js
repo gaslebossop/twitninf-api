@@ -21,6 +21,7 @@ const { assertTweetLength } = require('../utils/tweetLimits');
 const tweetTranslationService = require('../services/tweetTranslationService');
 const spotifyService = require('../services/spotifyService');
 const paidContentService = require('../services/paidContentService');
+const shadowbanGate = require('../services/shadowbanGate');
 const { requireContentAccess, assertAccessible } = require('../middleware/paidContentAccess');
 const tweetEditService = require('../services/tweetEditService');
 const TweetRecommendationService = require('../services/tweetRecommendationService');
@@ -1053,6 +1054,11 @@ router.get('/:id', [
     // série pour chacune. On agrège maintenant les cinq mêmes informations
     // pour toutes les réponses d'un coup : cinq requêtes au total, lancées en
     // parallèle. Le rendu est identique, seul le nombre d'allers-retours change.
+    // Réponses d'un compte restreint : invisibles pour les autres.
+    if (Array.isArray(enrichedTweet.replies) && enrichedTweet.replies.length > 0) {
+      enrichedTweet.replies = await shadowbanGate.hideRestricted(
+        enrichedTweet.replies, userId, (r) => r.user_id || r.author?.id, 'suppressed');
+    }
     if (Array.isArray(enrichedTweet.replies) && enrichedTweet.replies.length > 0) {
       const replyIds = enrichedTweet.replies.map((r) => String(r.id));
 
@@ -3415,13 +3421,14 @@ router.get('/:id/retweets', [
       }
 
       // Récupérer les réponses
-      const replies = await Tweet.findAll({
+      // Les réponses d'un compte restreint ne sont plus lues que par lui.
+      const replies = await shadowbanGate.hideRestricted(await Tweet.findAll({
         where: whereClause,
         include: inclusions,
         order: orderClause,
         limit: parseInt(limit),
         offset: parseInt(offset)
-      });
+      }), userId, (r) => r.user_id, 'suppressed');
 
       // Enrichir les réponses avec les statistiques et l'état des interactions.
       //
