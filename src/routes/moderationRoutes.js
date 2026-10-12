@@ -565,6 +565,9 @@ router.post('/unban-tickets',
   moderationController.createUnbanTicket
 );
 
+// Dernière demande de l'utilisateur connecté — avant les routes admin.
+router.get('/unban-tickets/mine', moderationController.getMyUnbanTicket);
+
 // Liste des tickets d'unban (Admin seulement)
 router.get('/unban-tickets',
   requireAdminRole,

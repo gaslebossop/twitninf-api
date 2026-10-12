@@ -173,7 +173,26 @@ async function notifySanctionLifted(userId, { kind = 'suspension' } = {}) {
   }, 'levée de sanction');
 }
 
+/** Demande de levée refusée : la sanction reste, et la personne le sait. */
+async function notifyUnbanRejected(userId, { notes } = {}) {
+  if (!userId) return false;
+
+  return safeCreate({
+    recipient_id: userId,
+    sender_id: null,
+    type: 'system',
+    title: 'Demande de levée refusée',
+    message: notes
+      ? `Votre sanction est maintenue : ${notes}`
+      : 'Votre sanction est maintenue après réexamen.',
+    content: { kind: 'unban_rejected', reason: notes || null, appealable: false },
+    priority: 'high',
+    metadata: { source: 'moderation', action: 'unban_rejected' },
+  }, 'refus de levée');
+}
+
 module.exports = {
+  notifyUnbanRejected,
   notifyContentRemoved,
   notifyAccountSuspended,
   notifyAccountBanned,

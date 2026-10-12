@@ -3087,6 +3087,21 @@ class ModerationController {
     }
   }
 
+  // Dernière demande de levée de l'utilisateur connecté (pour suivre son état).
+  async getMyUnbanTicket(req, res) {
+    try {
+      const ticket = await UnbanTicket.findOne({
+        where: { user_id: req.user.id },
+        order: [['created_at', 'DESC']],
+        attributes: ['id', 'reason', 'status', 'admin_notes', 'created_at', 'processed_at']
+      });
+      res.json({ success: true, data: { ticket } });
+    } catch (error) {
+      logger.error('Erreur lors de la lecture du ticket d\'unban:', error);
+      res.status(500).json({ success: false, message: 'Erreur lors de la lecture de la demande' });
+    }
+  }
+
   // Obtenir tous les tickets d'unban (Admins)
   async getUnbanTickets(req, res) {
     try {
@@ -3187,12 +3202,17 @@ class ModerationController {
             target_type: 'user',
             target_id: user.id,
             moderator_id: admin_id,
-            reason: 'Unban ticket approved: ' + admin_notes,
-            status: 'reversed'
+            reason: admin_notes ? `Demande de levée acceptée : ${admin_notes}` : 'Demande de levée acceptée',
+            status: 'reversed',
+            metadata: { action_type: 'unban', ticket_id: ticket.id }
           });
 
           logger.info(`Utilisateur ${user.username} débanni via ticket d'unban`);
+          // Sans ce retour, la personne ne savait pas qu'elle pouvait revenir.
+          await modNotif.notifySanctionLifted(user.id, { kind: 'ban' });
         }
+      } else if (status === 'rejected' && ticket.user_id) {
+        await modNotif.notifyUnbanRejected(ticket.user_id, { notes: admin_notes || null });
       }
 
       res.json({
