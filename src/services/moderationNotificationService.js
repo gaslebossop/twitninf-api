@@ -45,7 +45,10 @@ function formatUntil(date) {
  */
 async function safeCreate(payload, label) {
   try {
-    await Notification.create(payload);
+    // `createNotification`, pas `create` : c'est lui qui envoie le push (web
+    // et mobile). Avec `create`, une sanction ou sa levée n'apparaissait que
+    // dans la liste, et la personne ne l'apprenait qu'en ouvrant l'app.
+    await Notification.createNotification(payload);
     return true;
   } catch (e) {
     logger.warn(`[modNotif] ${label} non envoyée: ${e.message}`);
