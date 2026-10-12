@@ -1844,15 +1844,21 @@ class ModerationController {
         });
       }
 
-      // Créer une entrée dans la table moderation_actions
+      // Créer une entrée dans la table moderation_actions.
+      // `type` est un ENUM (ban, suspend, delete, warn, approve, reject) :
+      // 'mark_not_eligible' n'y figure pas et faisait échouer l'insertion
+      // (500 systématique). Même convention que la certification
+      // ('approve' + metadata.action_type 'verify') : le type de base le plus
+      // proche, et l'action exacte dans `metadata.action_type`.
       await ModerationAction.create({
-        type: 'mark_not_eligible',
+        type: 'reject',
         target_type: 'tweet',
         target_id: tweetId,
         moderator_id: moderatorId,
         reason,
         status: 'active',
         metadata: {
+          action_type: 'mark_not_eligible',
           original_status: tweet.moderation_status,
           original_tweet_content: (tweet.content || '').substring(0, 100)
         }
