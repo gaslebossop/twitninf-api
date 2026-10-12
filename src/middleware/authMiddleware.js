@@ -3,6 +3,22 @@ const logger = require('../utils/logger');
 const User = require('../models/User');
 const { isTrustedFirstPartyClient } = require('./fraudMiddleware');
 
+/**
+ * Recopie l'état de sanction lu en base sur les claims du jeton. Une base
+ * injoignable ne doit pas couper l'authentification : on garde alors le jeton
+ * tel quel (même comportement qu'avant).
+ */
+async function withFreshBanState(decoded) {
+  try {
+    const { freshBanState } = require('./globalBanMiddleware');
+    const state = await freshBanState(decoded?.id);
+    return state ? { ...decoded, ...state } : decoded;
+  } catch (e) {
+    logger.warn('État de sanction illisible, jeton conservé:', e?.message || e);
+    return decoded;
+  }
+}
+
 // Middleware pour vérifier l'authentification
 const authenticateToken = async (req, res, next) => {
   try {
@@ -25,8 +41,9 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
-    // Ajouter les informations utilisateur à la requête
-    req.user = decoded;
+    // Ajouter les informations utilisateur à la requête, avec l'état de
+    // sanction RÉEL (voir `freshBanState`) au lieu de celui figé dans le jeton.
+    req.user = await withFreshBanState(decoded);
     next();
   } catch (error) {
     logger.error('Erreur d\'authentification:', error);
@@ -58,7 +75,7 @@ const optionalAuthenticateToken = async (req, res, next) => {
     }
 
     // Ajouter les informations utilisateur à la requête
-    req.user = decoded;
+    req.user = await withFreshBanState(decoded);
     next();
   } catch (error) {
     logger.error('Erreur d\'authentification optionnelle:', error);

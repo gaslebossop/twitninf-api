@@ -82,7 +82,7 @@ async function evaluateUserStatus(userId) {
 
   const User = require('../models/User');
   const user = await User.findByPk(userId, {
-    attributes: ['id', 'username', 'is_suspended', 'suspended_until', 'ban_count', 'is_active'],
+    attributes: ['id', 'username', 'is_suspended', 'suspended_until', 'suspension_reason', 'ban_count', 'is_active'],
   });
 
   let value;
@@ -115,8 +115,33 @@ async function evaluateUserStatus(userId) {
     value = { blocked: false };
   }
 
+  // État brut, relu en base : `authenticateToken` le recopie sur `req.user`
+  // à la place des valeurs figées dans le JWT.
+  if (user) {
+    const until = user.suspended_until ? new Date(user.suspended_until) : null;
+    const expired = !!(user.is_suspended && until && until < new Date());
+    value.state = {
+      is_suspended: !!user.is_suspended && !expired,
+      suspended_until: expired ? null : user.suspended_until,
+      suspension_reason: expired ? null : user.suspension_reason,
+      ban_count: user.ban_count || 0,
+    };
+  }
+
   setCached(userId, { value });
   return value;
+}
+
+/**
+ * État de sanction frais (cache ≤ 30 s) d'un utilisateur, ou null.
+ * Le JWT dure 7 jours et fige `is_suspended` au moment de son émission :
+ * un compte débanni gardait « Action non autorisée - Compte banni » sur
+ * chaque publication jusqu'au renouvellement de son jeton.
+ */
+async function freshBanState(userId) {
+  if (userId == null) return null;
+  const value = await evaluateUserStatus(String(userId));
+  return value.state || null;
 }
 
 const globalBanCheck = async (req, res, next) => {
@@ -181,4 +206,5 @@ const globalBanCheck = async (req, res, next) => {
 module.exports = {
   globalBanCheck,
   invalidateUser,
+  freshBanState,
 };
