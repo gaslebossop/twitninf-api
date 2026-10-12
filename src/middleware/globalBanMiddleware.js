@@ -35,6 +35,12 @@ const ALLOWED_PREFIXES = [
   '/api/ping',
 ];
 
+// Routes de contestation, ouvertes aux comptes sanctionnés (méthode + chemin exacts).
+const APPEAL_ROUTES = [
+  ['POST', '/api/moderation/unban-tickets'],
+  ['GET', '/api/moderation/unban-tickets/mine'],
+];
+
 // Cache mémoire { userId -> { blocked, info, exp } } pour borner la charge DB.
 // TTL court : une bascule de ban prend effet en ≤ TTL (au lieu de 7 jours).
 const STATUS_TTL_MS = 30 * 1000;
@@ -121,6 +127,13 @@ const globalBanCheck = async (req, res, next) => {
     // req.path (qui vaudrait '/auth/login'), ce qui ferait échouer le match.
     const fullPath = (req.originalUrl || req.path || '').split('?')[0];
     if (ALLOWED_PREFIXES.some((p) => fullPath.startsWith(p))) {
+      return next();
+    }
+    // Contester sa sanction doit rester possible : sans ça, un compte banni ne
+    // pouvait ni envoyer de demande de levée, ni suivre la sienne (403
+    // « compte suspendu » sur la route même qui sert à en sortir). Méthode et
+    // chemin exacts : la liste et le traitement des demandes restent fermés.
+    if (APPEAL_ROUTES.some(([method, path]) => req.method === method && fullPath === path)) {
       return next();
     }
 
