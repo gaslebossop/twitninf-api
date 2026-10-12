@@ -30,7 +30,12 @@
 const { QueryTypes } = require('sequelize');
 const { isUltraRequest } = require('../utils/ultraGate');
 
-const SHARING_MODES = ['ghost', 'city', 'precise'];
+/**
+ * Deux modes seulement : invisible ou position précise. « Ville » a été
+ * retiré ; les anciens clients qui l'envoient encore passent en fantôme
+ * (voir `updateSettings`), et les comptes qui l'avaient ont été basculés.
+ */
+const SHARING_MODES = ['ghost', 'precise'];
 
 /**
  * Qui peut me voir, du plus fermé au plus ouvert :
@@ -116,19 +121,11 @@ function positionForMode(mode, latitude, longitude) {
 /**
  * Réglages de l'appelant.
  *
- * ── Le défaut est « ville », plus « fantôme » ─────────────────────────────
- * Un compte sans ligne n'a jamais ouvert les réglages de la carte. Il était
- * jusqu'ici invisible, ce qui rendait la carte vide pour presque tout le
- * monde : au moment du changement, 3 502 comptes sur 3 550 n'avaient aucune
- * ligne, et AUCUN n'avait explicitement choisi « fantôme ».
- *
- * Le défaut est donc « ville » : visible, mais à la précision d'une grille de
- * quartier — jamais la position exacte. Celle-ci reste un choix délibéré, que
- * 37 comptes ont fait.
- *
- * ⚠️ C'est un changement de VISIBILITÉ pour des gens qui n'ont rien demandé.
- * Il est assumé et décidé côté produit ; il ne touche aucun choix explicite,
- * puisqu'il n'en existait aucun dans l'autre sens.
+ * ── Le défaut est « fantôme » ───────────────────────────────────────────────
+ * Un compte sans ligne n'a jamais ouvert les réglages : il reste invisible
+ * tant qu'il n'a pas choisi « position précise ». Le défaut « ville »
+ * (backfill de 3 502 comptes) a été retiré avec ce mode : ces comptes ont
+ * été rebasculés en fantôme, position effacée.
  */
 async function getSettings(sequelize, userId) {
   const [row] = await sequelize.query(
@@ -139,7 +136,7 @@ async function getSettings(sequelize, userId) {
 
   if (!row) {
     return {
-      sharing_mode: 'city',
+      sharing_mode: 'ghost',
       audience: 'connections',
       shared_at: null,
       expires_at: null,
@@ -149,6 +146,8 @@ async function getSettings(sequelize, userId) {
       is_live: false,
     };
   }
+
+  if (row.sharing_mode === 'city') row.sharing_mode = 'ghost';
 
   return {
     sharing_mode: row.sharing_mode,
@@ -186,7 +185,8 @@ async function getSettings(sequelize, userId) {
  * invisible doit retirer la donnée, sinon « invisible » ne veut dire qu'« pas
  * affiché pour l'instant ».
  */
-async function updateSettings(sequelize, userId, { sharing_mode: mode, audience }) {
+async function updateSettings(sequelize, userId, { sharing_mode: requested, audience }) {
+  const mode = requested === 'city' ? 'ghost' : requested;
   if (mode !== undefined && !SHARING_MODES.includes(mode)) {
     throw new Error('Mode de partage inconnu');
   }
@@ -196,7 +196,7 @@ async function updateSettings(sequelize, userId, { sharing_mode: mode, audience 
 
   await sequelize.query(
     `INSERT INTO nf_map_presence (user_id, sharing_mode, audience, created_at, updated_at)
-     VALUES (:userId, COALESCE(:mode, 'city'), COALESCE(:audience, 'connections'), NOW(), NOW())
+     VALUES (:userId, COALESCE(:mode, 'ghost'), COALESCE(:audience, 'connections'), NOW(), NOW())
      ON CONFLICT (user_id) DO UPDATE SET
        sharing_mode = COALESCE(:mode, nf_map_presence.sharing_mode),
        audience = COALESCE(:audience, nf_map_presence.audience),
@@ -340,7 +340,7 @@ async function nearby(sequelize, viewerId, bounds) {
       -- visible : les deux lignes ci-dessous suffisent deja a exclure les
       -- fantomes, et clearPresence comme le passage en fantome mettent
       -- latitude a NULL.
-      WHERE p.sharing_mode <> 'ghost'
+      WHERE p.sharing_mode = 'precise'
         AND p.latitude IS NOT NULL
         -- Filtré à la LECTURE, en plus de la purge : le worker ne passe que
         -- toutes les quinze minutes, et une position périmée ne doit pas
@@ -414,7 +414,7 @@ async function connections(sequelize, viewerId) {
             -- Plus d'echeance : une position connue reste valable jusqu'a
             -- son remplacement (voir nearby).
             (p.sharing_mode IS NOT NULL
-             AND p.sharing_mode <> 'ghost'
+             AND p.sharing_mode = 'precise'
              AND p.latitude IS NOT NULL)       AS is_sharing,
             EXISTS (
               SELECT 1 FROM user_follows f
