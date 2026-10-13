@@ -51,6 +51,39 @@ const upload = multer({
 });
 
 /**
+ * Vrai si la vidéo peut être servie TELLE QUELLE, après un simple remux.
+ *
+ * L'app iOS exporte elle-même en H.264 1080×1920, 30 i/s, ~6 Mbit/s, AAC
+ * (voir `VideoExporter.swift`). Réencoder ce fichier coûtait des dizaines de
+ * secondes de CPU au VPS — c'était l'attente « Traitement de la vidéo… » — et
+ * le RABAISSAIT en 720p, deuxième génération de compression en prime. On ne
+ * réencode donc plus que ce qui en a besoin : codec exotique, image trop
+ * grande, débit trop lourd, rotation à appliquer, ou habillage à incruster.
+ */
+function isServable(metadata) {
+  const streams = metadata.streams || [];
+  const v = streams.find((s) => s.codec_type === 'video');
+  const a = streams.find((s) => s.codec_type === 'audio');
+  if (!v) return false;
+
+  const rotation = Number(v.tags?.rotate || 0)
+    || Number((v.side_data_list || []).find((d) => d.rotation !== undefined)?.rotation || 0);
+  const [num, den] = String(v.r_frame_rate || '0/1').split('/').map(Number);
+  const fps = den ? num / den : 0;
+  const bitrate = Number(metadata.format?.bit_rate || 0);
+  const duration = Number(metadata.format?.duration || 0);
+
+  return v.codec_name === 'h264'
+    && v.pix_fmt === 'yuv420p'
+    && rotation === 0
+    && v.width <= 1080 && v.height <= 1920 && v.height >= v.width
+    && fps > 0 && fps <= 31
+    && duration > 0 && duration <= 60.5
+    && bitrate > 0 && bitrate <= 10_000_000
+    && (!a || a.codec_name === 'aac');
+}
+
+/**
  * Service pour la gestion des vidéos
  */
 class VideoService {
@@ -104,7 +137,16 @@ class VideoService {
           ? videoEditService.buildVideoFilters(editSpec, targetDir, videoId)
           : [];
 
-        let command = ffmpeg(inputPath)
+        // Chemin rapide : fichier déjà conforme et rien à incruster → remux
+        // sans réencodage (quelques secondes au lieu de dizaines).
+        const fast = !editSpec && isServable(metadata);
+        if (fast) logger.info(`⚡ Vidéo ${videoId} déjà conforme : remux sans réencodage`);
+
+        let command = fast
+          ? ffmpeg(inputPath)
+            .format('mp4')
+            .outputOptions(['-map 0:v:0', '-map 0:a:0?', '-c copy', '-movflags +faststart'])
+          : ffmpeg(inputPath)
           .format('mp4')
           .videoCodec('libx264')
           .audioCodec('aac')
@@ -130,12 +172,12 @@ class VideoService {
 
         // Couper le son se fait ici, à l'encodage : supprimer la piste après
         // coup demanderait un remux de plus, pour le même résultat.
-        if (editSpec && editSpec.muted) {
+        if (!fast && editSpec && editSpec.muted) {
           command = command.noAudio();
         }
 
         // Limiter à 60 secondes max uniquement si nécessaire
-        if (exactDuration > 60) {
+        if (!fast && exactDuration > 60) {
           command = command.setDuration(60);
           targetDuration = 60;
         }
@@ -216,6 +258,7 @@ class VideoService {
 }
 
 module.exports = {
+  isServable,
   upload,
   videoService: new VideoService(),
   STORAGE_DIR
