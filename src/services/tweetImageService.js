@@ -30,6 +30,7 @@ const sharp = require('sharp');
 const { v4: uuidv4 } = require('uuid');
 
 const { buildStaticMediaPublicUrl, getPublicMediaOrigin } = require('../utils/publicMediaOrigin');
+const objectStorage = require('./objectStorage');
 const { toDecodableBuffer } = require('./heifDecoder');
 
 /** Servi par `app.use('/static', express.static(src/public))`. */
@@ -105,7 +106,7 @@ async function storeUploadedImage(buffer, userId, { isUltra = false } = {}) {
     .jpeg({ quality, mozjpeg: true })
     .toFile(outputPath);
 
-  return buildStaticMediaPublicUrl('tweets', filename);
+  return objectStorage.publish(outputPath, 'tweets', filename, { contentType: 'image/jpeg' });
 }
 
 /**
@@ -124,14 +125,18 @@ async function storeUploadedImage(buffer, userId, { isUltra = false } = {}) {
 function sanitizeMediaUrls(mediaUrls, { maxImages = MAX_IMAGES_PER_TWEET } = {}) {
   if (!Array.isArray(mediaUrls)) return [];
 
-  const prefix = `${getPublicMediaOrigin().replace(/\/$/, '')}/static/tweets/`;
+  // Deux origines légitimes : R2 (envois actuels) et le disque (anciens).
+  const prefixes = [
+    `${getPublicMediaOrigin().replace(/\/$/, '')}/static/tweets/`,
+    objectStorage.publicPrefix('tweets'),
+  ].filter(Boolean);
 
   return mediaUrls
     .filter((url) => typeof url === 'string')
     .map((url) => url.trim())
-    .filter((url) => url.startsWith(prefix))
+    .filter((url) => prefixes.some((p) => url.startsWith(p)))
     // Un `..` dans le nom de fichier remonterait hors du dossier servi.
-    .filter((url) => !url.slice(prefix.length).includes('/'))
+    .filter((url) => !url.slice(prefixes.find((p) => url.startsWith(p)).length).includes('/'))
     .filter((url) => !url.includes('..'))
     .slice(0, maxImages);
 }

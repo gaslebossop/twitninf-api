@@ -20,6 +20,7 @@ const {
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const { toDecodableBuffer } = require('../services/heifDecoder');
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
+const objectStorage = require('../services/objectStorage');
 const logger = require('../utils/logger');
 const { isUltraRequest, ultraLimit } = require('../utils/ultraGate');
 
@@ -567,7 +568,8 @@ router.post('/', [authenticateToken, denySuspended, upload.single('media')], asy
         .toFile(outputPath);
     }
 
-    const mediaUrl = buildStaticMediaPublicUrl('stories', filename);
+    const mediaUrl = await objectStorage.publish(outputPath, 'stories', filename,
+      { contentType: isVideo ? req.file.mimetype : 'image/jpeg' });
     const isUltra = await isUltraRequest(req.user);
     const captionMax = isUltra ? CAPTION_MAX_ULTRA : CAPTION_MAX;
     const caption = typeof req.body?.caption === 'string'

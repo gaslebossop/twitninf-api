@@ -16,6 +16,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
 const { buildStaticMediaPublicUrl, getPublicMediaOrigin } = require('../utils/publicMediaOrigin');
+const objectStorage = require('./objectStorage');
 
 /** Servi par `app.use('/static', express.static(src/public))`. */
 const TWEET_AUDIO_DIR = path.join(__dirname, '../public/audio');
@@ -69,7 +70,7 @@ async function storeUploadedAudio(buffer, userId, mimetype) {
 
   await fs.promises.writeFile(outputPath, buffer);
 
-  return buildStaticMediaPublicUrl('audio', filename);
+  return objectStorage.publish(outputPath, 'audio', filename, { contentType: mimetype });
 }
 
 /**
@@ -83,10 +84,14 @@ async function storeUploadedAudio(buffer, userId, mimetype) {
 function sanitizeAudioUrl(audioUrl) {
   if (typeof audioUrl !== 'string') return null;
 
-  const prefix = `${getPublicMediaOrigin().replace(/\/$/, '')}/static/audio/`;
+  // Deux origines légitimes : R2 (envois actuels) et le disque (anciens).
   const url = audioUrl.trim();
+  const prefix = [
+    `${getPublicMediaOrigin().replace(/\/$/, '')}/static/audio/`,
+    objectStorage.publicPrefix('audio'),
+  ].filter(Boolean).find((p) => url.startsWith(p));
 
-  if (!url.startsWith(prefix)) return null;
+  if (!prefix) return null;
   const rest = url.slice(prefix.length);
   if (!rest || rest.includes('/') || rest.includes('..')) return null;
 

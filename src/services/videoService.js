@@ -7,6 +7,7 @@ const logger = require('../utils/logger');
 const videoEditService = require('./videoEditService');
 const { sequelize } = require('../database');
 const { getPublicMediaOrigin } = require('../utils/publicMediaOrigin');
+const objectStorage = require('./objectStorage');
 
 // Dossier cible pour le stockage (dans le code API)
 const STORAGE_DIR = path.join(__dirname, '../../storage');
@@ -209,7 +210,7 @@ class VideoService {
                 folder: targetDir,
                 size: '320x?'
               })
-              .on('end', () => {
+              .on('end', async () => {
                 logger.info(`✅ Thumbnail généré pour ${videoId}`);
                 
                 // Supprimer le fichier d'origine temporaire
@@ -223,20 +224,28 @@ class VideoService {
                 // côté client, qui a besoin d'un schéma + hôte pour aller chercher
                 // le fichier sur le réseau — c'est resté en chemin relatif jusqu'ici,
                 // d'où une vidéo/miniature qui ne charge jamais.
+                // Vidéo et miniature partent sur R2 (repli : disque, comme avant).
+                const [publicUrl, publicThumbnailUrl] = await Promise.all([
+                  objectStorage.publish(outputPath, 'videos', fileName,
+                    { localUrl: objectStorage.storageUrl(fileName), contentType: 'video/mp4' }),
+                  objectStorage.publish(thumbnailPath, 'videos', thumbName,
+                    { localUrl: objectStorage.storageUrl(thumbName), contentType: 'image/jpeg' }),
+                ]);
                 resolve({
                   videoPath: outputPath,
-                  publicUrl: `${getPublicMediaOrigin()}/storage/${fileName}`,
+                  publicUrl,
                   thumbnailPath: thumbnailPath,
-                  publicThumbnailUrl: `${getPublicMediaOrigin()}/storage/${thumbName}`,
+                  publicThumbnailUrl,
                   duration: targetDuration
                 });
               })
-              .on('error', (screenshotErr) => {
+              .on('error', async (screenshotErr) => {
                 logger.error('Erreur génération thumbnail:', screenshotErr);
                 // On résout quand même si la vidéo a marché
                 resolve({
                   videoPath: outputPath,
-                  publicUrl: `${getPublicMediaOrigin()}/storage/${fileName}`,
+                  publicUrl: await objectStorage.publish(outputPath, 'videos', fileName,
+                    { localUrl: objectStorage.storageUrl(fileName), contentType: 'video/mp4' }),
                   thumbnailPath: null,
                   publicThumbnailUrl: null,
                   duration: targetDuration

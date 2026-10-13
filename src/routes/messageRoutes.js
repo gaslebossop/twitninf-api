@@ -10,6 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
 const { authenticateToken, denySuspended } = require('../middleware/authMiddleware');
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
+const objectStorage = require('../services/objectStorage');
 const { isSingleEmoji } = require('../utils/emoji');
 const {
   sequelize,
@@ -1876,7 +1877,8 @@ router.post(
           .toFile(outputPath);
       }
 
-      const attachmentUrl = buildStaticMediaPublicUrl('messages', filename);
+      const attachmentUrl = await objectStorage.publish(outputPath, 'messages', filename,
+        { contentType: isAudio ? req.file.mimetype : 'image/jpeg' });
       const content = isAudio ? '🎤 Message vocal' : '📷 Photo';
       const metadata = {
         attachment_url: attachmentUrl,

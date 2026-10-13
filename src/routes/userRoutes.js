@@ -84,6 +84,7 @@ const {
 } = require('../utils/profileCustomization');
 
 const { buildStaticMediaPublicUrl } = require('../utils/publicMediaOrigin');
+const objectStorage = require('../services/objectStorage');
 const { toDecodableBuffer } = require('../services/heifDecoder');
 const rustClient = require('../services/rustRecommenderClient');
 const shadowbanGate = require('../services/shadowbanGate');
@@ -1855,7 +1856,7 @@ router.post('/me/avatar', [
       .jpeg({ quality: 85 })
       .toFile(outputPath);
 
-    const publicUrl = buildStaticMediaPublicUrl('avatars', filename);
+    const publicUrl = await objectStorage.publish(outputPath, 'avatars', filename);
 
     // Mettre à jour l'utilisateur
     const user = await User.findByPk(userId);
@@ -1917,7 +1918,7 @@ router.post('/me/banner', [
       .jpeg({ quality: 82 })
       .toFile(outputPath);
 
-    const publicUrl = buildStaticMediaPublicUrl('banners', filename);
+    const publicUrl = await objectStorage.publish(outputPath, 'banners', filename);
 
     const user = await User.findByPk(userId);
     if (!user) {
